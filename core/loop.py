@@ -150,9 +150,9 @@ def with_todos(system_prompt: str, memory: ConversationMemory) -> str:
     function feeds pass_prompt(), so a checklist written in a chat session
     would land in all ten passes of a research run the user started
     separately -- §19's K6, FOURTH instance, after §21b's memories (M13) and
-    §21c's refs (M19). Four copies of one warning is why the convergence of
-    these four functions is now a recorded deferral rather than a docstring
-    aside (J11).
+    §21c's refs (M19). Four copies of one warning made the convergence a
+    recorded deferral (J11); since batch 227 every tier is appended by
+    session_tiers, and SESSION_TIERS is the list the boundary test pins.
 
     THE MODEL IS TOLD IT OWNS THIS. Unlike a memory or a reference, which
     are context the model reads, the todo list is state the model WRITES --
@@ -180,11 +180,10 @@ def with_memories(system_prompt: str, agent=None) -> str:
     """Append §21b's durable-memory tier to a prompt. No-op when this run
     is opted out or nothing is in scope.
 
-    Beside with_goal for the same reason: both shells assemble a plain-chat
-    prompt themselves, so a single named function is what stops the CLI and
-    the TUI drifting apart. §23's response channel is where all three of
-    these (goal, skills, memories) should eventually converge into one
-    assembly point rather than three parallel ones.
+    Beside with_goal for the same reason: a single named function is what
+    stops the CLI and the TUI drifting apart. Both reach it through
+    session_tiers now (batch 227), which applies it only when no agent
+    built the prompt -- an agent's memories arrive in system_prompt_for().
 
     MUST NOT move inside prompts.system_prompts.with_catalogs() -- that
     feeds pass_prompt(), so memories would land in all ten research passes.
@@ -285,6 +284,58 @@ def with_file_mentions(system_prompt: str, memory: ConversationMemory, *,
         "no additional file access; normal tool permissions and approvals apply.\n"
         + "\n".join("- " + json.dumps(path, ensure_ascii=False) for path in paths))
     return f"{system_prompt}\n\n{fragment}"
+
+
+#: The tiers a conversation turn appends after its base prompt, in the
+#: order `session_tiers` appends them (#9, J11, A80). Each is thread or
+#: session state, so none may move inside
+#: prompts.system_prompts.with_catalogs(), which feeds pass_prompt(): §19's
+#: K6. The BASE is not a tier -- the persona and the catalogs, and for an
+#: agent its body and the project hub, which system_prompt_for() composes.
+#: tests/test_prompt_tier_boundary.py keeps a canary for every name here.
+SESSION_TIERS = ("goal", "memories", "refs", "todos", "file_mentions",
+                 "skill_bodies")
+
+
+def session_tiers(system_prompt: str, memory: ConversationMemory, *,
+                  agent_built: bool, mentions: bool = True,
+                  mention_text: str | None = None, active_skills=()) -> str:
+    """Every session tier, in SESSION_TIERS' order: the ONE assembly a
+    conversation prompt takes, in either shell (#9, J11, A80).
+
+    Three call sites assembled this by hand -- a loop turn, a TUI turn and
+    the TUI's one-shot -- in the same order, with the memories guard
+    spelled three ways. They call this now, and the guard is one argument.
+
+    `agent_built` IS THE LOAD-BEARING DIFFERENCE, and the reason this takes
+    a flag rather than making every tier conditional alike. An agent's
+    prompt got its memories inside system_prompt_for() (§21b, M13), so
+    appending them here would duplicate them. Refs, the checklist and the
+    goal are thread state, not an agent's opt-in, so an agent-built prompt
+    needs them too, and system_prompt_for() has no memory to read them
+    from (§21c, M19). Making them conditional "like the line above" is the
+    edit that looks right and drops every attached reference.
+
+    `mentions` is off for an internal compaction or review turn: its
+    source material is not a person's file-mention request (§54 AT7).
+    `mention_text` is the one-shot's message, which is not written to the
+    thread until its worker runs.
+
+    Active skill bodies go LAST on purpose (§19 K1): an activated skill is
+    the most specific instruction the user has given, and should read as
+    governing what precedes it. The CLI has none to pass.
+    """
+    from skills.manager import manager as skills
+
+    prompt = with_goal(system_prompt, memory)
+    if not agent_built:
+        prompt = with_memories(prompt)
+    prompt = with_refs(prompt, memory)
+    prompt = with_todos(prompt, memory)
+    if mentions:
+        prompt = with_file_mentions(prompt, memory, text=mention_text)
+    fragment = skills.prompt_fragment(list(active_skills or ()))
+    return f"{prompt}\n\n{fragment}" if fragment else prompt
 
 
 def attach_ref(memory: ConversationMemory, thread_id, summary: str,
@@ -2332,32 +2383,18 @@ class RunAgentLoop:
         # #68, and this branch is the one an unattended CLI run takes.
         _callable_only, _granted = advertisement_facts(
             authorization, response_channel, granted_tools)
-        prompt = with_goal(
-            system_prompt
-            if system_prompt is not None
-            else system_prompts.with_catalogs(
-                with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
-                callable_only=_callable_only,
-                granted=_granted),
-            memory,
-        )
-        # §21b (M13). Only when there is no agent-built prompt: an agent
-        # run got its memories inside system_prompt_for(), and appending
-        # again here would duplicate them. `agent=None` is what makes a
-        # plain chat turn count as opted in -- see memories.manager.
-        if system_prompt is None:
-            prompt = with_memories(prompt)
-        # §21c. UNCONDITIONAL, unlike memories above: a reference belongs to
-        # the thread, not to an agent, so an agent-built prompt needs it too --
-        # and system_prompt_for() has no memory to read it from.
-        prompt = with_refs(prompt, memory)
-        # §23 slice 2. Unconditional too, and for with_refs' reason: a
-        # checklist is thread state, so an agent-built prompt needs it.
-        prompt = with_todos(prompt, memory)
-        # §54 AT7: internal compaction/review also use this wrapper, but
-        # their source material is not a person's file-mention request.
-        return (with_file_mentions(prompt, memory)
-                if memory.kind == THREAD_KIND_CHAT else prompt)
+        base = (system_prompt if system_prompt is not None
+                else system_prompts.with_catalogs(
+                    with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
+                    callable_only=_callable_only,
+                    granted=_granted))
+        # A system_prompt handed in is an agent's, built by
+        # system_prompt_for(); see session_tiers for why that decides the
+        # memories. §54 AT7: internal compaction and review also use this
+        # wrapper, and their source is not a person's file mention.
+        return session_tiers(base, memory,
+                             agent_built=system_prompt is not None,
+                             mentions=memory.kind == THREAD_KIND_CHAT)
 
     @staticmethod
     def wake_conversation(

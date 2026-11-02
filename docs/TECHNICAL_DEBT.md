@@ -896,7 +896,7 @@ defect found.
   asserts and production carries zero (measured). If production ever
   gains an `assert`, that skip starts hiding exactly what it is for.
 
-## 19. `with_goal` uncounted in the `with_*` tier convergence (open, deferred 2026-09-10)
+## 19. `with_goal` uncounted in the `with_*` tier convergence (closed, batch 227 -- six tiers, one assembly, ROADMAP_v3 §85, A80)
 
 `core/loop.py` assembles five prompt tiers outside `with_catalogs()`
 (`with_goal`, `with_catalogs`, `with_memories`, `with_refs`, `with_todos`),
@@ -963,6 +963,18 @@ of the four carries a `MUST NOT move inside prompts.system_prompts.with_catalogs
 docstring naming its own instance, and `memories/manager.py:24`,
 `skills/manager.py:119` and `project_init/manifest.py:20` repeat it from the
 other side.
+
+**CLOSED (batch 227, #9, ROADMAP_v3 §85, A80).** The owner answered the
+question this entry was waiting on: a tier is thread or session state, and
+there are six -- goal, memories, refs, todos, file mentions and active skill
+bodies. The persona joins the base, with the catalogs, an agent's body and the
+project hub. `core.loop.session_tiers` appends the six at all three call sites
+(a loop turn, a TUI turn, the TUI's one-shot), and the memories guard, spelled
+three ways, is one `agent_built` argument. The tier pin this entry deferred is
+`TIER_CANARY` in `test_prompt_tier_boundary.py`, which must name exactly
+`SESSION_TIERS`; the canary table gained the persona and a file mention. The
+AGENTS bullet and the J11 row moved together, as this entry asked, and
+"FOURTH instance" stays: it counts the numbered K6 instances, not tiers.
 
 ## 20. Restart-required config editor (closed, batch 84)
 

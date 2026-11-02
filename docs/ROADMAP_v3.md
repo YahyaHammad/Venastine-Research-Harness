@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§85. Six prompt tiers, one assembly** - **(BUILT in batch 227)** (three call sites appended the same thread and session tiers by hand, with the memories guard spelled three ways and the boundary test's canaries two members short. `core.loop.session_tiers` appends all six, the guard is one argument, and the pin follows `SESSION_TIERS`; A80)
 - **§84. An MCP result with no size bound** - **(BUILT in batch 225)** (whatever an MCP tool returned reached the thread and the model whole: 10 MB of text, structured content or an error message went through, behind a redaction pass that took 1.2-2.5 s over it. The whole result is now cut at `max_read_chars` with a note, a structured payload is kept whole or dropped, and a word the cut splits goes too; A79)
 - **§83. A ChatGPT plan, spent in a local install** — **(COMPLETE: measurement in batches 181–183 and 187; sign-in BUILT in batch 184; Responses BUILT in batch 188 and checked live in batch 189; final owner checks and the signed-out header fixed in batch 203)** (a local install can sign in, refresh, use the plan and disconnect; the header distinguishes a selected CHATGPT provider from signed-in plan access)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
@@ -2799,6 +2800,81 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §85. Six prompt tiers, one assembly
+
+**Built in batch 227**, from #9 (ROADMAP_v2 §23's deferral J11) and register
+item 19. A conversation prompt is a base -- the persona and the catalogs, and
+for an agent its body and the project hub -- followed by tiers of thread and
+session state, each appended outside `with_catalogs()` because that function
+feeds `pass_prompt()` (§19's K6). The hazard of one landing in all ten
+research passes was hit or narrowly avoided four times, and each instance was
+numbered: K6, M13, M19, J11.
+
+**What #9 described, and what was true when it was taken.** The issue named
+four tiers in the wrong file. The marathon counted seven, then persona (§58)
+and file mentions (§54) were built. #146 had already pinned the rule once,
+over a canary table, and §49 had made `RunAgentLoop._conversation_prompt` one
+copy for a user's turn and a wake turn. What was left:
+
+- **Three hand-written assemblies**: a loop turn, a TUI turn and the TUI's
+  `/grill-me` one-shot. All three appended the same tiers in the same order:
+  goal, memories, refs, todos, file mentions, then the active skill bodies,
+  which only the TUI has.
+- **The memories guard was spelled three ways**: `system_prompt is None` in
+  the loop, `self.active_agent is None` in a TUI turn, and simply left out in
+  the one-shot, whose prompt is always an agent's.
+- **The canary table predated two members.** It had no persona and no file
+  mention.
+
+**What a tier is, which register item 19 left to the owner.** The owner chose
+thread and session state: the six above. The persona belongs to the base,
+composed before the catalogs; the agent body and the project hub belong to
+`system_prompt_for()`. "FOURTH instance" in J11 counts the numbered K6
+instances, not the tiers, and stays as written.
+
+**The assembly.** `core.loop.session_tiers(prompt, memory, *, agent_built,
+mentions=True, mention_text=None, active_skills=())` appends the six in
+`SESSION_TIERS`' order, and all three sites call it. `agent_built` is the
+guard as one argument: memories only when no agent built the prompt, because
+an agent's arrive in `system_prompt_for()` (M13). The refs, the checklist and
+the goal are the thread's, so an agent-built prompt still gets them (M19).
+`mentions` is off for an internal compaction or review turn (§54 AT7).
+`mention_text` is the one-shot's message, written to the thread only later.
+The skill bodies stay last (K1). It lives in `core/loop.py` beside the tier
+functions it calls, which the owner chose over moving them all to `prompts/`.
+
+**The pin follows the assembly.** `test_prompt_tier_boundary.py`'s canaries
+gain the persona and a file mention. Its `TIER_CANARY` must name exactly
+`SESSION_TIERS`, so a seventh tier fails the pin until it has a canary. The
+invariance test assembles through `session_tiers` itself and first checks
+that every tier really arrived. An AST scan fails if any production module
+outside `session_tiers` calls a tier function. Mutated: refs made conditional
+like memories, the mention flag ignored, the skill bodies moved before the
+mentions, a tier with no canary, a tier appended by the TUI again, and the
+guard inverted at each of the three sites. All went red, and the last three
+were caught by the shell tests already there.
+
+### What §85 deliberately does not change
+
+**The tier functions themselves.** `with_goal`, `with_memories`, `with_refs`,
+`with_todos`, `with_file_mentions` and `skills.prompt_fragment` keep their
+signatures and their text; only who calls them changed.
+
+**The base.** `with_persona`, `with_catalogs` and `system_prompt_for` compose
+it as before. Folding the base in too was the other answer to what a tier is,
+and the owner did not choose it.
+
+**A spawned subagent.** Its prompt is `system_prompt_for` plus the persona,
+and it runs a thread of its own, so the parent thread's tiers do not apply.
+
+### Design Decisions Record — §85 (A80)
+
+| id | decision |
+|---|---|
+| **A80** | **A conversation prompt's tiers are six, appended by one function.** `core.loop.SESSION_TIERS` is goal, memories, refs, todos, file mentions and active skill bodies, in that order, and `session_tiers()` is the only production code that appends them: a loop turn, a TUI turn and the TUI's one-shot all call it. The memories are appended only when `agent_built` is false; the other five are not conditioned on it. The persona, the catalogs, an agent's body and the project hub are the base, not tiers. `test_prompt_tier_boundary.py` holds a canary for every name in `SESSION_TIERS`. The owner chose this count over folding the base in, and `core/loop.py` over `prompts/` |
+
 ---
 
 ## §84. An MCP result with no size bound

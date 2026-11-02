@@ -15,6 +15,17 @@ other name.
 
 ---
 
+## Six prompt tiers, one assembly (batch 227)
+
+| Change | Test | Fix |
+|---|---|---|
+| Append a tier at a call site instead of through `session_tiers` | `test_every_conversation_prompt_is_assembled_by_session_tiers` | Call `session_tiers`; a new tier goes inside it (#9, A80) |
+| Add a tier to `SESSION_TIERS` without a canary | `test_every_session_tier_has_a_canary` | Give it a canary and a `TIER_CANARY` line in `test_prompt_tier_boundary.py` |
+| Condition the refs, the checklist or the goal on `agent_built` like the memories | `test_an_agent_built_prompt_gets_every_tier_but_the_memories` | Only the memories are an agent's; the rest are the thread's (M13 against M19) |
+| Change the tiers' order, or move the skill bodies off the end | `test_session_tiers_appends_every_tier_in_its_stated_order` | `SESSION_TIERS` is the order; skill bodies last (K1) |
+| Append file mentions on an internal turn | `test_an_internal_turn_gets_no_file_mentions` | `mentions=False` for compaction and review (§54 AT7) |
+| Spy on a tier by patching `tui.app.with_*` | `test_an_active_agent_still_gets_the_thread_state_tiers`, `test_an_active_agent_is_not_given_its_memories_twice`, `test_the_one_shot_never_adds_the_memories_tier` | Patch `core.loop.with_*`: `session_tiers` looks them up there, and `tui.app` no longer imports them |
+
 ## Tests no workflow ran (batch 226)
 
 | Change | Test | Fix |

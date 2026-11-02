@@ -2721,7 +2721,7 @@ class TestThreadStateAndInputHandling:
             mem_calls.append(1)
             return real_with_memories(prompt, *args, **kwargs)
 
-        mocker.patch("tui.app.with_memories", side_effect=_spy)
+        mocker.patch("core.loop.with_memories", side_effect=_spy)
 
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
@@ -2892,6 +2892,9 @@ class TestQuittingWhileAResearchRunIsGoing:
 class TestAnActiveAgentStillGetsItsTiers:
     """#110. An active agent is given the thread-state tiers, and is
     given its memories once rather than twice.
+
+    The spies sit on core.loop since batch 227: core.loop.session_tiers
+    appends every tier, for this turn and the one-shot alike (A80).
     """
 
     @pytest.mark.asyncio
@@ -2915,8 +2918,8 @@ class TestAnActiveAgentStillGetsItsTiers:
 
             return wrapper
 
-        mocker.patch("tui.app.with_refs", side_effect=_spy("with_refs"))
-        mocker.patch("tui.app.with_todos", side_effect=_spy("with_todos"))
+        mocker.patch("core.loop.with_refs", side_effect=_spy("with_refs"))
+        mocker.patch("core.loop.with_todos", side_effect=_spy("with_todos"))
 
         agent = AgentDef(
             name="sec", description="d", model="agent-model", provider="OPENAI",
@@ -2962,7 +2965,7 @@ class TestAnActiveAgentStillGetsItsTiers:
             mem_calls.append(1)
             return real_with_memories(prompt, *a, **kw)
 
-        mocker.patch("tui.app.with_memories", side_effect=_spy)
+        mocker.patch("core.loop.with_memories", side_effect=_spy)
 
         agent = AgentDef(
             name="sec", description="d", model=None, provider=None,

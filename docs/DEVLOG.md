@@ -29569,3 +29569,49 @@ pushing.
   reboot releases), so the dry run waits for it. Until it runs, CI's first
   run of these two jobs is their first run anywhere.
 - **Version**, by `scripts/version.py bump`: `0.3.4-b.9.bugfixes.r57e749187eaf`.
+
+## Batch 227 -- six prompt tiers, one assembly (2026-11-02)
+
+**#9 (ROADMAP_v2 J11) and register item 19, ROADMAP_v3 §85, A80.** The
+owner chose which design-sized issue to take, then that a tier is thread or
+session state (six of them), and that the one assembly lives in
+`core/loop.py` with the memories guard as one argument.
+
+- **Measured first.** #146 had pinned K6 as a rule over a canary table, and
+  §49 had made the loop's assembly one copy. Left: three hand-written
+  assemblies (a loop turn, a TUI turn, the TUI's `/grill-me` one-shot), the
+  same tiers in the same order at each, the memories guard spelled three
+  ways (`system_prompt is None`, `active_agent is None`, and left out), and a
+  canary table without the persona or a file mention, both built after it.
+- **The assembly.** `session_tiers(prompt, memory, *, agent_built,
+  mentions=True, mention_text=None, active_skills=())` appends goal,
+  memories, refs, todos, file mentions and skill bodies, in
+  `SESSION_TIERS`' order; all three sites call it. Only the memories depend
+  on `agent_built`. The TUI no longer imports the tier functions or the
+  skills manager.
+- **The pin follows it.** `TIER_CANARY` must name exactly `SESSION_TIERS`;
+  the invariance test assembles through `session_tiers` and first checks
+  every tier arrived; an AST scan fails if production code outside
+  `session_tiers` calls a tier function. Four docstrings that called the
+  convergence future work now name it, and AGENTS.md, the J11 row and the
+  register moved together, as item 19 asked.
+
+### Verified
+
+- New tests: 7 (5 in the new section, 2 new canary cases). Mutations, each
+  red: refs conditional like memories, the mention flag ignored, skill
+  bodies before the mentions, a tier with no canary, the TUI appending a
+  tier itself, and the guard wrong at each of the three call sites. The last
+  three were caught by shell tests already there, the one-shot's included.
+- **A false red, caught before it was recorded.** The first full run failed
+  three TUI tests that spied on `tui.app.with_memories` and its siblings,
+  names the TUI no longer imports -- so the first pass's two TUI-site
+  mutations had gone red on an AttributeError, not on the guard. The spies
+  moved to `core.loop`, and the call-site mutations were re-run printing
+  each failure: all four now fail on their assertion.
+- **Full suite**: 8618 passed, 75 skipped and 1 failed (8694) in 4:56; the
+  failure is a TUI modal-scrolling test, unrelated, and its class passes
+  alone. ruff clean; bandit 47 findings, none outside the baseline, no pair
+  grew; gitleaks on an export, no leaks. Under WSL the five tier-related files
+  gave 136 passed and 2 failed, and the same 2 fail at HEAD.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.10.bugfixes.r57e749187eaf`.

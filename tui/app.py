@@ -71,12 +71,8 @@ from core.loop import (
     DEFAULT_SYSTEM_PROMPT,
     RunAgentLoop,
     advertisement_facts,
-    with_file_mentions,
-    with_goal,
-    with_memories,
+    session_tiers,
     with_persona,
-    with_refs,
-    with_todos,
 )
 from core.memory import ConversationMemory
 
@@ -96,7 +92,6 @@ from safety.policy_enforcement import (
     redact_output_text,
 )
 from security import hosted, posture
-from skills.manager import manager as skills
 from skills.tui_commands import register_skill_commands
 from tools.base import OPENS_SESSION, OPENS_THREAD
 from tools.builtin import file_ops
@@ -3168,29 +3163,12 @@ class VenastineApp(App):
                 with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
                 self.active_skills)
             max_steps = config.MAX_ITERATIONS
-        prompt = with_goal(base_prompt, self.memory)
-        # §21b (M13). Only for a plain turn -- an active agent already got
-        # its memories inside system_prompt_for(), and appending here too
-        # would duplicate them.
-        if self.active_agent is None:
-            prompt = with_memories(prompt)
-        # §21c. Unconditional, for the reason the loop's copy of this line
-        # gives: a reference is thread state, not an agent's opt-in.
-        prompt = with_refs(prompt, self.memory)
-        # §23 slice 2. Unconditional too: a checklist is thread state.
-        prompt = with_todos(prompt, self.memory)
-        prompt = with_file_mentions(prompt, self.memory)
-        # §19 K1/K6: active skill bodies are pinned HERE, beside with_goal,
-        # and deliberately NOT inside with_catalogs -- that function feeds
-        # pass_prompt(), so pinning there would inject a skill activated in
-        # this chat session into all ten passes of a research run.
-        #
-        # Last in the prompt on purpose: an activated skill is the most
-        # specific instruction the user has given, and should read as
-        # governing what precedes it.
-        fragment = skills.prompt_fragment(self.active_skills)
-        if fragment:
-            prompt = f"{prompt}\n\n{fragment}"
+        # Goal, memories, refs, checklist, file mentions and the active
+        # skill bodies, in that order and all outside with_catalogs (K6):
+        # one assembly for every conversation prompt (#9, A80).
+        prompt = session_tiers(base_prompt, self.memory,
+                               agent_built=self.active_agent is not None,
+                               active_skills=self.active_skills)
 
         # §23: the SAME channel the research path uses. The chat turn used
         # to hand the loop a bare queue and push its modal from
@@ -3467,22 +3445,14 @@ class VenastineApp(App):
             agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
             self.active_skills,
             callable_only=callable_only, granted=granted)
-        # §18/§21c/§23. Unconditional, for with_refs' documented reason:
-        # goal, references and checklist are thread state, not an agent's
-        # opt-in. Deliberately NO with_memories — system_prompt_for has
-        # already appended this agent's memories (M13), and a second call
-        # would duplicate them.
-        prompt = with_goal(base_prompt, self.memory)
-        prompt = with_refs(prompt, self.memory)
-        prompt = with_todos(prompt, self.memory)
-        # continue_conversation writes this message later, on the worker.
-        prompt = with_file_mentions(prompt, self.memory, text=message)
-        # K1 holds for one-shot turns too (review §19-20 f22 decision):
-        # an activated skill governs the /grill-me turn in the same
-        # thread, mirroring run_agent_turn's pinning.
-        fragment = skills.prompt_fragment(self.active_skills)
-        if fragment:
-            prompt = f"{prompt}\n\n{fragment}"
+        # The same tiers as a turn (#9, A80). Agent-built, so no second
+        # copy of the memories system_prompt_for() already appended (M13);
+        # the message is passed because continue_conversation writes it
+        # later, on the worker. K1 holds here too (review §19-20 f22): an
+        # activated skill governs the /grill-me turn in the same thread.
+        prompt = session_tiers(base_prompt, self.memory, agent_built=True,
+                               mention_text=message,
+                               active_skills=self.active_skills)
 
         def work() -> None:
             error = None
