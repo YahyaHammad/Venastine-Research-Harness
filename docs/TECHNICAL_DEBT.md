@@ -2738,7 +2738,7 @@ since batch 117 -- a table row for the category case, a direct test beside
 asserting the RULE over both lists so that fixing one and not the other
 fails. That third test is the one this item would have been caught by.
 
-## 48. An MCP result has no size bound of any kind (open)
+## 48. An MCP result has no size bound of any kind (closed, batch 225 -- cut at `max_read_chars`, ROADMAP_v3 §84, A79)
 
 Found while measuring item 46, and PRE-EXISTING: it is §17's, not batch
 127's.
@@ -2842,6 +2842,20 @@ read whole with no limit, 40 MB of it in the measurement; stdio has no such
 bound; and 16 MiB is a transport ceiling, about 335 times `max_read_chars`,
 not a bound on what reaches the model. The total-size bound in
 `_normalize` that this entry prescribes is still the fix.
+
+**CLOSED (batch 225, ROADMAP_v3 §84, A79), with the bound this entry
+prescribes: on the total, in `_normalize`, before either key is filled.** The
+owner chose to cut rather than refuse, and `max_read_chars` rather than a new
+key. Re-measured first: 10 MB of text, of structured content and of an error
+message each went through whole, and the redaction pass took 1.2-2.5 s over
+them, up from this entry's 93 ms for 8 MB. The text is cut with a note giving
+the size it had; a structured payload is kept whole if it fits in what the
+text left and dropped with a note if not; a word the cut splits goes too
+(A72's rule, now shared from `safety/policy_enforcement.py`). The SDK
+measurement this entry asked for, taken against mcp 2.3.0's own server: a
+string result arrives as text AND as `{"result": <the text>}`, so the note
+says when a dropped payload only repeated the text. The same four results now
+come back at 126-258 characters, redacted in under a millisecond.
 
 # The review marathon's deferred findings (items 49-86)
 

@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§84. An MCP result with no size bound** - **(BUILT in batch 225)** (whatever an MCP tool returned reached the thread and the model whole: 10 MB of text, structured content or an error message went through, behind a redaction pass that took 1.2-2.5 s over it. The whole result is now cut at `max_read_chars` with a note, a structured payload is kept whole or dropped, and a word the cut splits goes too; A79)
 - **§83. A ChatGPT plan, spent in a local install** — **(COMPLETE: measurement in batches 181–183 and 187; sign-in BUILT in batch 184; Responses BUILT in batch 188 and checked live in batch 189; final owner checks and the signed-out header fixed in batch 203)** (a local install can sign in, refresh, use the plan and disconnect; the header distinguishes a selected CHATGPT provider from signed-in plan access)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
@@ -2792,11 +2793,90 @@ leaked PID.
 - **The strings inside `input_schema`** (A31). The tool is refused whole
   instead; a truncated schema is a tool that fails at call time.
 - **The success path's unbounded `result`** (A32), which is
-  `TECHNICAL_DEBT 48` and ruled DEFER.
+  `TECHNICAL_DEBT 48` and ruled DEFER. (Bounded since batch 225:
+  §84, A79.)
 - **`tools/registry.register` itself.** The gate lives in `register_all`
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §84. An MCP result with no size bound
+
+**Built in batch 225**, from register item 48, the one open item the review
+marathon rated `S2`. An MCP server is third-party code, and whatever its tool
+returned reached the thread and the model whole. Every other producer of
+third-party text bounds what it hands on: `read` and sandboxed output at
+`max_read_chars`, `fetch_url` at `MAX_CONTENT_BYTES`, the math tools at
+`max_read_chars` (batch 143). `_normalize` had no size constant at all.
+
+**Measured, batch 225, through the real `_normalize` and the real
+`check_output_policy`.** 10 MB of text, 10 MB of structured content and a
+10 MB error message each went through whole: `content`, `result` or `error`
+held all 10,485,760 characters. The redaction pass on the dispatch path took
+1.3 s, 2.0 s and 1.2 s over them, and 2.5 s over a result carrying both
+halves. The marathon measured 93 ms for 8 MB in batch 138; redaction has grown
+since, which is the cost the entry predicted. `memory.add_tool_result` stores
+`str(result)`, so nothing below the producer bounded it either. After the fix
+the same four results come back at 126 to 258 characters, the redaction pass
+takes under a millisecond, and `_normalize` itself takes 7 to 88 ms, most of
+it rendering a 10 MB structured payload to measure it.
+
+**The bound is on the whole result, taken before either key is filled.** The
+entry's own amendment asked for that: `structured_content` is the optional
+half, and the text join is the half every result takes. The server's text is
+cut first. A structured payload is then kept whole if its JSON fits in what
+the text left of the bound, and dropped if not. The error path takes the same
+cut; its structured detail was already bounded at 500 characters (A32).
+
+**What the measurement of the SDK turned up.** mcp 2.3.0's own server sends a
+tool that returns a string as that text AND as `{"result": <the text>}`, and a
+typed return as JSON in both places. So the room rule drops the structured
+copy of every string result between about half the bound and the bound, and
+nothing is lost by it. A note that said only "dropped" would read as missing
+data and invite the model to call again, so `_repeats` checks whether the
+payload is the text over again, and the note says so when it is.
+
+**A word the cut splits goes too.** The redactor runs after the cut, on the
+dispatch path, and cannot match half a credential. A72 made the rule for a
+shell session's dropped middle: when the character past the cut is a token
+character, the token-character run the cut ends inside goes as well. The
+helpers moved from `core/shell_sessions.py` to `safety/policy_enforcement.py`,
+beside the redactor, so both cuts read one definition. The rule has no limit
+on how far it backs off, on purpose: a credential can sit at the end of a run
+of any length, so a text that is one unbroken run, a base64 blob, shows
+nothing but the note. The note says the shown text ends at the last word break
+inside the bound, so a count of zero explains itself.
+
+### What §84 deliberately does not change
+
+**Refusing an oversized result.** The math tools refuse, because a math result
+cut short is a wrong answer. An MCP tool has already run when its result
+arrives, so a refusal hides what its side effects produced, and the owner
+chose the cut.
+
+**Cutting the structured payload.** It is kept whole or dropped. A JSON
+document cut short can read as complete, which is PG5's splice, and the text
+usually carries the same data.
+
+**A second setting.** The owner chose `max_read_chars` over a new
+`mcp_max_result_chars`. The compaction headroom check measures one read
+against `max_read_chars`, so an MCP result held to the same number keeps that
+check true with no new wiring.
+
+**`mcp_max_event_bytes`.** It bounds the memory one streamed event can take in
+the transport, which is a different question. It stays at 16 MiB.
+
+**Paging.** MCP has no offset to resume from, so a cut result cannot be read
+further through the harness. The note gives the size the server sent, which
+is what a model needs to call the tool again more narrowly.
+
+### Design Decisions Record — §84 (A79)
+
+| id | decision |
+|---|---|
+| **A79** | **An MCP tool's whole result is bounded at `max_read_chars` in `_normalize`, by cutting and never by refusing.** The server's text is cut at the bound, less any token-character run the cut splits (`fragment_end`, shared with A72), and a note appended after any non-text note gives the size the server sent. The error path takes the same cut. A structured payload is kept whole if its JSON (measured with `ensure_ascii=False`) fits in what the text left of the bound, and is otherwise dropped with a note, never cut; a payload that cannot be rendered is dropped as unmeasurable. The note says when the payload repeated the text (`_repeats`: `{"result": <text>}`, or the text parsed as JSON). Each cut and each drop logs one WARNING naming the tool. The owner chose the cut over refusing and over cutting everything as one text, and `max_read_chars` over a new key |
+
 ---
 
 ## §83. A ChatGPT plan, spent in a local install

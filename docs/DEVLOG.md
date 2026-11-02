@@ -29464,3 +29464,53 @@ and fakes built at runtime.
   bandit as CI runs it and gitleaks on an export are clean.
 - **Version**, by `scripts/version.py bump`:
   `0.3.4-b.7.bugfixes.r57e749187eaf`.
+
+## Batch 225 -- an MCP result bounded (2026-11-02)
+
+**Register item 48, ROADMAP_v3 §84, A79.** The one open item the review
+marathon rated `S2`, and it has no GitHub issue: it predates the marathon's
+filing. The owner chose to cut rather than refuse or cut everything as one
+text, and `max_read_chars` rather than a new key.
+
+- **Measured first.** 10 MB of text, of structured content and of an error
+  message each went through `_normalize` whole, and the redaction pass on
+  the dispatch path took 1.3 s, 2.0 s and 1.2 s over them (2.5 s with both
+  halves); the entry had 93 ms for 8 MB. `add_tool_result` stores
+  `str(result)`, so nothing below the producer bounded it.
+- **The bound.** The server's text is cut at `max_read_chars` with a note
+  giving the size it had; the error path takes the same cut. A structured
+  payload is kept whole if its JSON fits in what the text left of the bound,
+  and dropped with a note otherwise. The same four results now come back at
+  126-258 characters and redact in under a millisecond.
+- **The SDK measurement the entry asked for.** mcp 2.3.0's own server sends a
+  string result as the text and as `{"result": <the text>}`. So every string
+  result between about half the bound and the bound loses its structured
+  copy, and the note says it only repeated the text (`_repeats`), so the
+  model does not call again for it.
+- **The split word goes.** The redactor runs after the cut and cannot match
+  half a credential, so A72's rule applies: `TOKEN_CHARS` and
+  `fragment_end` moved from `core/shell_sessions.py` to
+  `safety/policy_enforcement.py`, and both cuts read them. A text that is one
+  unbroken run, a base64 blob, shows only the note; the note's wording says
+  why a count can be zero.
+- `test_the_success_paths_result_key_is_untouched` was batch 150's scope
+  claim that the result stays unbounded. Its docstring and guard-log row now
+  say batch 225 bounded it on purpose; it stays as the under-the-bound
+  control.
+
+### Verified
+
+- New tests: 9, in `TestAnMcpResultIsBounded`, one through the SDK's own
+  server and the real registry. Mutations, each red: no bound, a hard-coded
+  bound, the split word kept, the shared rule backing off nothing (which
+  also reddens two shell-buffer tests), structured measured against the
+  whole bound, repeats never recognised, the error path uncut, and the cut
+  logged at DEBUG.
+- **Full suite**, alone: 8606 passed, 75 skipped (8681) in 2:21. A first run
+  that shared the machine took 19:32 and failed four timing tests in
+  `test_tool_budgets.py`, `test_tui.py` and `test_file_mentions.py`; their
+  31-test classes pass alone, and the re-run is the one above. ruff clean;
+  bandit 47 findings, none outside the baseline, no pair grew; gitleaks on an
+  export, no leaks. Under WSL the four touched files gave 366 passed and 3
+  failed, and the same 3 fail at HEAD.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.8.bugfixes.r57e749187eaf`.

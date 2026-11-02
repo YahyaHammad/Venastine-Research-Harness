@@ -513,8 +513,8 @@ max_file_size_bytes: 25000000
 # result rather than silently.
 max_read_lines: 500
 
-# Per-read character ceiling, and the truncation point for sandboxed
-# stdout and stderr.
+# Per-read character ceiling, the truncation point for sandboxed stdout and
+# stderr, and the bound on an MCP tool's whole result.
 max_read_chars: 50000
 
 # ROADMAP_v3 §81 (IM7). The largest image `view_image` attaches, in bytes of
@@ -560,6 +560,7 @@ teardown_budget_s: 10.0
 # error naming the limit; the session survives. An answer sent as plain
 # JSON is not an event and is not bounded by this. Legacy "sse" servers
 # keep the MCP SDK's own 1 MiB, which it gives no way to change. 16 MiB.
+# What reaches the model is bounded separately, by max_read_chars.
 mcp_max_event_bytes: 16777216
 
 # ======================================================================

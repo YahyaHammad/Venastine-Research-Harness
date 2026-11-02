@@ -763,6 +763,15 @@ max lines per read call
 
 max chars per read call
 
+It is also the bound on an MCP tool's whole result (ROADMAP_v3 §84, A79,
+batch 225). The server's text is cut at it with a note giving the size it
+had, a structured payload is kept whole if it fits in what the text left
+and dropped with a note if not, and a word the cut splits goes too, so the
+redactor never sees half a credential. One key and not a second one,
+because the compaction headroom check (`compaction_min_headroom_tokens`,
+below) measures one read against this number, and an MCP result is a read
+for that purpose.
+
 ### `max_image_bytes`
 
 ROADMAP_v3 §81 (IM7). The largest image file `view_image` will attach:
@@ -848,8 +857,8 @@ each Streamable HTTP server-sent event whole and fails the call when one
 exceeds `max_sse_event_size`; 2.2.0, on the httpx2 it installed, had no
 limit at all. A result a server STREAMS is one event, so for those this is
 the memory one result can take before the harness sees it -- a bound on
-the transport, NOT on what reaches the model, which is TECHNICAL_DEBT 48's
-other half and stays open.
+the transport, NOT on what reaches the model. That one is `max_read_chars`,
+applied to the whole result since batch 225 (A79).
 
 WHICH RESULTS IT COVERS, measured rather than read (batch 208). A server
 may answer a request as SSE or as plain JSON. mcp 2.3.0's own server,

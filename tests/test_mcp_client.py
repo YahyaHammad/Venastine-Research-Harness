@@ -81,6 +81,11 @@ def _build_server():
         await asyncio.sleep(60)
         return "never"
 
+    @srv.tool()
+    def flood(words: int) -> str:
+        # A verbose tool: see TestAnMcpResultIsBounded.
+        return "word " * words
+
     return srv
 
 
@@ -1566,11 +1571,12 @@ class TestAStructuredErrorPayloadSurvives:
         assert _normalize(self._error("boom")) == {"error": "boom"}
 
     def test_the_success_paths_result_key_is_untouched(self):
-        """CONTROL, and a SCOPE claim. An unbounded tool RESULT is
-        TECHNICAL_DEBT 48, which S13-01 measured and which is ruled
-        DEFER. Bounding it in passing would close a filed item halfway
-        and in the wrong module, so the success path still carries the
-        structured payload whole."""
+        """CONTROL. A structured payload inside the bound -- the common
+        case -- reaches the model whole. Batch 150 wrote this as a scope
+        claim too, while an unbounded RESULT was TECHNICAL_DEBT 48 and
+        ruled DEFER; batch 225 bounded the whole result (A79,
+        TestAnMcpResultIsBounded), and what is left of the claim is that
+        a payload under the bound is not touched."""
         class _R:
             content = []
             is_error = False
@@ -1678,3 +1684,141 @@ class TestTheExceptBranchReleasesBothTasks:
                 < source.index("_shutdown_loop()")), (
             "the cancel must be scheduled before the loop is stopped, or "
             "it is never delivered")
+
+
+# ---------------------------------------------------------------------------
+# ---- A79: an MCP result is bounded before it reaches the model ------------
+# ---------------------------------------------------------------------------
+
+class TestAnMcpResultIsBounded:
+    """TECHNICAL_DEBT 48. 10 MB of text, of structured content or of an
+    error message used to go through `_normalize` whole, into the thread
+    and the model's context. The whole result is bounded at
+    `max_read_chars` now: text is cut with a note, a structured payload is
+    kept whole or dropped with one, and a word the cut splits goes too.
+
+    Most tests here shrink the bound to 1,000 so the shapes are small;
+    `test_ten_megabytes_comes_back_inside_the_shipped_bound` holds the
+    measured case at the shipped value.
+    """
+
+    BOUND = 1000
+
+    @pytest.fixture(autouse=True)
+    def _bound(self, request, monkeypatch):
+        import config
+        if "shipped" not in request.node.name:
+            monkeypatch.setattr(config, "MAX_READ_CHARS", self.BOUND)
+
+    _result = staticmethod(TestTheNonTextPlaceholderIsAppended._result)
+
+    @staticmethod
+    def _server_text(content: str) -> str:
+        """The content up to the harness's first note."""
+        return content.split("\n[MCP ")[0]
+
+    def test_text_over_the_bound_is_cut_and_says_what_it_had(self, caplog):
+        with caplog.at_level("WARNING", logger="mcp_client.client"):
+            out = _normalize(self._result([("text", "word " * 1000)]),
+                             "mcp__srv__verbose")
+
+        shown = self._server_text(out["content"])
+        assert 0 < len(shown) <= self.BOUND
+        assert "the server sent 5,000 characters of text" in out["content"]
+        assert f"max_read_chars ({self.BOUND:,})" in out["content"]
+        messages = [r.getMessage() for r in caplog.records]
+        assert len(messages) == 1 and "mcp__srv__verbose" in messages[0]
+
+    def test_a_cut_between_words_keeps_the_whole_bound(self):
+        """CONTROL for the one below: the character past the cut is a
+        space, so nothing more goes."""
+        text = "x" * (self.BOUND - 1) + "  tail"
+        out = _normalize(self._result([("text", text)]))
+
+        assert self._server_text(out["content"]) == text[:self.BOUND]
+
+    def test_a_word_the_cut_splits_goes_whole(self):
+        """The redactor runs after this cut and cannot match half a
+        credential, so the token-character run the cut ends inside is
+        dropped -- A72's rule for a shell session's dropped middle."""
+        token = "sk-ant-api03-" + "A" * 40
+        text = "x " * ((self.BOUND - 20) // 2) + token + " after"
+        assert text.index(token) < self.BOUND < text.index(token) + len(token)
+
+        shown = self._server_text(_normalize(
+            self._result([("text", text)]))["content"])
+
+        assert "sk-" not in shown
+        assert shown == text[:text.index(token)]
+
+    def test_structured_that_fits_is_kept_whole(self):
+        """CONTROL: under the bound nothing changes and nothing is said."""
+        out = _normalize(self._result([("text", "ok")],
+                                      structured={"rows": ["r"] * 10}))
+
+        assert out == {"content": "ok", "result": {"rows": ["r"] * 10}}
+
+    def test_structured_past_the_room_is_dropped_never_cut(self, caplog):
+        structured = {"rows": ["r" * 50] * 12}
+        with caplog.at_level("WARNING", logger="mcp_client.client"):
+            out = _normalize(self._result([("text", "t" * 600)],
+                                          structured=structured), "tool")
+
+        assert "result" not in out
+        assert "[MCP structured result dropped: it is " in out["content"]
+        assert "the text left 400 of the bound" in out["content"]
+        assert "rows" not in out["content"], "a JSON fragment was kept"
+        assert "repeats" not in out["content"]
+        assert len(caplog.records) == 1
+
+    def test_a_dropped_repeat_of_the_text_says_so(self):
+        """mcp 2.3.0's own server sends a string result as the text AND
+        as `{"result": <the text>}` -- see the `flood` tool below -- so
+        the drop costs nothing, and the note says that."""
+        text = "word " * 120
+        out = _normalize(self._result([("text", text)],
+                                      structured={"result": text}))
+
+        assert "result" not in out
+        assert "it repeats the server's text" in out["content"]
+
+    def test_an_error_over_the_bound_is_cut_too(self):
+        out = _normalize(self._result([("text", "fail " * 1000)],
+                                      is_error=True))
+
+        assert set(out) == {"error"}
+        assert len(self._server_text(out["error"])) <= self.BOUND
+        assert "the server sent 5,000 characters" in out["error"]
+
+    def test_ten_megabytes_comes_back_inside_the_shipped_bound(self):
+        """The measurement this entry was filed from, at the shipped
+        value: a 10 MB text block and a 10 MB structured payload each
+        come back inside `max_read_chars`."""
+        import config
+        bound = config.MAX_READ_CHARS
+        big = "word " * (2 * 1024 * 1024)
+
+        text_only = _normalize(self._result([("text", big)]))
+        structured_only = _normalize(self._result(
+            [("text", "ok")], structured={"blob": big}))
+
+        assert len(self._server_text(text_only["content"])) <= bound
+        assert len(structured_only["content"]) < 200
+        assert "result" not in structured_only
+
+    def test_a_real_server_through_the_real_registry_is_bounded(self, client):
+        """End to end: the SDK's own server, the real `call_tool`, the
+        real dispatch and its redaction pass."""
+        reg = ToolRegistry()
+        reg.register(ToolSpec(
+            name="mcp__probe__flood",
+            schema={"name": "mcp__probe__flood"},
+            handler=lambda p: client.call_tool("probe", "flood", p),
+        ))
+        out = reg.dispatch("mcp__probe__flood", {"words": 1000},
+                           approval_callback=lambda n, p: True)
+
+        assert len(self._server_text(out["content"])) <= self.BOUND
+        assert "the server sent 5,000 characters" in out["content"]
+        assert "result" not in out
+        assert "it repeats the server's text" in out["content"]
