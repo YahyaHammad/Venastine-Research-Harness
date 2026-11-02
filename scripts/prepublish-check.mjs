@@ -24,7 +24,7 @@
  *      this reason -- without it npm falls back to .gitignore and
  *      providers.json would be excluded only by accident. This is the third
  *      copy of that rule: .gitignore covers `git push`, .gitattributes
- *      export-ignore covers `git archive` (H3/C2), `files` covers npm.
+ *      export-ignore covers `git archive`, `files` covers npm.
  *
  * LICENSE and NOTICE are checked as hard requirements, not niceties.
  * Publishing to npm is distribution of the Work under Apache-2.0 section 4,

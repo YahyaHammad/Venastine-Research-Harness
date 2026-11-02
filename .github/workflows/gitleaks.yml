@@ -12,17 +12,10 @@
 #     local keys, verified locally) and __pycache__/*.pyc (bytecode copies
 #     of fixtures). CI scans the empty example-derived providers.json,
 #     which is clean; the allowlist is what keeps local runs honest too.
-#   * `.gitleaksignore` (auto-picked from the repo root): fingerprints of
-#     the six INTENTIONAL fake secrets across
-#     tests/test_policy_enforcement.py (five) and tests/test_session_tools.py
-#     (one) -- the suite asserts they redact. A moved fixture re-fires
-#     until re-blessed: a tripwire, not friction.
-#
-#     This said "the six ... in tests/test_policy_enforcement.py" until
-#     batch 141 (S18-09). Item 18 records the change that falsified it --
-#     "a planted fake secret added 2026-09-17" got its fingerprint and this
-#     header one directory over did not move with it. `.gitleaksignore`'s
-#     own two blocks have always said it correctly.
+#   * `.gitleaksignore` (auto-picked from the repo root): EMPTY since #238.
+#     The suite's fake secrets are assembled from pieces at runtime, so no
+#     rule matches the source; the six it once blessed by line number
+#     re-fired the scan on every edit above them.
 # Adding a fingerprint for a REAL credential is never the fix; rotation is.
 
 name: gitleaks

@@ -58,6 +58,7 @@ that are pure text never skip, so they still run under
 `pytest tests/test_foo.py` while you are mid-change.
 """
 
+import ast
 import fnmatch
 import io
 import json
@@ -1031,6 +1032,12 @@ _NAMESPACES = (
      re.compile(r"mutation\s*$", re.I)),
     ("review finding", re.compile(r"^F\d+$"),
      re.compile(r"finding\s*$", re.I)),
+    # #253. Prose about control characters says C0 and C1, and both read as
+    # decision ids: C0 resolved nowhere, so a correct sentence FAILED, and
+    # C1 resolves to ROADMAP_v2's C1, so a sentence about the 8-bit range
+    # PASSED as a citation of the permission bridge. "Unicode C1" says which.
+    ("Unicode control set", re.compile(r"^C[01]$"),
+     re.compile(r"Unicode\s*$")),
 )
 
 
@@ -1198,6 +1205,34 @@ def test_every_decision_id_the_map_claims_is_in_the_record():
         f"greps and finds nothing re-derives the decision.")
 
 
+def test_each_family_has_one_range_on_the_map_line():
+    """#251. The check below reads every `Xn-Xm` on the map line as the
+    family's CLAIM, so a per-section parenthetical saying where some ids
+    live -- `A28-A33 in section 67` -- read as a claim that stopped short
+    the day the family grew past A33. The failure named the family, whose
+    real claim was correct, and not the parenthetical that tripped it.
+
+    So the line's convention becomes a check, on the owner's choice: one
+    range per family, which is the claim, and every per-section entry
+    written as a LIST, which sections 63-68 already do. A second range now
+    fails here, naming itself, before the check below can misread it."""
+    ranges = {}
+    for hit in re.finditer(r"\b([A-Z]{1,2})(\d+)-[A-Z]{0,2}(\d+)\b",
+                           _map_line()):
+        ranges.setdefault(hit.group(1), []).append(hit.group(0))
+    assert len(ranges) > 20, (
+        f"the map line yielded {len(ranges)} ranges, so the pattern is "
+        f"reading the wrong line and this checks nothing")
+
+    doubled = {family: found for family, found in ranges.items()
+               if len(found) > 1}
+    assert not doubled, (
+        f"AGENTS.md's map line has more than one range for {doubled}. One "
+        f"range per family is its claim; write a per-section entry as a list "
+        f"(`A28, A29, A30`), as sections 63-68 do, so the range check reads "
+        f"only the claim.")
+
+
 def test_a_claimed_range_covers_its_whole_family():
     """Batch 51. The two checks around this one both PASS on a range that
     stops short, and that is how E13 and E14 came to sit outside the index
@@ -1305,6 +1340,277 @@ def test_every_decision_id_cited_in_production_code_resolves():
         f"`§21 AC6`, `Rev. 1 S12`, `mutation P10`, `review finding F2`.")
 
 
+def _production_javascript():
+    """The `.mjs` half of production (#237): the npm launcher and the
+    publish gate. Its own domain rather than a widening of
+    `_production_python`, which the test-name gate shares and which has no
+    business reading JavaScript."""
+    for dirpath, dirnames, filenames in _walk_project():
+        if os.path.basename(dirpath) == "tests":
+            dirnames[:] = []
+            continue
+        for name in sorted(filenames):
+            if name.endswith(".mjs"):
+                yield os.path.join(dirpath, name)
+
+
+def test_every_decision_id_cited_in_the_npm_scripts_resolves():
+    """#237. The rule above, for the `.mjs` files it never read.
+
+    Batch 140 shipped four marathon finding ids in `bin/venastine.mjs` and
+    `scripts/prepublish-check.mjs` and the gate said nothing; the fifth, in
+    a `.py`, turned it red in the same session. And when this check was
+    first run it found a sixth: `(H3/C2)` in the publish gate, the copy of
+    the citation batch 128 dropped from AGENTS.md as unresolvable -- the
+    `.mjs` copy survived because nothing read it.
+
+    RAW TEXT, on the owner's choice, not a JavaScript comment parser: a
+    citation inside a JS string would be read too, and there are none.
+    Every hit the first run found was in a comment."""
+    files = list(_production_javascript())
+    names = {os.path.relpath(path, ROOT).replace(os.sep, "/")
+             for path in files}
+    assert {"bin/venastine.mjs", "scripts/prepublish-check.mjs"} <= names, (
+        f"the .mjs walk found {sorted(names)}, so it is looking in the wrong "
+        f"place and would pass whatever those files say")
+
+    record = _decision_definitions()
+    unresolved = {}
+    for path in files:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for number, line in enumerate(handle, 1):
+                for hit in _CITATION.finditer(line):
+                    token = hit.group(1)
+                    if (_namespace_of(token, line[:hit.start()])
+                            or token in record):
+                        continue
+                    where = f"{os.path.relpath(path, ROOT)}:{number}"
+                    unresolved.setdefault(token, []).append(where)
+
+    assert not unresolved, (
+        f"these ids are cited in the npm scripts and resolve to nothing in "
+        f"the record: {unresolved}. Name the decision, qualify the citation "
+        f"(`gate D0`, `review finding F2`), or -- for a marathon finding id "
+        f"-- cite the batch instead, as tests/BREAKING_CHANGES.md says.")
+
+
+#: #241. A sentence that says an issue is OPEN -- present tense, or a
+#: condition on its closing. History ("#49 was filed to establish", "until
+#: #213, so") is not a claim about now and is not matched.
+_ISSUE_STATE_CLAIM = re.compile(
+    r"#\d+\s+(?:is|remains|stays)\s+(?:still\s+)?"
+    r"(?:open|unresolved|unfixed|pending)\b"
+    r"|\b(?:still|currently)\s+open\b[^.\n]{0,40}#\d+"
+    r"|#\d+[^.\n]{0,40}\b(?:still|currently)\s+open\b"
+    r"|(?<!was )(?<!were )\b(?:filed|tracked|deferred)\s+(?:as|in|under|to)"
+    r"\s+#\d+"
+    r"|\b(?:when|until|once)\s+#\d+\s+(?:closes|lands|ships|"
+    r"is\s+(?:fixed|closed|merged))\b",
+    re.I)
+
+
+def _issue_state_claims():
+    """[(where, line)] for every claim about an issue's state in production
+    prose: the .py files' comments and docstrings, and the .mjs files'
+    text."""
+    found = []
+    sources = [(path, _prose_lines(path)) for path in _production_python()]
+    for path in _production_javascript():
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            sources.append((path, list(enumerate(handle, 1))))
+    for path, lines in sources:
+        for number, line in lines:
+            if _ISSUE_STATE_CLAIM.search(line):
+                found.append((f"{os.path.relpath(path, ROOT)}:{number}",
+                              line.strip()))
+    return found
+
+
+def test_no_production_comment_says_an_issue_is_open():
+    """#241, on the owner's choice: cite an issue, never its state.
+
+    `tools/builtin/project_docs.py` said a credential residual was "NOT"
+    redacted and "Filed against the redactor rather than fixed here" for
+    seven weeks after that issue, #167, had closed with the fix. The claim
+    spread into a review brief, and a reviewer spent a probe re-measuring a
+    leak that did not exist. An issue's state lives on GitHub, which this
+    offline suite cannot ask -- and a committed copy of it would be a second
+    source of truth that goes stale the day an issue closes. So the rule is
+    one this suite CAN check: a comment may name an issue, as the most
+    useful kind of citation there is, but may not say it is open.
+
+    Measured when written: 499 comment lines cite an issue, 14 of them
+    beside a word like "open", "filed" or "until", and every one of the 14
+    is history. None matches. `.github/workflows/` is outside this domain:
+    its one such sentence ("Add it here when #10 closes") is #230's."""
+    claims = _issue_state_claims()
+    assert not claims, (
+        f"these lines say an issue is open, which nothing here can keep true: "
+        f"{claims}. Say what the code does and cite the issue for why -- or "
+        f"put the open question in the register, which is reviewed.")
+
+
+def test_the_issue_state_rule_tells_a_claim_from_history():
+    """The control for the rule above, which passes by matching nothing."""
+    claims = [
+        "# Filed as #167 rather than fixed here.",
+        "# Tracked in #12; until then the score is advisory.",
+        "# #53 is still open, so this guard stays.",
+        "# Add it here when #10 closes.",
+        "# The residual is currently open upstream (#88).",
+    ]
+    history = [
+        "# #49 was filed to establish and which this function broke",
+        "#: A TCP port. `ssh_port` was a lax `int` until #213, so `true`",
+        "#53 and #54 stayed open while #48 looked like the whole of it.",
+        "#57 was deferred once on the grounds that `signal.alarm` is",
+        "# deadline of its own, and until #223 this paragraph read as if",
+    ]
+    for line in claims:
+        assert _ISSUE_STATE_CLAIM.search(line), line
+    for line in history:
+        assert not _ISSUE_STATE_CLAIM.search(line), line
+
+
+def _audit_form():
+    import yaml
+
+    with open(os.path.join(ROOT, ".github", "ISSUE_TEMPLATE",
+                           "audit-finding.yml"), encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def _form_choices(form, field_id):
+    """The first word of each option of one dropdown: `S1 — critical` is
+    `S1`, `docs-drift` is itself."""
+    for field in form["body"]:
+        if field.get("id") == field_id:
+            return [option.split()[0] for option in
+                    field["attributes"]["options"]]
+    raise AssertionError(f"the audit form has no {field_id!r} dropdown")
+
+
+def _contributing_lists():
+    """(severities, areas) as docs/CONTRIBUTING.md's Issue format states
+    them."""
+    with open(os.path.join(DOCS, "CONTRIBUTING.md"),
+              encoding="utf-8") as handle:
+        text = handle.read()
+    severity = next(line for line in text.splitlines()
+                    if line.startswith("* **Severity**"))
+    area = next(line for line in text.splitlines()
+                if line.startswith("* `<area>` is one of:"))
+    return (re.findall(r"`(S\d)` \w+", severity),
+            re.findall(r"`([a-z-]+)`", area.split("—")[0]))
+
+
+def test_the_audit_form_offers_what_contributing_says():
+    """#229. CONTRIBUTING calls its Issue format the prose source and the
+    forms its machine-readable copy -- "change both together, or the
+    taxonomy drifts" -- and nothing checked either direction. Severity and
+    area are what the form decides, so those two lists are held equal here,
+    in order. The label half is not a list the form carries: the audit form
+    sets none, by design, and the prose says why."""
+    severities, areas = _contributing_lists()
+    form = _audit_form()
+    assert severities == ["S1", "S2", "S3", "S4"], (
+        f"CONTRIBUTING's severity line now reads {severities}; this parser "
+        f"or the line moved")
+    assert len(areas) >= 8, areas
+    assert _form_choices(form, "severity") == severities
+    assert _form_choices(form, "area") == areas
+    assert "labels" not in form, (
+        "the audit form now sets a label; CONTRIBUTING's Labels paragraph "
+        "says it sets none, on purpose, so change both together")
+
+
+#: A test function, a test class, or a test MODULE named without `.py`.
+_GUARD_LOG_NAME = re.compile(
+    r"\b(test_[A-Za-z0-9_]+|Test[A-Z][A-Za-z0-9_]*)\b(?!\.py)")
+
+#: Words the guard log uses that look like test names and are not this
+#: suite's. Each says what it is.
+_GUARD_LOG_NOT_OURS = {
+    "TestClient": "Starlette's test client, named in batch 165's row",
+}
+
+
+def _suite_names():
+    """(every function and class name the suite defines, every test module
+    name), read off tests/ with `ast`."""
+    defined, modules = set(), set()
+    tests_dir = os.path.join(ROOT, "tests")
+    for name in os.listdir(tests_dir):
+        if not name.endswith(".py"):
+            continue
+        modules.add(name[:-3])
+        with open(os.path.join(tests_dir, name), encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        defined.update(node.name for node in ast.walk(tree)
+                       if isinstance(node, (ast.FunctionDef,
+                                            ast.AsyncFunctionDef,
+                                            ast.ClassDef)))
+    return defined, modules
+
+
+def _unresolved_guard_log_names(text, defined, modules):
+    """Names in `text` that resolve to nothing. A name struck through --
+    ~~`test_old`~~ -- is history and is not read; a name ending in `_` is a
+    prefix and resolves if some test starts with it."""
+    live = re.sub(r"~~.*?~~", "", text, flags=re.S)
+    missing = []
+    for number, line in enumerate(live.split("\n"), 1):
+        for hit in _GUARD_LOG_NAME.finditer(line):
+            name = hit.group(1)
+            if (name in defined or name in modules
+                    or name in _GUARD_LOG_NOT_OURS
+                    or (name.endswith("_")
+                        and any(d.startswith(name) for d in defined))):
+                continue
+            missing.append(f"{number}: {name}")
+    return missing
+
+
+def test_every_test_name_the_guard_log_cites_exists():
+    """#256, on the owner's choice. Every row of tests/BREAKING_CHANGES.md
+    names the test a change would break -- that is the column's whole job --
+    and nothing checked that the name exists. A row naming a test that has
+    gone sends the person who just broke a guard nowhere.
+
+    Measured when written: 1,821 distinct names cited, 44 resolving nowhere.
+    The renamed ones now carry their current name; the ones that are gone,
+    or that the log itself records as retired or reversed, are struck
+    through as history -- `~~`test_old`~~` -- which is what this reads past.
+    It would not have caught batch 153's case (the names were right until
+    that batch renamed them); it catches the NEXT rename."""
+    defined, modules = _suite_names()
+    assert len(defined) > 5000 and "test_docs_consistency" in modules, (
+        f"the suite scan found {len(defined)} names, so it is reading the "
+        f"wrong directory and would resolve nothing")
+    with open(os.path.join(ROOT, "tests", "BREAKING_CHANGES.md"),
+              encoding="utf-8") as handle:
+        missing = _unresolved_guard_log_names(handle.read(), defined, modules)
+    assert not missing, (
+        f"tests/BREAKING_CHANGES.md names tests that do not exist: "
+        f"{missing[:20]}. Give each row the test's current name, or strike a "
+        f"gone one through as history (~~`test_old`~~), saying what replaced "
+        f"it if anything did.")
+
+
+def test_the_guard_log_rule_reads_past_history_and_not_past_a_typo():
+    """The control: the rule above passes by matching nothing unless it
+    can tell a struck name from a live one."""
+    defined, modules = {"test_real", "test_real_thing", "TestReal"}, {"test_module"}
+    assert _unresolved_guard_log_names(
+        "| x | `test_real`, `TestReal`, `test_module`, ~~`test_gone`~~, "
+        "`test_real_` + `TestClient` |", defined, modules) == []
+    assert _unresolved_guard_log_names(
+        "| x | `test_gone` |", defined, modules) == ["1: test_gone"]
+    assert _unresolved_guard_log_names(
+        "| x | `test_real_but_renamed` |", defined, modules) == [
+        "1: test_real_but_renamed"]
+
+
 def test_the_qualifier_grammar_discriminates():
     """The guard against loosening the guard.
 
@@ -1335,6 +1641,8 @@ def test_the_qualifier_grammar_discriminates():
         ("S12", "        # Rev. 1 "),
         ("P10", "        # suite when audit unit 3 ran mutation "),
         ("F2", "        # (review finding "),
+        ("C1", "    the sender chose was never part of that decision. The whole "
+               "Unicode "),
     ]
     for token, before in qualifies:
         assert _namespace_of(token, before), (
@@ -1358,6 +1666,10 @@ def test_the_qualifier_grammar_discriminates():
         # three different criteria in three files.
         ("AC6", "            path ("),
         ("AC2", "    # so the gate is what makes \"no silent overwrite\" ("),
+        # Unicode names two control sets, not the C family: C3 after it is
+        # still a decision, and an unqualified C1 still means ROADMAP_v2's.
+        ("C3", "    # Unicode "),
+        ("C1", "    # the 8-bit "),
     ]
     for token, before in refuses:
         assert _namespace_of(token, before) is None, (

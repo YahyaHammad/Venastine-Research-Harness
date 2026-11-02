@@ -230,12 +230,12 @@ def _as_uuid_key(value) -> Optional[str]:
 
     ONE SIDE, NOT TWO, AND THE OTHER SIDE IS PINNED. This normalises the
     RECORDED ids only; the row ids are compared as the database hands
-    them over. Normalising both was written first and control C1 found it
-    unearned -- removing the row-side call left every test green, because
-    `conversationthread.id` is hex and so is this. The remaining
-    assumption is that the column holds hex, which is a fact about
-    sqlmodel's UUID type rather than about this project, so it is
-    ASSERTED where it can be:
+    them over. Normalising both was written first, and the control run
+    as mutation C1 found it unearned -- removing the row-side call left
+    every test green, because `conversationthread.id` is hex and so is
+    this. The remaining assumption is that the column holds hex, which
+    is a fact about sqlmodel's UUID type rather than about this project,
+    so it is ASSERTED where it can be:
     `test_a_thread_id_is_stored_in_a_spelling_str_does_not_produce` in
     tests/test_storage_e2e.py fails naming this function if the library
     ever starts storing the dashed form. A pinned dependency beats a

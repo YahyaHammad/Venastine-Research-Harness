@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8665 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 8672 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -350,16 +350,24 @@ fails on one that does not.
 | Rev. 1 open questions | `S11`, `S12`, `S16` | `Rev. 1 S12` | resolved inline in `ROADMAP_v2.md` |
 | audit severities | `S1`–`S4` | `severity S1`, or an issue title | `#15`, the audit tracker |
 | review findings / mutations | `F2`, `P10` | `review finding F2`, `mutation P10` | `DEVLOG.md`, the audit's mutation passes |
+| Unicode control sets | `C0`, `C1` | `Unicode C1` | the Unicode standard -- prose about control characters, as in `core/ansi.py` (#253) |
 
 `D1` and `D2` are the unavoidable pair: both a decision and a gate. They resolve,
 so nothing can force the distinction mechanically — write `gate D1` when you mean
 the gate. A seventh use of `C1`–`C10` is the research pipeline's **claim ids**,
 which are run data rather than references; see the C table in `ROADMAP_v2.md`.
+
+**Cite an issue, never its state (#241).** `#NNN` in a comment is the most useful
+citation there is, but whether that issue is open lives on GitHub, and a sentence
+saying so goes stale the day it closes -- one said a credential residual was open
+for seven weeks after its fix had shipped. Say what the code does and cite the
+issue for why; `test_no_production_comment_says_an_issue_is_open` refuses "tracked
+in #N", "#N is still open" and "when #N closes" in the `.py` and `.mjs` files.
 - **CONFIG_ARCHITECTURE.md** — why every value in `config.yaml` is what it is. `config.py`'s 788 lines of rationale, carried over verbatim when the values moved into YAML, keyed by the YAML's own names. Read the entry for a key before changing it; several of these numbers have already been "corrected" back to a value they were deliberately moved away from.
 - **docs/DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **docs/TECHNICAL_DEBT.md** — the register: what a review found and what was deliberately left, each item open or closed with the batch that closed it. Cite an item as `TECHNICAL_DEBT 42`, bare — one form, since three were in use. An entry is evidence, not instruction: batches 126 and 127 each found the ENTRY itself wrong about where its own defect came from, so measure the claim before building the fix it proposes.
 - **docs/REVIEW_MARATHON.md** — the pre-merge review marathon: 19 independent review scopes covering every production module, the finding format every report uses, and the rules of engagement for a read-only reviewer. **Open while it is open** — the run log at the bottom says which scopes have been reviewed. The per-scope reports are NOT in the repository: they go to a gitignored `review/`, because a tracked `.md` moves the gated readable-doc count and because `read_project_doc` would advertise a list of open defects to every run.
-- **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
+- **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix. A test that no longer exists is struck through, ~~`test_old`~~, with what replaced it; every other test name there must exist, and `test_every_test_name_the_guard_log_cites_exists` checks (#256).
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.
 
 ## Architecture

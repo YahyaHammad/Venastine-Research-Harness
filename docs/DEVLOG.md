@@ -29407,3 +29407,60 @@ material), #239 (tell the session once) and #261 (pin the premise) first.
   an export are clean.
 - **Version**, by `scripts/version.py bump`:
   `0.3.4-b.6.bugfixes.r57e749187eaf`.
+
+## Batch 224 -- gates that misfire (2026-11-02)
+
+**#229, #237, #238, #241, #251, #253 and #256, register items 75, 86, 87,
+91, 103, 105 and 109.** The owner chose each answer: a Unicode qualifier,
+a raw `.mjs` scan, one range per family, a gate plus a sweep for the guard
+log, no state claims about issues, no label by design on the audit form,
+and fakes built at runtime.
+
+- **#253.** "Unicode control set" joins the citation grammar's namespaces:
+  `C0`/`C1` after `Unicode`. `core/ansi.py` writes `Unicode C1`, and
+  AGENTS.md's table has the row. The scan also found `pipeline_storage.py`
+  calling a mutation control `control C1`, which resolved silently to an
+  unrelated decision; it says `mutation C1`.
+- **#237.** The citation rule runs over the `.mjs` files' text in its own
+  domain. Its first run found `(H3/C2)` in the publish gate -- the copy of
+  the citation batch 128 dropped from AGENTS.md as unresolvable, which
+  survived because nothing read `.mjs`.
+- **#251.** One range per family on the map line, so a per-section range
+  fails naming itself before the range check misreads it.
+- **#241.** No production comment may say an issue is open, tracked or
+  about to close. Of 499 comment lines citing an issue, the 14 beside a
+  state word were all history; the control holds five claims against five
+  of those.
+- **#229.** CONTRIBUTING says the audit form sets no label on purpose and
+  that `[S0]`/`complexity` predate the forms; a test holds the form's
+  severity and area lists to CONTRIBUTING's. Measured, "most open findings
+  sit in enhancement" is true (31 of 43 open): the review counted closed
+  issues too.
+- **#256.** Every test name the guard log cites must exist; a gone one is
+  struck through as history, the convention its header now states. 44
+  names resolved nowhere: eight rows got their current name, the rest are
+  modules, a placeholder, a wrapped name, or history now marked as such.
+- **#238.** The six blessed fakes are built from pieces, and a seventh
+  match that splitting one of them exposed is too; `.gitleaksignore` is
+  empty with a comment saying so. The header comment in
+  `.github/workflows/gitleaks.yml` changed with it -- the branch's first
+  workflow-file change, which only the owner can push.
+
+### Verified
+
+- New tests: 7, all in `test_docs_consistency.py`. Mutations, each red:
+  the Unicode namespace emptied, `(H3/C2)` restored, a second `A` range on
+  the map line, a "tracked in #12" comment, a `complexity` area on the
+  form, and a gone guard un-struck. gitleaks on an export: no leaks with
+  the empty ignore file, and one before line 72 was built from pieces.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8672 tests, 8597
+  passed and 75 skipped, in 2:42. The first run took 6:12 and failed
+  `test_eight_concurrent_writers_all_land` once with `database is locked`
+  -- the slow-run flake this file has recorded twice (item 97's rule); it
+  passed three times alone and in the re-run, and this batch changes
+  nothing it reaches. WSL, on a Linux-filesystem copy: the three touched
+  test files, 283 passed; the one failure fails identically on a
+  `git archive` of HEAD, because the copy is not a git checkout. ruff,
+  bandit as CI runs it and gitleaks on an export are clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.7.bugfixes.r57e749187eaf`.

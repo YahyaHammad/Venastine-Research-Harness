@@ -4005,7 +4005,7 @@ changing either agent's tools.
 
 **CLOSED (batch 222), the first shape above.** Both call sites forward the run's facts through `advertisement_facts`, the reviewer's rule. `_run_initializer` hands its run no bundle, so its prompt is built headless; `_summarize` builds the compactor's from the bundle it hands the compactor's run. Three tests in `test_catalog_advertisement.py` widen each agent to admit `spawn_subagent` and assert that the agent catalog is in the prompt exactly when the schema list from the run's own facts carries the tool. An attended compaction is the control, so a hard-coded headless answer fails too, and reverting either call site fails its own test. Neither agent's `allowed_tools` changed.
 
-## 75. The issue template and the prose that governs it are checked against neither (open, deferred batch 138)
+## 75. The issue template and the prose that governs it are checked against neither (closed, batch 224)
 
 **Issue:** #229.
 
@@ -4057,6 +4057,8 @@ checked offline and should not be -- it is a judgement, not a count.
 **Not:** changing the severity or area enumerations, which match between prose
 and template today and are the half of the taxonomy that has not drifted;
 `config.yml`'s contact links or the PR template, both correct.
+
+**CLOSED (batch 224), the owner's choice: no label by design, plus a check.** Measured first, and the first divergence above counted the wrong population: CONTRIBUTING's claim is about OPEN findings, and 31 of the 43 open severity-tagged issues are `enhancement` (the 51 `S3` + `bug` are mostly closed). The audit form sets no label on purpose, because the right one depends on the finding, and CONTRIBUTING's Labels paragraph now says the maintainer sets it at triage. `[S0]` and `complexity` are written down as predating the forms, which are the arbiter (use `S1` and `coherence`). `test_the_audit_form_offers_what_contributing_says` holds the form's severity and area dropdowns equal to CONTRIBUTING's lists, in order, and the form to setting no label.
 
 ## 76. The CodeQL job contains no mechanism that can fail it (closed, batch 158 -- PR #200 measured the check)
 
@@ -4938,7 +4940,7 @@ in three files, where batch 157's timer had five. Fixed by raising the shrink
 above `settle`'s deadline rather than pinning each test (ROADMAP_v3 §77, A77).
 
 
-## 86. The decision-id gate scans `.py` only, and this project ships `.mjs` (open, found and filed batch 141)
+## 86. The decision-id gate scans `.py` only, and this project ships `.mjs` (closed, batch 224)
 
 **Issue:** #237.
 
@@ -4995,7 +4997,9 @@ test-name gate has no business reading JavaScript -- a `.mjs` file naming a
 pytest test is not a thing that happens. Give the citation gate its own
 domain.
 
-## 87. `.gitleaksignore` pins its blessings by LINE NUMBER (open, found and filed batch 144, measured again batch 145)
+**CLOSED (batch 224), raw text, on the owner's choice.** `test_every_decision_id_cited_in_the_npm_scripts_resolves` runs the citation rule over the `.mjs` files' whole text, through its own `_production_javascript` domain; `_production_python` is unchanged, since the test-name gate shares it. Its first run found a real miss: `(H3/C2)` in `scripts/prepublish-check.mjs`, the copy of the citation batch 128 dropped from AGENTS.md as unresolvable, which survived because nothing read `.mjs`. It is dropped there too.
+
+## 87. `.gitleaksignore` pins its blessings by LINE NUMBER (closed, batch 224)
 
 **Issue:** #238.
 
@@ -5052,6 +5056,8 @@ tests' own needles: `sk-abc123def456...`, `AIzaSyA1234567890abcdef...` and
 an RSA header whose body is literally `MIIEpA...`. Worth recording because
 the wrong form is the one that looks MORE thorough, which is the same
 footgun `pip-audit` has (item 88's entry, and batch 148's correction).
+
+**CLOSED (batch 224), candidate (a), on the owner's choice.** The six blessed fakes are assembled from pieces at runtime, as batch 144 had already done for others, so no rule matches the source and every value a test needs is unchanged (the patch script compared each old and new literal before writing). Splitting the private-key fixture exposed a seventh match two lines down, an assertion's `-----BEGIN RSA PRIVATE KEY-----` pairing with a later `KEY-----`; it is built the same way. `.gitleaksignore` keeps only a comment saying it is empty on purpose, and gitleaks on an export of the tree finds nothing. The comments in `.github/gitleaks.toml` and `.github/workflows/gitleaks.yml` say so too -- the second is a workflow file, which this project's token cannot push.
 
 ## 88. Six workflows are not on `main`, so a branch's CI is reconstructed by hand (closed, batch 159 -- superseded when PR #200 put the six workflows on `main`)
 
@@ -5184,7 +5190,7 @@ pinned on its own with the deny stubbed out. An ordinary multiply-linked file
 stays readable, which is the control. A `.venastine/` elsewhere on the disk is
 not searched.
 
-## 91. A closed issue cited in a docstring has nothing keeping it honest (open, found and filed batch 146)
+## 91. A closed issue cited in a docstring has nothing keeping it honest (closed, batch 224)
 
 **Issue:** #241.
 
@@ -5223,6 +5229,8 @@ open. That needs the manifest either way.
 
 **Not:** removing issue numbers from comments. They are the most useful kind
 of citation in the tree -- the question is only what keeps them true.
+
+**CLOSED (batch 224), the owner's choice: forbid claims about state.** Measured first: 499 production comment lines cite an issue, 14 of them beside a word like open, filed or until, and all 14 are history. `test_no_production_comment_says_an_issue_is_open` refuses the present-tense and conditional forms ("#N is still open", "tracked in #N", "when #N closes") in the `.py` comments and docstrings and the `.mjs` text, and its control asserts five such claims match and five historical sentences from the tree do not. No manifest: an issue's state lives on GitHub, and a committed copy would go stale the day an issue closed. AGENTS.md states the rule. `.github/workflows/tests.yml`'s "when #10 closes" is outside the domain and belongs to #230.
 
 ## 92. An atomic doc write can fail where a truncating one succeeded (closed, batch 219)
 
@@ -5796,7 +5804,7 @@ seeing one WSL-only failure in this test should check this entry before
 spending the cycle -- and should still check that the failure is THIS one,
 because a second WSL-only failure would be a different claim.
 
-## 103. The range gate reads a per-section sub-range as a claim about the whole family (open, measured and filed batch 151)
+## 103. The range gate reads a per-section sub-range as a claim about the whole family (closed, batch 224)
 
 **Issue:** #251.
 
@@ -5857,6 +5865,8 @@ re-enact this, and this entry is what the reader should find when it does.
 **Not:** deleting the check, and not relaxing it to the highest range on the
 line. Both give back the property E13 and E14 paid for.
 
+**CLOSED (batch 224), the third shape made a check, on the owner's choice.** `test_each_family_has_one_range_on_the_map_line` requires exactly one range per family, so a per-section range fails there, naming itself and saying to write it as a list, before the range check can misread it as the family's claim. Today every one of the 51 families has one range.
+
 ## 104. Displayed untrusted text is filtered for controls and not for bidi or zero-width characters (closed, batch 160 -- revealed in approvals)
 
 **Issue:** #252.
@@ -5902,7 +5912,7 @@ render as written. **One correction to the entry:** `json.dumps` does not
 these as an escape, so the params block never drew out of order, and a test pins
 it as the control.
 
-## 105. The decision-id gate reads a Unicode control-range name as a decision citation (open, measured batch 152)
+## 105. The decision-id gate reads a Unicode control-range name as a decision citation (closed, batch 224)
 
 **Issue:** #253.
 
@@ -5933,6 +5943,8 @@ bare id in production, which is a surface of its own rather than a line.
 **What a reader should know meanwhile.** `C0`/`C1` in `core/ansi.py` mean
 the Unicode control ranges. The gate cannot tell, and a sentence about
 Unicode that trips it is not drift.
+
+**CLOSED (batch 224), a namespace rather than a list, on the owner's choice.** `_NAMESPACES` gains "Unicode control set": `C0` or `C1` written after `Unicode`. AGENTS.md's namespace table has the row, and `core/ansi.py` writes `Unicode C1` throughout. The grammar test gains one accepted and two refused cases (`Unicode C3` is still a decision). The scan also found a different false pass: `pipeline_storage.py` called batch 154's mutation control `control C1`, which resolved silently to ROADMAP_v2's C1; it says `mutation C1` now.
 
 ## 106. Two private names AGENTS.md documents may be stale, and the gate that would say so costs too much here (closed, batch 159 -- both names measured as explained)
 
@@ -6053,7 +6065,7 @@ useful than a swallowed bug.
 
 **CLOSED (batch 213), both halves, the owner's choice.** `generate()` wraps the kind question's two walks, `manifest.is_blank` and `propose_kind`, and turns an `OSError` from either into an `InitError` that names the error and says to re-run with `--software` or `--research`; `_config_plan` and `_existing_documents` call `os.path.exists`, which does not raise, and stay as they are. `main.run_init_command` also catches `OSError` and ends with `[--init stopped: ...]` and exit 1, for whatever escapes next -- not a blanket `except Exception`, so a bug still shows its stack. Four tests in `TestAnUnlistableProjectEndsInALine`, each failing without the fix.
 
-## 109. Nothing resolves the test names `tests/BREAKING_CHANGES.md` cites (open, measured batch 153)
+## 109. Nothing resolves the test names `tests/BREAKING_CHANGES.md` cites (closed, batch 224)
 
 **Issue:** #256.
 
@@ -6083,6 +6095,8 @@ before the gate.
 **What it would have caught.** Not this batch's defect -- the three names
 were correct until this batch renamed them. It catches the NEXT rename,
 which is the half nobody is present for.
+
+**CLOSED (batch 224), the gate and the sweep, on the owner's choice.** `test_every_test_name_the_guard_log_cites_exists` resolves every test function, class and module name in the log against `tests/` (a name ending in `_` is a prefix; Starlette's `TestClient` is the one listed exception). A name inside `~~...~~` is history and is not read, which is the convention the file's header now states. Of the 44 names that resolved nowhere, the renamed guards carry their current name (eight rows), names written without `.py` count as modules, a placeholder became `<class>::<test>`, a wrapped name was joined, and the rest are struck through with what replaced them: retired tests, guards whose behaviour was later reversed on purpose (the drawn-run retry, the per-path budgets #4 removed, the per-pair window), and the old names in rename chains. One row records a gap rather than a rename: nothing pins `list_threads`' limit ordering since a51c381.
 
 ## 110. The thread-kind NULL fallback is in three readers and pinned by none (closed, batch 222)
 
