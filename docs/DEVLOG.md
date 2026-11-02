@@ -29282,3 +29282,66 @@ finished on close) first.
   it and gitleaks on an export are clean.
 - **Version**, by `scripts/version.py bump`:
   `0.3.4-b.4.bugfixes.r57e749187eaf`.
+
+## Batch 222 -- untested invariants (2026-11-02)
+
+**#228, #231, #233, #257 and #258, register items 74, 78, 80, 110 and
+111**, the "untested invariants" group. The owner chose #257/#258's
+answer (keep the NULL fallbacks, correct what they say) and #233's scope
+(reset every memo, plus a census) first.
+
+- **#258, and what measuring it found.** `core.reasoning.pipeline_storage`
+  is in `real_storage`'s swap, imported before `create_db_and_tables()` so
+  its table exists, and the create/update/load trio round-trips on real
+  SQLite. The fixture also restores the package attribute that import
+  rebinds: without it, an orchestrator test run after this file failed on
+  a module bound to a deleted database. The finding is the NULL guards.
+  Their comments said a migrated row reads NULL, but `ensure_columns` adds
+  both columns with DEFAULT '[]', so it reads '[]'. `candidates_json`,
+  which arrived the day after #26, is NOT NULL on every database. A NULL
+  in `pass_threads_json` takes SQL written by hand on a database first
+  migrated between 08-06 and 08-22. A test builds that database through
+  the real startup and pins all three facts. The guards stay, with
+  corrected comments, as do the fake-side pins in `test_pipeline_storage.py`.
+- **#257, the same finding for `kind`.** The migration has added it with
+  DEFAULT 'chat' since §27, so an old row reads 'chat' before any reader
+  runs. The three readers' fallbacks stay, explained once in
+  `get_thread` with two pointers, and a test builds the pre-#26 database
+  and asks all three about a migrated row and a hand-written NULL.
+  ROADMAP_v3's S09-03 record gets a dated amendment.
+- **#231's ordering half.** Four e2e tests give `FakeStorage` and real
+  storage one set of ids and stamps and compare thread order, child order,
+  memory visibility and the failed-turn row. The thread-order tie is
+  written in the wrong order on purpose: both sorts are stable, so a tie
+  written in its output order passes without the tiebreaker.
+- **#233, wider than filed.** Re-counted with both of
+  `test_probe_isolation`'s shapes across production, fourteen memos had
+  no general reset, not four, among them two warn-once sets batches 220
+  and 221 added, a notice set nothing reset, and an unlocked secret store
+  no fixture locked. The effort cache joined its siblings in
+  `clear_client_cache`; the rest are in `PROCESS_MEMOS`, reset by a new
+  autouse fixture through each module's own reset where it has one.
+  `tests/test_process_memos.py` holds production to the lists in both
+  directions, with eight exemptions that each state their reason.
+- **#228.** The initializer's and the compactor's prompts are built from
+  their runs' facts through `advertisement_facts`, the reviewer's rule.
+  Tests widen each agent to admit `spawn_subagent`; an attended
+  compaction is the control.
+
+### Verified
+
+- New tests: 18 (`test_storage_e2e.py` +7, `test_catalog_advertisement.py`
+  +3, `test_process_memos.py` 8, new). Mutations, each red: either #228
+  call site reverted, a hard-coded headless answer, each of the three
+  `kind` fallbacks, the `pass_threads_json` guard, each of the fake's four
+  re-derived rules, production's thread order, the package-attribute
+  restore, and three of the new resets.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8639 tests, 8564
+  passed and 75 skipped, in 2:54, green on the first run. WSL, on a
+  Linux-filesystem copy: the seven touched test files, 484 passed; the one
+  failure is `test_an_unrecognised_kind_answer_cancels`, which fails
+  identically on a `git archive` of HEAD because the copy has no
+  `providers.json`. ruff, bandit as CI runs it (0 findings outside the
+  baseline, no pair grew) and gitleaks on an export are clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.5.bugfixes.r57e749187eaf`.

@@ -482,13 +482,19 @@ def cli_stdin(monkeypatch):
 @pytest.fixture(autouse=True)
 def clear_client_cache():
     """core.client caches SDK clients keyed by provider name, and queried
-    context windows keyed by (provider, model). Reset both between tests so
-    a previous test's queued fake responses -- or a window it primed -- do
-    not leak into the next one."""
+    context windows and effort levels keyed by (provider, model). Reset
+    them between tests so a previous test's queued fake responses -- or a
+    window or effort list it primed -- do not leak into the next one.
+
+    The effort cache was the one of the four left out until #233, declared
+    six lines above a cache this fixture did clear and described in the
+    same words ("once per process"): the next test got a fresh fake client
+    and the previous client's effort answer without asking it."""
     import core.client
     core.client._client_cache.clear()
     core.client._context_window_cache.clear()
     core.client._context_window_failures.clear()
+    core.client._effort_levels_cache.clear()
     # §21's session overrides are module state too, and the order
     # dependency they would otherwise create is the same one
     # _context_window_warned's fixture exists for: a test that sets a
@@ -507,6 +513,7 @@ def clear_client_cache():
     core.client._client_cache.clear()
     core.client._context_window_cache.clear()
     core.client._context_window_failures.clear()
+    core.client._effort_levels_cache.clear()
     core.session.clear()
     credentials.clear_session_providers()
 
@@ -735,6 +742,91 @@ def clear_network_tool_caches():
     drop()
     yield
     drop()
+
+
+def _clear(*names):
+    """A reset for memos that are containers: empty each in place, so a
+    name some other module imported keeps pointing at the live object."""
+    def reset(module):
+        for name in names:
+            getattr(module, name).clear()
+    return reset
+
+
+def _assign(name, value):
+    """A reset for a memo that is a rebound scalar."""
+    return lambda module: setattr(module, name, value)
+
+
+#: Every module-level memo in production that no OTHER autouse fixture here
+#: resets (#233), as (module, the names, how to reset them). Each was reset
+#: before this only by a fixture in the file that tests it -- or, for
+#: `_image_notices_shown`, by nothing -- so a test anywhere else inherited
+#: whatever the last test on its worker left, and `--dist loadscope` decides
+#: who that was. tests/test_process_memos.py holds this list and the other
+#: fixtures' to the tree in both directions: a NEW memo fails there until it
+#: is added here, given to the fixture that owns its module, or exempted.
+PROCESS_MEMOS = (
+    # The last parse of config.yaml. Keyed on the file's stamp, so a
+    # leftover is usually right -- and wrong for two same-size writes inside
+    # one timestamp tick, which is why the module has its own reset.
+    ("config_edit", ("_document_cache",),
+     lambda module: module.forget_document()),
+    # Whether the INSTALLED google-genai can carry a thinking budget, asked
+    # once; three files set it by hand to test both answers.
+    ("core.client", ("_google_budget_support",),
+     _assign("_google_budget_support", None)),
+    # §83: an ineligible ChatGPT account hears the whole story once.
+    ("core.client", ("_ineligible_explained",),
+     _assign("_ineligible_explained", False)),
+    # Warn-once and log-once sets: a test asserting the first warning must
+    # not depend on no earlier test on its worker having earned it.
+    ("core.compaction", ("_context_window_warned", "_floor_warned",
+                         "_read_warned", "_yield_logged"),
+     _clear("_context_window_warned", "_floor_warned", "_read_warned",
+            "_yield_logged")),
+    # The headless and image notices, deduplicated on what they report.
+    ("core.loop", ("_headless_notices_shown", "_image_notices_shown"),
+     _clear("_headless_notices_shown", "_image_notices_shown")),
+    # What register_all() recorded so unregister_all() removes exactly that.
+    ("mcp_client.registration", ("_registered",), _clear("_registered")),
+    # D15's per-tool approval defaults for dynamically named tools, through
+    # the module's own function: with no arguments it drops all of them.
+    ("security.permissions", ("_dynamic_approval_defaults",),
+     lambda module: module.clear_dynamic_approval_defaults()),
+    # Arms apply_cli()'s change-after-read guard. `_posture` itself is
+    # restored by every seam that changes it (see test_process_memos.py).
+    ("security.posture", ("_read",), _assign("_read", False)),
+    # An unlocked store's plaintext, through the one function that zeroes
+    # it (SS60's single exit). A test must never inherit an unlocked store.
+    ("security.secrets", ("_state",), lambda module: module.lock()),
+)
+
+
+def _reset_process_memos():
+    """Only modules ALREADY IMPORTED: one that is not has nothing to forget,
+    and importing it here would charge its import to every test."""
+    import sys
+
+    for module_name, _names, reset in PROCESS_MEMOS:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            reset(module)
+
+
+@pytest.fixture(autouse=True)
+def reset_process_memos():
+    """Reset every memo in PROCESS_MEMOS before and after each test (#233).
+
+    `isolate_sandbox_probes` made this argument for its own module and won
+    it (batch 107): "the first test's answer would be the only one any of
+    them measured". This fixture applies it to the rest of the tree, as a
+    REVIEWED list rather than a loop over module attributes, because each
+    entry has a meaning -- one is a security store, one arms a guard -- and
+    the reset for each is chosen, not assumed."""
+    _reset_process_memos()
+    yield
+    _reset_process_memos()
 
 
 def _sandbox_probe_defaults():

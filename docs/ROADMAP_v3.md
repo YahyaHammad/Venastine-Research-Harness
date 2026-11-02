@@ -4714,6 +4714,8 @@ docstring has said **since batch 75**, where commit `47257f3` ("comments
 that named the wrong mechanism") deleted this exact sentence from
 `get_thread` and `child_threads` and missed the third copy.
 
+*Amended in batch 222 (#257).* For `kind`, the NULL this names is not what a migration leaves: `ensure_columns` adds `kind` with DEFAULT 'chat', so a row older than the column reads 'chat', and only SQL written by hand on a database first migrated between §27 and #26 leaves a NULL. The conclusion stands -- the fallback absorbs a NULL, not a missing column -- and `get_thread`'s docstring now says which one.
+
 ### S09-04: the report named three sentences and the claim was in thirteen
 
 `load_pipeline_run` returns **11** keys and the record carries **6** data

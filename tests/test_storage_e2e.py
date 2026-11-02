@@ -64,17 +64,13 @@ from types import SimpleNamespace
 
 import pytest
 
-# AT MODULE LEVEL, WHICH IS THE POINT. Collection happens before any
-# fixture runs, so these two bind against the root conftest's FAKE
-# sqlmodel like every other test module's imports do. Imported inside a
-# test instead, they would bind while `real_storage` has the REAL
-# sqlmodel installed -- registering PipelineRunRecord on the real
-# metadata and leaving `pipeline_storage` holding the real engine for
-# whichever module runs next in this worker.
-#
-# Neither needs the swap: classify_legacy_pass_threads() takes a DBAPI
-# connection (that is the seam), and _record_pass_thread() is a pure
-# function over a list.
+# AT MODULE LEVEL, and neither needs the swap: classify_legacy_pass_threads()
+# takes a DBAPI connection (that is the seam) and _record_pass_thread() is
+# a pure function over a list, so they bind against the root conftest's FAKE
+# sqlmodel like every other test module's imports do. The pipeline-run API
+# itself is a different matter -- it holds an engine -- and since #258
+# `real_storage` swaps `core.reasoning.pipeline_storage` with the rest; a
+# test reaches the real module through `_real_pipeline_storage()`.
 from core.reasoning.orchestrator import _record_pass_thread
 from core.reasoning.pipeline_storage import classify_legacy_pass_threads
 
@@ -82,7 +78,11 @@ from core.reasoning.pipeline_storage import classify_legacy_pass_threads
 # ---- Real sqlmodel, real sqlite --------------------------------------------
 # ---------------------------------------------------------------------------
 
-_SWAPPED = ("sqlmodel", "config", "database", "storage")
+#: #258 added the last one. Until then the pipeline-run write and read API
+#: had run only against the conftest's fake, NULL guards included -- the
+#: shape S09-01 already paid for once in the same subsystem.
+_SWAPPED = ("sqlmodel", "config", "database", "storage",
+            "core.reasoning.pipeline_storage")
 
 
 @pytest.fixture(scope="module")
@@ -180,6 +180,10 @@ def real_storage(tmp_path_factory, _schema_cache_is_put_back):
         sys.modules.pop(name, None)
     os.environ["APP_DB_PATH"] = str(tmp_path_factory.mktemp("e2e") / "e2e.db")
 
+    # All three BEFORE create_db_and_tables(): a table registers when its
+    # module is imported, and that call builds only what is registered --
+    # which since #258 includes the pipeline-run table.
+    import core.reasoning.pipeline_storage  # noqa: F401
     import database
     import storage
     database.create_db_and_tables()
@@ -197,6 +201,18 @@ def real_storage(tmp_path_factory, _schema_cache_is_put_back):
             sys.modules.pop(name, None)
         else:
             sys.modules[name] = module
+        # A DOTTED module is also an attribute of its package, and the
+        # import above rebound `core.reasoning.pipeline_storage` to the
+        # real one. `from core.reasoning import pipeline_storage` reads
+        # that attribute before sys.modules, so restoring the dict alone
+        # would hand the next test file a module bound to a deleted
+        # database.
+        package, _, leaf = name.rpartition(".")
+        if package in sys.modules:
+            if module is None:
+                sys.modules[package].__dict__.pop(leaf, None)
+            else:
+                setattr(sys.modules[package], leaf, module)
     if saved_db_path is None:
         os.environ.pop("APP_DB_PATH", None)
     else:
@@ -1838,16 +1854,17 @@ def test_a_recorded_pass_thread_is_relabelled_with_both_sides_real(
     batch 154 this relabelled 0 rows -- `'a-b' in {'ab'}` -- and the
     thread stayed in the picker.
 
-    The run row is inserted with raw SQL rather than through
-    `create_pipeline_run`: `core.reasoning.pipeline_storage` is not in
-    `_SWAPPED` (it binds `database.engine` at import, against the fake),
-    and nothing is gained by putting it there. The two spellings are what
-    this test is about, and both of those come from the real producers.
+    THE RUN ROW GOES THROUGH THE REAL WRITER since #258 put
+    `core.reasoning.pipeline_storage` in `_SWAPPED`. Until then it was
+    inserted with raw SQL into a table this test created, because the
+    module bound the fake's engine -- so the recorded id now travels
+    through `update_pipeline_run`'s real `json.dumps` too.
 
-    AN ANCIENT WINDOW, deliberately. The database is module-scoped and
-    shared, so a window around "now" would sweep every other test's chat
-    threads into the research_pass kind through TIER 2 and prove nothing
-    about tier 1.
+    Its window is around "now" and is never consulted: a run that names
+    its passes is tier 1, which is #82's whole point, and is also what
+    keeps this run from sweeping the shared database's other chat threads
+    into the research_pass kind. The row is deleted afterwards, so a later
+    classification here meets no run this test left.
     """
     thread_id = real_storage.create_thread()
     recorded = []
@@ -1855,29 +1872,496 @@ def test_a_recorded_pass_thread_is_relabelled_with_both_sides_real(
                         recorded)
     assert recorded == [{"pass": "Pass 1", "thread_id": str(thread_id)}]
 
+    pipeline_storage = _real_pipeline_storage()
+    run_id = pipeline_storage.create_pipeline_run("s09-01")
+    pipeline_storage.update_pipeline_run(
+        run_id, SimpleNamespace(claims=[], trace=[], coverage_gaps=[],
+                                pass_threads=recorded, final_report=""),
+        status="complete")
+
     connection = sqlite3.connect(os.environ["APP_DB_PATH"])
     try:
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS pipelinerunrecord ("
-            " id VARCHAR PRIMARY KEY, started_at DATETIME,"
-            " finished_at DATETIME, pass_threads_json TEXT)")
-        connection.execute(
-            "INSERT INTO pipelinerunrecord"
-            " (id, started_at, finished_at, pass_threads_json)"
-            " VALUES ('s09-01', '1999-01-01 00:00:00.000000',"
-            " '1999-01-01 00:00:30.000000', ?)",
-            (json.dumps(recorded),))
-        connection.commit()
-
         relabelled = classify_legacy_pass_threads(connection)
 
         kind = connection.execute(
             "SELECT kind FROM conversationthread WHERE id = ?",
             (thread_id.hex,)).fetchone()[0]
     finally:
+        connection.execute("DELETE FROM pipelinerunrecord WHERE id = ?",
+                           (run_id.hex,))
+        connection.commit()
         connection.close()
 
     assert relabelled == 1, (
         f"tier 1 relabelled {relabelled} rows: the run recorded "
         f"{str(thread_id)!r} and the database holds {thread_id.hex!r}")
     assert kind == "research_pass"
+
+
+# ---------------------------------------------------------------------------
+# ---- #258: the pipeline-run API against real SQLite ------------------------
+# ---------------------------------------------------------------------------
+
+def _real_pipeline_storage():
+    """The pipeline-run module `real_storage` imported against the real
+    sqlmodel (#258). Read from sys.modules rather than imported here, so no
+    test can be the one that registers its table: that has to happen before
+    create_db_and_tables(), which is the fixture's job."""
+    return sys.modules["core.reasoning.pipeline_storage"]
+
+
+def _startup_on(path):
+    """create_db_and_tables()' two steps -- create_all, then ensure_columns
+    -- run on the database at `path` instead of the module's, returning a
+    REAL engine bound to it.
+
+    For the questions only a database OLDER than its schema can answer:
+    the test builds the old shape with stdlib sqlite3, and this runs the
+    startup the next launch would run on it, with the same registered
+    tables. The caller disposes of the engine."""
+    from sqlmodel import SQLModel, create_engine
+
+    import database
+
+    engine = create_engine(f"sqlite:///{path}")
+    SQLModel.metadata.create_all(engine)
+    connection = engine.raw_connection()
+    try:
+        database.ensure_columns(connection, database._declared_columns())
+    finally:
+        connection.close()
+    return engine
+
+
+def _delete_run(run_id):
+    connection = sqlite3.connect(os.environ["APP_DB_PATH"])
+    try:
+        connection.execute("DELETE FROM pipelinerunrecord WHERE id = ?",
+                           (run_id.hex,))
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_a_pipeline_run_survives_a_write_and_a_read(real_storage):
+    """#258. The create -> update -> load trio on real SQLite, which until
+    this batch had met only the conftest's fake.
+
+    Measured before it was written: the two agree on everything asserted
+    here. The one difference is recorded rather than asserted -- the real
+    columns hand back NAIVE datetimes for the UTC-aware ones written, as
+    every DateTime column on SQLite does, and nothing reads either
+    timestamp off this dict today.
+
+    The row is deleted afterwards: a finished run is a window for
+    classify_legacy_pass_threads' second tier, and the database is shared."""
+    from uuid import uuid4
+
+    from core.reasoning.base import Claim, PipelineRun
+
+    pipeline_storage = _real_pipeline_storage()
+    run = PipelineRun(user_query="real round trip")
+    run.claims.append(Claim(id="C1", text="A claim.", type="factual",
+                            entities=["A"]))
+    run.log("Trace line.")
+    run.coverage_gaps.append({"entity": "A", "tier": "UNVERIFIED_COVERAGE"})
+    run.pass_threads = [{"pass": "Pass 1", "thread_id": "not-a-thread"}]
+    run.candidates = [{"candidate": 1, "provider_name": "P", "model": "m",
+                       "chars": 4, "text": "body"}]
+    run.final_report = "Report."
+
+    run_id = pipeline_storage.create_pipeline_run("real round trip")
+    try:
+        fresh = pipeline_storage.load_pipeline_run(run_id)
+        assert (fresh["status"], fresh["finished_at"]) == ("running", None)
+        assert [fresh[key] for key in (
+            "claims", "trace", "coverage_gaps", "pass_threads",
+            "candidates", "final_report")] == [[], [], [], [], [], ""]
+
+        pipeline_storage.update_pipeline_run(run_id, run)
+        assert pipeline_storage.load_pipeline_run(run_id)["status"] == \
+            "running", "a data-only checkpoint changed the status"
+
+        pipeline_storage.update_pipeline_run(run_id, run, status="complete")
+        done = pipeline_storage.load_pipeline_run(run_id)
+        assert done["status"] == "complete"
+        assert done["finished_at"] is not None
+        assert done["claims"] == [vars(run.claims[0])]
+        assert done["trace"] == run.trace
+        assert done["coverage_gaps"] == run.coverage_gaps
+        assert done["pass_threads"] == run.pass_threads
+        assert done["candidates"] == [{"candidate": 1, "provider_name": "P",
+                                       "model": "m", "chars": 4}], (
+            "a candidate's text reached the database; the record carries "
+            "metadata only")
+        assert done["final_report"] == "Report."
+
+        pipeline_storage.update_pipeline_run(run_id, run)
+        again = pipeline_storage.load_pipeline_run(run_id)
+        assert (again["status"], again["finished_at"]) == (
+            "complete", done["finished_at"])
+    finally:
+        _delete_run(run_id)
+
+    with pytest.raises(ValueError, match="No pipeline run found"):
+        pipeline_storage.load_pipeline_run(uuid4())
+    with pytest.raises(ValueError, match="No pipeline run found"):
+        pipeline_storage.update_pipeline_run(uuid4(), run)
+
+
+def test_a_run_older_than_its_newer_columns_reads_them_as_empty(
+        real_storage, tmp_path, monkeypatch):
+    """#258, and what measuring it found. `load_pipeline_run` reads the two
+    columns §27 and E13 added through `or "[]"`, and both comments gave the
+    reason: a row written before the column existed is NULL after
+    ensure_columns' ALTER. It is not. The migrator adds each column with
+    DEFAULT '[]', and SQLite reads every row older than the ALTER as that
+    default -- so the startup a real database goes through never leaves
+    the NULL those comments described.
+
+    This builds a database the way one migrated through both batches is.
+    `pass_threads_json` arrived on 2026-08-06, before #26 (08-22) carried
+    NOT NULL into the migrator, so it was added NULLABLE with its default;
+    `candidates_json` arrived on 08-23 and is added here by the real
+    startup, NOT NULL. Three facts follow, and each is asserted:
+
+      * the old row reads '[]' in both columns, before any reader runs;
+      * a NULL in `pass_threads_json` takes SQL written by hand, and the
+        reader's guard is what turns it into [] -- without the guard,
+        json.loads(None) raises here;
+      * a NULL in `candidates_json` cannot be written at all."""
+    from uuid import uuid4
+
+    pipeline_storage = _real_pipeline_storage()
+    path = tmp_path / "pre_e13.db"
+    old, by_hand = uuid4(), uuid4()
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "CREATE TABLE pipelinerunrecord ("
+            " id CHAR(32) NOT NULL PRIMARY KEY, user_query VARCHAR NOT NULL,"
+            " status VARCHAR NOT NULL, claims_json VARCHAR NOT NULL,"
+            " trace_json VARCHAR NOT NULL,"
+            " coverage_gaps_json VARCHAR NOT NULL,"
+            " final_report VARCHAR NOT NULL, started_at DATETIME NOT NULL,"
+            " finished_at DATETIME)")
+        connection.execute(
+            "INSERT INTO pipelinerunrecord VALUES (?, 'pre-§27', 'complete',"
+            " '[]', '[]', '[]', '', '2026-08-01 00:00:00.000000',"
+            " '2026-08-01 00:01:00.000000')", (old.hex,))
+        # §27's ALTER as the migrator wrote it before #26: a default, and
+        # nullable.
+        connection.execute(
+            "ALTER TABLE pipelinerunrecord"
+            " ADD COLUMN pass_threads_json VARCHAR DEFAULT '[]'")
+        connection.commit()
+    finally:
+        connection.close()
+
+    engine = _startup_on(path)
+    try:
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(
+                "INSERT INTO pipelinerunrecord (id, user_query, status,"
+                " claims_json, trace_json, coverage_gaps_json, final_report,"
+                " started_at, pass_threads_json) VALUES (?, 'by hand',"
+                " 'complete', '[]', '[]', '[]', '',"
+                " '2026-08-10 00:00:00.000000', NULL)", (by_hand.hex,))
+            connection.commit()
+            stored = {row[0]: (row[1], row[2]) for row in connection.execute(
+                "SELECT id, pass_threads_json, candidates_json"
+                " FROM pipelinerunrecord")}
+            with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+                connection.execute(
+                    "UPDATE pipelinerunrecord SET candidates_json = NULL"
+                    " WHERE id = ?", (old.hex,))
+        finally:
+            connection.close()
+
+        assert stored[old.hex] == ("[]", "[]"), (
+            "the migration no longer fills an old row with the column's "
+            "default; the guards in load_pipeline_run are now the only "
+            "thing between that row and json.loads(None)")
+        assert stored[by_hand.hex] == (None, "[]")
+
+        monkeypatch.setattr(pipeline_storage, "engine", engine)
+        for run_id in (old, by_hand):
+            loaded = pipeline_storage.load_pipeline_run(run_id)
+            assert (loaded["pass_threads"], loaded["candidates"]) == ([], [])
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# ---- #257: a thread older than its kind ------------------------------------
+# ---------------------------------------------------------------------------
+
+def test_a_thread_older_than_its_kind_reads_as_a_conversation(
+        real_storage, tmp_path, monkeypatch):
+    """#257. `get_thread`, `child_threads` and `list_threads` each read
+    `kind` as `getattr(t, "kind", None) or THREAD_KIND_CHAT`, and no test
+    put a NULL in front of any of them -- deleting all three fallbacks was
+    green.
+
+    Measured for this test, the NULL their comments described is not what
+    a migration leaves: ensure_columns has added `kind` with DEFAULT
+    'chat' since §27 shipped it, so a row older than the column reads
+    'chat' out of SQLite before any reader runs. A NULL takes a database
+    whose column was added NULLABLE -- first migrated between 2026-08-06
+    and #26 on 08-22 -- and SQL written by hand. This builds exactly that
+    database and asks every reader about both rows.
+
+    The picker's filter is SQL, so `list_threads()` never meets the NULL
+    row at all, while `kind=None` lists it as a conversation. Recorded
+    here as what the code does, not as a promise."""
+    from uuid import uuid4
+
+    path = tmp_path / "pre26.db"
+    old, by_hand, parent = uuid4(), uuid4(), uuid4()
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "CREATE TABLE conversationthread ("
+            " id CHAR(32) NOT NULL PRIMARY KEY,"
+            " created_at DATETIME NOT NULL)")
+        connection.execute(
+            "INSERT INTO conversationthread VALUES (?,"
+            " '2026-08-01 00:00:00.000000')", (old.hex,))
+        # §27's ALTER as the migrator wrote it before #26.
+        connection.execute("ALTER TABLE conversationthread"
+                           " ADD COLUMN kind VARCHAR DEFAULT 'chat'")
+        connection.commit()
+    finally:
+        connection.close()
+
+    engine = _startup_on(path)
+    try:
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(
+                "INSERT INTO conversationthread (id, created_at, kind,"
+                " parent_thread_id) VALUES (?, '2026-08-10 00:00:00.000000',"
+                " NULL, ?)", (by_hand.hex, parent.hex))
+            connection.commit()
+            stored = dict(connection.execute(
+                "SELECT id, kind FROM conversationthread"))
+        finally:
+            connection.close()
+        assert stored == {old.hex: "chat", by_hand.hex: None}, (
+            "the migration no longer fills an old row with 'chat'; the "
+            "readers' fallbacks are now the only thing that does")
+
+        monkeypatch.setattr(real_storage, "engine", engine)
+        assert real_storage.get_thread(old)["kind"] == "chat"
+        assert real_storage.get_thread(by_hand)["kind"] == "chat"
+        assert [(child["id"], child["kind"]) for child in
+                real_storage.child_threads(parent)] == [(by_hand, "chat")]
+        assert {row["id"]: row["kind"] for row in
+                real_storage.list_threads(kind=None)} == {
+            old: "chat", by_hand: "chat"}
+        assert [row["id"] for row in real_storage.list_threads()] == [old]
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# ---- #231: FakeStorage's re-derived queries against the real ones ---------
+# ---------------------------------------------------------------------------
+#
+# tests/test_fake_storage_mirror.py compares the fake's PURE algorithms to
+# production's directly. These four are QUERIES -- ORDER BY and WHERE in
+# production, a sort and a filter in the fake -- so the only honest
+# comparison drives both sides with the same rows, and real rows exist only
+# here. Each test gives both sides ONE set of ids and ONE set of timestamps
+# and asks about those rows only, because the database is shared.
+
+def _ancient(seconds):
+    """A naive timestamp in 1998 -- naive, as the real columns hand them
+    back, and old enough to sort below every row other tests write."""
+    from datetime import datetime, timedelta
+    return datetime(1998, 1, 1) + timedelta(seconds=seconds)
+
+
+def _column(stamp):
+    return None if stamp is None else stamp.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def _twin_threads(real_storage, monkeypatch, specs):
+    """Create `specs` -- [(label, kind, created_at, last_activity_at,
+    parent label or None)] -- on real SQLite AND on a FakeStorage, with
+    the same ids and the same stamps. Returns (fake, {label: id}).
+
+    The real side takes its ids from create_thread and its stamps by SQL.
+    The fake is handed the same ids through `uuid.uuid4`, which its
+    create_thread imports at call time, and the same stamps in its own
+    fields."""
+    import uuid as uuid_module
+
+    from tests.conftest import FakeStorage
+
+    fake, ids = FakeStorage(), {}
+    connection = sqlite3.connect(os.environ["APP_DB_PATH"])
+    try:
+        for label, kind, created, active, parent in specs:
+            parent_id = ids[parent] if parent else None
+            thread_id = real_storage.create_thread(
+                kind=kind, parent_thread_id=parent_id)
+            ids[label] = thread_id
+            connection.execute(
+                "UPDATE conversationthread SET created_at = ?,"
+                " last_activity_at = ? WHERE id = ?",
+                (_column(created), _column(active), thread_id.hex))
+            # Committed per row: an open write here would lock out the
+            # real writer's next create_thread.
+            connection.commit()
+            with monkeypatch.context() as patch:
+                patch.setattr(uuid_module, "uuid4", lambda tid=thread_id: tid)
+                fake.create_thread(kind=kind, parent_thread_id=parent_id)
+            fake._thread_created_at[thread_id] = created
+            fake._thread_last_activity[thread_id] = active
+    finally:
+        connection.close()
+    return fake, ids
+
+
+def test_the_fake_lists_threads_in_the_real_order(real_storage, monkeypatch):
+    """`FakeStorage.list_threads` re-derives production's ORDER BY --
+    COALESCE(last_activity_at, created_at) DESC, then created_at DESC --
+    and its kind filter, and claims both. The rows are chosen so every
+    rule decides something: B is newest by activity, C and D TIE on the
+    coalesced key and creation breaks it, A was never messaged and falls
+    back to creation, and E is machinery only `kind=None` may list."""
+    fake, ids = _twin_threads(real_storage, monkeypatch, [
+        ("A", "chat", _ancient(1), None, None),
+        ("B", "chat", _ancient(0), _ancient(5), None),
+        # D BEFORE C, deliberately: both sorts are stable, so a tie
+        # written in the order it should come out would pass without the
+        # tiebreaker it exists to test.
+        ("D", "chat", _ancient(2), _ancient(3), None),
+        ("C", "chat", _ancient(3), None, None),
+        ("E", "subagent", _ancient(4), None, None),
+    ])
+    label = {thread_id: name for name, thread_id in ids.items()}
+
+    for kind, expected in (("chat", "BCDA"), (None, "BECDA"),
+                           ("subagent", "E")):
+        real = "".join(label[row["id"]]
+                       for row in real_storage.list_threads(kind=kind)
+                       if row["id"] in label)
+        mirrored = "".join(label[row["id"]]
+                           for row in fake.list_threads(kind=kind))
+        assert real == expected, (
+            f"production's order for kind={kind!r} is {real}, not "
+            f"{expected}; the rows no longer test what they were chosen for")
+        assert mirrored == real, (
+            f"FakeStorage.list_threads(kind={kind!r}) gives {mirrored} where "
+            f"production gives {real}")
+
+
+def test_the_fake_orders_child_threads_as_the_real_query_does(
+        real_storage, monkeypatch):
+    """`FakeStorage.child_threads` claims the id tiebreaker "as it is in
+    the real query". Five children share one creation instant -- the case
+    the tiebreaker exists for, since §47's NA9 lands create_thread calls
+    from several threads at once -- and a sixth is earlier, so creation
+    decides it. Five, so that ids happening to come out in insertion order
+    is a 1-in-120 accident rather than a coin toss."""
+    specs = [("P", "chat", _ancient(0), None, None),
+             ("late", "subagent", _ancient(9), None, "P")]
+    specs += [(f"tied{n}", "subagent", _ancient(5), None, "P")
+              for n in range(5)]
+    fake, ids = _twin_threads(real_storage, monkeypatch, specs)
+    tied = sorted(ids[f"tied{n}"] for n in range(5))
+
+    real = [child["id"] for child in real_storage.child_threads(ids["P"])]
+    mirrored = [child["id"] for child in fake.child_threads(ids["P"])]
+
+    assert real == [*tied, ids["late"]], (
+        "production no longer orders children by (created_at, id)")
+    assert mirrored == real
+
+
+def test_the_fake_shows_the_memories_the_real_query_shows(real_storage):
+    """`FakeStorage.list_memories` re-derives §21 AC6 -- a global memory is
+    visible everywhere, a project memory only from its own path -- which
+    #28 pushed into SQL. Asked from every vantage point and scope, edge
+    included: a project memory with no path, which #28 kept visible to a
+    caller with no project, deliberately.
+
+    The fake orders by insertion where production orders by
+    (created_at, id); the two agree while rows are stamped in the order
+    they are written, which is the only order save_memory has. The stamps
+    are set explicitly so a microsecond tie cannot make this a coin toss."""
+    from tests.conftest import FakeStorage
+
+    fake = FakeStorage()
+    thread = real_storage.create_thread()
+    saved = [("twin-g1", "global", None), ("twin-a1", "project", "/twin/a"),
+             ("twin-b1", "project", "/twin/b"),
+             ("twin-a2", "project", "/twin/a"),
+             ("twin-n1", "project", None), ("twin-g2", "global", None)]
+    connection = sqlite3.connect(os.environ["APP_DB_PATH"])
+    try:
+        for second, (content, scope, path) in enumerate(saved):
+            memory_id = real_storage.save_memory(
+                content, thread, scope=scope, project_path=path)
+            connection.execute(
+                "UPDATE usermemory SET created_at = ? WHERE id = ?",
+                (_column(_ancient(second)), memory_id.hex))
+            connection.commit()
+            fake.save_memory(content, thread, scope=scope, project_path=path)
+    finally:
+        connection.close()
+
+    def _twins(memories):
+        return [m["content"] for m in memories
+                if m["content"].startswith("twin-")]
+
+    for project_path in (None, "/twin/a", "/twin/b", "/twin/elsewhere"):
+        for scope in (None, "global", "project"):
+            real = _twins(real_storage.list_memories(
+                project_path=project_path, scope=scope))
+            mirrored = _twins(fake.list_memories(
+                project_path=project_path, scope=scope))
+            assert mirrored == real, (project_path, scope, real, mirrored)
+    assert _twins(real_storage.list_memories(project_path="/twin/a")) == [
+        "twin-g2", "twin-a2", "twin-a1", "twin-g1"]
+
+
+def test_the_fake_marks_the_same_row_failed(real_storage):
+    """`FakeStorage.mark_turn_failed` claims "the thread's NEWEST user row,
+    and False when it has none" -- production's rule, which orders by
+    (created_at, id). Driven with the same rows on both sides, including
+    the thread with no user row at all."""
+    from uuid import uuid4
+
+    from tests.conftest import FakeStorage
+
+    fake = FakeStorage()
+    real_thread, fake_thread = real_storage.create_thread(), \
+        fake.create_thread()
+    for role, text in (("user", "u1"), ("assistant", "a1"),
+                       ("user", "u2"), ("assistant", "a2")):
+        content = (text if role == "user"
+                   else {"text": text, "tool_calls": []})
+        real_storage.save_message(real_thread, role, content)
+        fake.save_message(fake_thread, role, content)
+
+    assert real_storage.mark_turn_failed(real_thread, "boom") is True
+    assert fake.mark_turn_failed(fake_thread, "boom") is True
+    real_marked = [index for index, row in enumerate(
+        real_storage.archive_history(real_thread)) if row.get("error")]
+    fake_marked = [index for index, row in enumerate(
+        fake._ordered_rows(fake_thread)) if row.get("error")]
+    assert real_marked == fake_marked == [2]
+
+    quiet_real, quiet_fake = real_storage.create_thread(), \
+        fake.create_thread()
+    only = {"text": "only", "tool_calls": []}
+    real_storage.save_message(quiet_real, "assistant", only)
+    fake.save_message(quiet_fake, "assistant", only)
+    assert real_storage.mark_turn_failed(quiet_real, "boom") is False
+    assert fake.mark_turn_failed(quiet_fake, "boom") is False
+    assert real_storage.mark_turn_failed(uuid4(), "boom") is False
+    assert fake.mark_turn_failed(uuid4(), "boom") is False

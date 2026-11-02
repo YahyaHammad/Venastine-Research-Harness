@@ -367,12 +367,15 @@ def test_load_pipeline_run_returns_empty_defaults_for_running_record():
 
 
 def test_load_pipeline_run_survives_a_legacy_null_candidates_column():
-    """A row written before `candidates_json` existed reads back as NULL
-    after ensure_columns' ALTER (the migration is additive and never
-    backfills -- #26 establishes such rows exist in the wild), and
-    json.loads(None) raises. The reader's `or "[]"` guard is what keeps
-    /claims <run id> working on a migrated database; this pins it by
-    building exactly that row shape."""
+    """The reader's `or "[]"` guard on `candidates_json`, pinned against
+    the fake, which can hold a NULL there.
+
+    THIS SAID A MIGRATED ROW READS BACK NULL until #258, and it does not.
+    ensure_columns adds the column NOT NULL DEFAULT '[]' -- E13 arrived
+    after #26 -- so a row older than it reads '[]' and SQLite refuses a
+    NULL outright, both measured on real SQLite in
+    tests/test_storage_e2e.py. The guard is kept as the reader's own
+    floor; this keeps it from being deleted as dead without a decision."""
     run_id = create_pipeline_run("pre-batch-19 query")
     record = _fetch_record(run_id)
     record.candidates_json = None
@@ -480,10 +483,15 @@ def test_a_data_only_checkpoint_never_touches_a_terminal_status():
 
 
 def test_load_pipeline_run_survives_a_legacy_null_pass_threads_column():
-    """#86 item 2 -- the sibling of the candidates_json pin above, and the
-    closest of the eight to S2: the guarded path is LIVE on every database
-    that predates §27 (ensure_columns' ALTER never backfills), and
-    /claims <run id> reads this function."""
+    """#86 item 2 -- the sibling of the candidates_json pin above, and
+    /claims <run id> reads this function.
+
+    The guarded path is NOT live on every database that predates §27, as
+    this said until #258: ensure_columns adds the column with DEFAULT
+    '[]', so an older row reads '[]'. It is live for a NULL written by
+    hand on a database first migrated between §27 and #26, where the
+    column is nullable -- tests/test_storage_e2e.py builds that database
+    and drives this guard on real SQLite."""
     run_id = create_pipeline_run("pre-§27 query")
     record = _fetch_record(run_id)
     record.pass_threads_json = None

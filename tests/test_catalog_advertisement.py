@@ -540,3 +540,120 @@ class TestAnMcpToolsDescriptionIsSaidToBeTheServers:
         MCP tool (§25) is told the same thing a chat turn is."""
         assert system_prompts.MCP_PROVENANCE in system_prompts.pass_prompt(
             "Pass 1", callable_only=True, granted={self.NAME})
+
+
+# ===========================================================================
+# ---- #228: the initializer and the compactor speak for their runs --------
+# ===========================================================================
+
+class TestTheInitializerAndCompactorPromptsSpeakForTheirRuns:
+    """#228 (TECHNICAL_DEBT 74). `/init` and automatic compaction built
+    their prompts with `system_prompt_for`'s ATTENDED defaults while the
+    initializer run is headless and the compactor's is whatever bundle it
+    is handed. Nothing diverged, because both agents' `allowed_tools` keep
+    `spawn_subagent` and `load_skill` out -- so #68's fix rested on two
+    frontmatters, and widening either would have put "spawn one of these"
+    back in front of a run that cannot.
+
+    So each test WIDENS the agent to admit `spawn_subagent` and asserts
+    the agreement `TestTheOneShotPromptSpeaksForTheRun` asserts: the
+    catalog is in the prompt exactly when the schema list the run's own
+    facts produce carries the tool. The attended compactor is the
+    control -- hard-coding `callable_only=True` would satisfy the two
+    headless tests and fail it."""
+
+    def _widened(self, name):
+        from core.config_loader import AgentDef
+        return AgentDef(
+            name=name, description="d", model=None, provider=None,
+            allowed_tools=["read_project_doc", "spawn_subagent"],
+            approval_overrides={}, use_project_context=False,
+            use_memory=False, max_steps=None, body="BODY", tier="harness",
+            path=f"/{name}.md")
+
+    def _assert_the_prompt_speaks_for(self, captured):
+        context = captured["context"]
+        assert registry.is_advertised("spawn_subagent", context, False,
+                                      set()), (
+            "the widened context does not admit spawn_subagent even when "
+            "attended, so this cannot tell the two answers apart")
+        callable_only, granted = advertisement_facts(
+            authorization=captured.get("authorization"),
+            response_channel=captured.get("response_channel"),
+            granted_tools=captured.get("granted_tools"))
+        names = {s["name"] for s in registry.schemas(
+            context, callable_only=callable_only, granted=granted)}
+        prompt = captured["system_prompt"]
+        if "spawn_subagent" in names:
+            assert "## Available agents" in prompt, (
+                "the run can spawn but the prompt hides the catalog")
+        else:
+            assert "## Available agents" not in prompt, (
+                "the prompt invites a spawn the run's schema list does not "
+                "carry -- #68 on this run")
+            assert "spawn_subagent" not in prompt
+        return "spawn_subagent" in names
+
+    def _initializer_prompt(self, roots, monkeypatch):
+        from agents.manager import manager
+        from core.loop import RunAgentLoop
+        from project_init import generator
+
+        widened = self._widened("initializer")
+        monkeypatch.setattr(manager, "get", lambda name: widened)
+        captured = {}
+        monkeypatch.setattr(
+            RunAgentLoop, "run_agent_conversation",
+            staticmethod(lambda **kw: (captured.update(kw),
+                                       make_model_response(text="# Hub"))[1]))
+        generator._run_initializer(str(roots["project"]), "software", None,
+                                   "m", "ANTHROPIC")
+        return captured
+
+    def _compactor_prompt(self, authorization):
+        from types import SimpleNamespace
+
+        from agents.manager import manager
+        from core import compaction
+
+        captured = {}
+        loop = SimpleNamespace(run_agent_conversation=lambda **kw: (
+            captured.update(kw), make_model_response(text="short"))[1])
+        compaction._summarize(
+            loop, manager, self._widened("compactor"), "BASE", "segment",
+            10_000, "original", "m", "ANTHROPIC", 0, authorization)
+        return captured
+
+    def test_the_initializer_run_is_headless_and_its_prompt_says_so(
+            self, roots, monkeypatch):
+        _agent(roots, "reviewer")
+        config_loader.initialize(str(roots["project"]))
+        assert system_prompts.agent_catalog_text(), "fixture produced nothing"
+
+        captured = self._initializer_prompt(roots, monkeypatch)
+
+        assert captured.get("authorization") is None, (
+            "the initializer now carries a bundle; this test's premise -- "
+            "and the comment above its prompt -- need revisiting")
+        assert self._assert_the_prompt_speaks_for(captured) is False
+
+    def test_an_unattended_compaction_is_not_told_to_spawn(self, roots):
+        _agent(roots, "reviewer")
+        config_loader.initialize(str(roots["project"]))
+
+        captured = self._compactor_prompt(None)
+
+        assert self._assert_the_prompt_speaks_for(captured) is False
+
+    def test_an_ATTENDED_compaction_still_is(self, roots):
+        from core.approval import RunAuthorization
+        from core.interaction import ResponseChannel
+
+        _agent(roots, "reviewer")
+        config_loader.initialize(str(roots["project"]))
+
+        captured = self._compactor_prompt(RunAuthorization(
+            provider=ResponseChannel(ask=lambda _r: None)))
+
+        assert self._assert_the_prompt_speaks_for(captured) is True
+        assert "- reviewer: desc for reviewer" in captured["system_prompt"]

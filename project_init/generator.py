@@ -265,7 +265,7 @@ def _run_initializer(project_path: str, kind: str, existing: Optional[str],
                      model: str, provider_name: str, activity=None) -> str:
     from agents.manager import manager
     from core import agent_activity
-    from core.loop import DEFAULT_SYSTEM_PROMPT, RunAgentLoop
+    from core.loop import DEFAULT_SYSTEM_PROMPT, RunAgentLoop, advertisement_facts
     from storage import THREAD_KIND_SUBAGENT
 
     agent = manager.get(config.INITIALIZER_AGENT)
@@ -275,8 +275,15 @@ def _run_initializer(project_path: str, kind: str, existing: Optional[str],
             f"there is nothing to generate the hub document with.")
 
     context = manager.active_context(agent)
+    # #228: the run below is given no authorization, so it is HEADLESS --
+    # nothing can answer an approval -- and the prompt says what THAT run
+    # can call, the reviewer's rule (core/reasoning/review.py). With
+    # system_prompt_for's attended defaults this was right only while
+    # initializer.md's allowed_tools kept both catalog tools out.
+    callable_only, granted = advertisement_facts()
     system_prompt = manager.system_prompt_for(
-        agent, DEFAULT_SYSTEM_PROMPT, context=context)
+        agent, DEFAULT_SYSTEM_PROMPT, context=context,
+        callable_only=callable_only, granted=granted)
 
     # §47, the span batch 59 named as a follow-on and did not build. /init
     # is a long agent-shaped run -- it reads the project and drafts a

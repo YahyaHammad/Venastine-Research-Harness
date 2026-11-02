@@ -1623,8 +1623,19 @@ def _summarize(loop_cls, manager, agent, base_prompt, segment_text, target,
     discarding it would spend the calls and keep the full history, leaving
     the thread exactly as stuck as before with less budget to fix it.
     """
+    from core.loop import advertisement_facts
+
     context = manager.active_context(agent)
-    system_prompt = manager.system_prompt_for(agent, base_prompt, context=context)
+    # #228: the catalogs this prompt carries are decided by the run it is
+    # for, through the bundle that run is given below -- the reviewer's
+    # rule (core/reasoning/review.py). With system_prompt_for's attended
+    # defaults this was right only while compactor.md's empty
+    # allowed_tools kept both catalog tools out; a widening would have
+    # reopened #68 on every automatic compaction of a headless run.
+    callable_only, granted = advertisement_facts(authorization)
+    system_prompt = manager.system_prompt_for(
+        agent, base_prompt, context=context,
+        callable_only=callable_only, granted=granted)
     tolerance = int(target * (1 + config.COMPACTION_RATIO_TOLERANCE))
 
     response = loop_cls.run_agent_conversation(

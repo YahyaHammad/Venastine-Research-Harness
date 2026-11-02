@@ -327,6 +327,19 @@ def get_thread(thread_id: UUID) -> Optional[dict]:
     stand-in in a test), which is why each pairs the lookup with a default
     the caller can use. The migration case belongs to
     `database.ensure_columns()`, which runs at startup.
+
+    `kind` IS THE EXCEPTION, and the sentence above was wrong about it
+    until #257. ensure_columns has added `kind` with DEFAULT 'chat' since
+    §27 shipped it, and SQLite reads every row older than that ALTER as
+    the default -- so a migrated row arrives as 'chat' before any reader
+    runs (the lineage columns and `last_activity_at` have no SQL default
+    and really are NULL there). A NULL `kind` takes SQL written by hand,
+    on a database first migrated between §27 and #26 (2026-08-06 to
+    08-22), where the column was added nullable. That is all the
+    `or THREAD_KIND_CHAT` here, in child_threads and in list_threads
+    absorbs; tests/test_storage_e2e.py builds that database and pins both
+    the default and the fallback. list_threads filters in SQL, so its
+    default picker never meets such a row at all.
     """
     with Session(engine) as session:
         thread = session.get(ConversationThread, thread_id)
@@ -388,6 +401,7 @@ def child_threads(parent_thread_id: UUID) -> list[dict]:
             {
                 "id": t.id,
                 "created_at": t.created_at,
+                # A hand-written NULL only (#257); see get_thread.
                 "kind": getattr(t, "kind", None) or THREAD_KIND_CHAT,
                 "parent_call_id": getattr(t, "parent_call_id", None),
                 "agent_name": getattr(t, "agent_name", None),
@@ -528,15 +542,13 @@ def list_threads(
             {
                 "id": t.id,
                 "created_at": t.created_at,
-                # getattr, not t.kind: it absorbs a NULL on a row
-                # written before the column existed -- the additive
-                # migration never backfills (M7) -- which is what
-                # get_thread's docstring has said since batch 75. NOT a
+                # The fallback absorbs a hand-written NULL only: the
+                # migration fills a row older than the column with 'chat'
+                # (#257). get_thread's docstring has the whole of it. NOT a
                 # database whose ALTER has not run: the mapped class always
                 # has the attribute, and a database missing the column
                 # raises OperationalError at the SELECT above, before any
-                # attribute is read. This was the third copy of that wrong
-                # mechanism; 47257f3 removed the other two and missed it.
+                # attribute is read.
                 "kind": getattr(t, "kind", None) or THREAD_KIND_CHAT,
                 "preview": previews.get(t.id, ""),
             }

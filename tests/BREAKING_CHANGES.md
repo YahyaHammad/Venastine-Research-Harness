@@ -10,6 +10,19 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## Untested invariants (batch 222)
+
+| Change | Test | Fix |
+|---|---|---|
+| Build the initializer's or the compactor's prompt with `system_prompt_for`'s defaults again | `test_the_initializer_run_is_headless_and_its_prompt_says_so`, `test_an_unattended_compaction_is_not_told_to_spawn`, `test_an_ATTENDED_compaction_still_is` | Forward `advertisement_facts` of the bundle the run is given; the initializer is given none (#228) |
+| Add a module-level cache, flag or warn-once set without a reset | `test_every_memo_in_production_is_reset_or_exempt` | Add it to `PROCESS_MEMOS` in `tests/conftest.py`, to the fixture that owns its module, or to `EXEMPT` with the reason (#233) |
+| Remove a memo, or rename one, that a list names | `test_every_accounted_memo_still_exists` | Take its entry off the list it is on |
+| Drop an entry's reset from `reset_process_memos`, or the effort cache from `clear_client_cache` | `test_and_the_next_one_finds_every_memo_reset` | Each needs its reset before and after every test |
+| Take `core.reasoning.pipeline_storage` out of `_SWAPPED`, or import it after `create_db_and_tables()` | `test_a_pipeline_run_survives_a_write_and_a_read`, `test_a_recorded_pass_thread_is_relabelled_with_both_sides_real` | Keep it in the swap and imported first: a table registers on import (#258) |
+| Restore `sys.modules` without the package attribute | `test_pipeline_failure_marks_run_failed_and_persists_partial_snapshot` in `test_orchestrator.py`, when it runs after `test_storage_e2e.py` in one process | `from core.reasoning import pipeline_storage` reads the attribute first; restore both |
+| Delete a `kind` or `pass_threads_json` NULL fallback as dead | `test_a_thread_older_than_its_kind_reads_as_a_conversation`, `test_a_run_older_than_its_newer_columns_reads_them_as_empty` | They absorb a hand-written NULL on a database migrated before #26; the owner kept them (#257, #258) |
+| Change one of `FakeStorage`'s thread order, child order, memory filter or failed-turn row without the real query | `test_the_fake_lists_threads_in_the_real_order`, `test_the_fake_orders_child_threads_as_the_real_query_does`, `test_the_fake_shows_the_memories_the_real_query_shows`, `test_the_fake_marks_the_same_row_failed` | Change both identically (#231) |
+
 ## Unbounded output (batch 221)
 
 | Change | Test | Fix |

@@ -185,14 +185,18 @@ def load_pipeline_run(run_id: UUID) -> dict:
             "claims": json.loads(record.claims_json),
             "trace": json.loads(record.trace_json),
             "coverage_gaps": json.loads(record.coverage_gaps_json),
-            # §27 AC6. Defaulted rather than read straight off the record:
-            # a row written before this column existed has it as NULL after
-            # ensure_columns' ALTER (the migration is additive and never
-            # backfills), and json.loads(None) raises.
+            # §27 AC6. The `or "[]"` is for a NULL written BY HAND, and
+            # until #258 this said a migrated row was one. It is not:
+            # ensure_columns adds the column with DEFAULT '[]', and SQLite
+            # reads every row older than the ALTER as that default. A NULL
+            # takes a database first migrated before #26 carried NOT NULL
+            # (2026-08-06 to 08-22), where the column is nullable, and SQL
+            # nobody here wrote -- on which json.loads(None) would raise.
             "pass_threads": json.loads(record.pass_threads_json or "[]"),
-            # Same NULL guard as pass_threads above: ensure_columns'
-            # ALTER never backfills, so a row written before this column
-            # existed reads as NULL, and json.loads(None) raises.
+            # E13 arrived after #26, so this column is NOT NULL on every
+            # database this project has built, and SQLite refuses the NULL
+            # this would read past. Kept as the reader's own floor beside
+            # its sibling's; tests/test_storage_e2e.py pins both facts.
             "candidates": json.loads(record.candidates_json or "[]"),
             "final_report": record.final_report,
         }

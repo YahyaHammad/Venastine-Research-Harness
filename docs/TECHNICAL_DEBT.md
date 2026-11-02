@@ -3953,7 +3953,7 @@ narrow the comment to name exactly the set it covers.
 
 **Not:** changing what is readable; content redaction; `_DOC_EXTENSIONS`.
 
-## 74. Two headless runs build prompts with the attended catalog defaults (open, deferred batch 138)
+## 74. Two headless runs build prompts with the attended catalog defaults (closed, batch 222)
 
 **Issue:** #228.
 
@@ -3986,6 +3986,8 @@ goes red. Test: build each prompt with `callable_only=True` and assert no
 
 **Not:** changing `with_catalogs` defaults, which the TUI call sites depend on;
 changing either agent's tools.
+
+**CLOSED (batch 222), the first shape above.** Both call sites forward the run's facts through `advertisement_facts`, the reviewer's rule. `_run_initializer` hands its run no bundle, so its prompt is built headless; `_summarize` builds the compactor's from the bundle it hands the compactor's run. Three tests in `test_catalog_advertisement.py` widen each agent to admit `spawn_subagent` and assert that the agent catalog is in the prompt exactly when the schema list from the run's own facts carries the tool. An attended compaction is the control, so a hard-coded headless answer fails too, and reverting either call site fails its own test. Neither agent's `allowed_tools` changed.
 
 ## 75. The issue template and the prose that governs it are checked against neither (open, deferred batch 138)
 
@@ -4163,7 +4165,7 @@ giving the real one.
 **Not:** moving the test out of the `integration` marker. `pytest.ini:3-6`'s
 offline default is a locked decision and the marker is what implements it.
 
-## 78. `FakeStorage` makes eleven mirror claims and two are compared (algorithm half closed, batch 216 -- the two transcriptions are compared; the ordering claims remain)
+## 78. `FakeStorage` makes eleven mirror claims and two are compared (closed, batch 222)
 
 **Issue:** #231.
 
@@ -4241,6 +4243,8 @@ compacted view. That argument is sound and is not reopened.
 
 **PARTLY CLOSED (batch 216), the half this entry called worth naming.** The two transcriptions of a published algorithm are compared now. `pinned_through` reads the database, so its index computation became the pure `storage._pinned_indices(rows, span, neutral)` -- behaviour unchanged, `pinned_through` maps it over the reconstructed rows -- and the fake's copy `FakeStorage._pinned_indices` has the same shape. `TestThePinnedSpanMirrorsProduction` compares them over six thread shapes cut at every position (#88's re-inclusion, a half-pinned pair, an unrelated result, a cut turn's opener, an opener already pinned, nothing pinned), plus two reach checks on the production side; `TestTheTurnOpenerMirrorsProduction` compares `_turn_opener_index` directly over the five cases above plus a kept prefix with no user row. Mutating the fake's copy -- the re-inclusion dropped, the opener never added, archive order not restored, the opener added on a turn-aligned cut -- is caught 4/4. **Still open:** the ordering claims that need real SQLite to compare (`list_threads`' COALESCE, `child_threads`' tiebreaker, `list_memories`' AC6 filter, `mark_turn_failed`), which this entry recommended only where the fake re-derives logic, and which belong beside `test_storage_e2e.py`'s module-scoped `real_storage` rather than in a pure-function file; the #31 plain-dict claims stay out, as recommended.
 
+**CLOSED (batch 222), the ordering half.** Four tests in `test_storage_e2e.py` give `FakeStorage` and real storage one set of ids and timestamps and compare the answers. `list_threads`: the COALESCE order, its `created_at` tiebreak (the tie is written in the wrong order on purpose, since both sorts are stable) and the kind filter. `child_threads`: the id tiebreak across five children created in one instant. `list_memories`: AC6 from four vantage points and three scopes, including a project memory with no path. `mark_turn_failed`: the newest user row, and False with none. Each fails when the fake's rule is mutated, and the thread-order test also when production's is. They sit beside `real_storage` because real rows exist only there. Left as they were: the fake orders memories and messages by insertion where production orders by `(created_at, id)`, which agree because rows are stamped in the order they are written, and `thread_preview` stays untruncated. The #31 plain-dict claims are not compared, per the recommendation above.
+
 ## 79. `test_the_tree_names_every_production_module` quantifies over a typed list (closed, batch 216)
 
 **Issue:** #232.
@@ -4295,7 +4299,7 @@ reformatted tree fails loudly.
 
 **CLOSED (batch 216), with the shape suggested, and it found the live gap the entry measured as absent.** `_MAPPED_DIRS` is gone. `_production_modules()` walks the tree with `_walk_project`, skips `tests/`, and drops what `git check-ignore` reports, so `review/` -- gitignored local scratch, which a plain walk turned red on this machine and CI would never see -- stays out; the paths go to git NUL-separated, because in text mode Windows wrote each newline as CRLF and git was asked about `path\r`. `_UNLISTED_MODULES` is an exclusion list, empty. The walk reaches `deploy/hosted/`, which batch 163 added after this entry was measured and which the typed list never named: its seven modules are in the tree, so nothing failed, but only because their authors remembered. `test_the_module_walk_reaches_what_the_typed_list_did_and_more` holds the reach, and the entry's own failure path -- a new `plugins_probe_216/loader.py` with no tree entry -- now fails the gate, measured.
 
-## 80. Five once-per-process globals are reset only by local fixtures (open, deferred batch 138)
+## 80. Five once-per-process globals are reset only by local fixtures (closed, batch 222)
 
 **Issue:** #233.
 
@@ -4383,6 +4387,8 @@ did for `settle`. That is a larger decision than the fix.
 once from disk, never mutated per test) or `mcp_client/registration.py:52
 _registered` (checked: no test calls `register_all` against the global registry,
 so it cannot leak).
+
+**CLOSED (batch 222), wider than filed, on the owner's choice of a reviewed list plus a census.** Re-counted with both of `test_probe_isolation`'s shapes over every production module, fourteen memos had no general reset where four of the five above were still open. The containers: the effort cache, the four compaction warn and log sets (two added in batches 220 and 221), loop's two notice sets (`_image_notices_shown` was reset by nothing at all), the dynamic approval defaults and the MCP `_registered` map. The second shape, names a function declares `global`, added five: `_google_budget_support`, `_ineligible_explained`, `config_edit._document_cache`, `posture._read` and `secrets._state` -- an unlocked store's plaintext, which no fixture locked. The effort cache joined its three siblings in `clear_client_cache`. The other thirteen are in `PROCESS_MEMOS` in `tests/conftest.py`, reset before and after every test by `reset_process_memos`, through the module's own function where there is one. `tests/test_process_memos.py` holds the tree to the lists in both directions, so a new memo fails until it is reset or exempted with a reason, and a listed name that has gone fails too. Eight names are exempt, each with its reason: the two schema dataclasses `config.py` binds at import, the MCP event loop and its thread, the stdin reader, a weak set of live indexes, a constant table, and the posture every seam already restores. A pair of tests dirties every memo the new fixture owns and finds each reset in the next test. Not counted, and said so in the file: memos held by a decorator or inside an object.
 
 ## 81. Twenty-four env-gated skips are the guarantees nobody here has observed (open, deferred batch 138)
 
@@ -6060,7 +6066,7 @@ before the gate.
 were correct until this batch renamed them. It catches the NEXT rename,
 which is the half nobody is present for.
 
-## 110. The thread-kind NULL fallback is in three readers and pinned by none (open, measured batch 154)
+## 110. The thread-kind NULL fallback is in three readers and pinned by none (closed, batch 222)
 
 **Issue:** #257.
 
@@ -6095,7 +6101,9 @@ defensive `getattr`s, finds no test behind them, and removes them --
 which, on a database carrying pre-§27 rows, puts every one of those rows
 back in the picker as `None`.
 
-## 111. `pipeline_storage`'s write and read API has never run against real SQLite (open, measured batch 154)
+**CLOSED (batch 222), and the premise above measured wrong.** The NULL this item and the readers' comments describe is not what a migration leaves. `ensure_columns` has added `kind` with DEFAULT 'chat' since §27 shipped it, so SQLite reads every row older than the ALTER as 'chat' before any reader runs. A NULL takes SQL written by hand, on a database first migrated between §27 and #26 (2026-08-06 to 08-22), where the column was added nullable. On the owner's choice the three fallbacks stay, and their comments now say which NULL they absorb, in one place (`get_thread`'s docstring) with two pointers. `test_a_thread_older_than_its_kind_reads_as_a_conversation` builds exactly that database through the real startup and asks all three readers about a migrated row and a hand-written NULL; deleting any of the three fallbacks fails it, and its raw column read pins the default. `list_threads()` filters in SQL, so its picker never meets such a row, and the test records that rather than promising it. `core/memory.py`'s fourth copy, applied to `get_thread`'s output, is untouched.
+
+## 111. `pipeline_storage`'s write and read API has never run against real SQLite (closed, batch 222)
 
 **Issue:** #258.
 
@@ -6123,6 +6131,8 @@ not; `json.loads(None)` raising is the guard most likely to differ.
 **What it would have caught.** Nothing in this batch -- S09-01 lives at
 the DBAPI seam, which is now driven for real. It is the standing risk that
 the persistence layer's own tests prove the fake and the code agree.
+
+**CLOSED (batch 222), and measuring it changed what the guards are for.** `core.reasoning.pipeline_storage` is in `real_storage`'s swap, imported before `create_db_and_tables()` so its table exists. The fixture also restores the package attribute that import rebinds: without that, `test_orchestrator.py` run after this file failed on a module bound to a deleted database. `test_a_pipeline_run_survives_a_write_and_a_read` drives create, a data-only update, a terminal update and load on real SQLite, plus both missing-id errors. The round trip agrees with the fake on everything asserted; the one difference, naive datetimes on read, is recorded, since nothing reads them. The finding is the NULL guards. `ensure_columns` adds both columns with DEFAULT '[]', so a migrated row reads '[]', and `candidates_json`, which arrived after #26, is NOT NULL on every database. `test_a_run_older_than_its_newer_columns_reads_them_as_empty` builds the database those two batches left and pins all three facts. On the owner's choice both guards stay with corrected comments, as do the two fake-side pins in `test_pipeline_storage.py`, whose docstrings said the same wrong thing. The S09-01 test now writes its run through the real writer instead of into a table it created by hand.
 
 ## 112. The trust prompt says every project agent's description enters every system prompt, and most never do (closed, batch 215)
 
