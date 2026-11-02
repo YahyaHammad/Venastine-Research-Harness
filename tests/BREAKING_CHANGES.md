@@ -15,6 +15,15 @@ other name.
 
 ---
 
+## Tests no workflow ran (batch 226)
+
+| Change | Test | Fix |
+|---|---|---|
+| Drop `-m integration` from tests.yml's `integration` job or compat.yml's Windows job, or its skip check | `test_the_integration_tests_run_in_ci_on_both_platforms` | Both run it and fail on a skip their platform can avoid (#230) |
+| Gate a live test on a new `VEN_TEST_` name, or stop setting one | `test_the_live_ssh_job_sets_every_variable_the_tests_read` | Write it in `scripts/live-ssh-setup.sh`, and run the file in the `live-ssh` job (#234) |
+| Use `VEN_TEST_SSH_HOSTKEY` or `..._STACKED_HOSTKEY` as the key itself | `test_every_live_test_reads_its_pinned_host_key_from_a_file` | Open it: the variable names the file `ssh-keyscan` wrote |
+| Let `_docker()` accept any daemon that answers | `test_only_a_linux_daemon_builds_the_bundles_image` | Ask `docker info --format {{.OSType}}`; a Windows runner's daemon builds Windows images |
+
 ## An MCP result bounded (batch 225)
 
 | Change | Test | Fix |

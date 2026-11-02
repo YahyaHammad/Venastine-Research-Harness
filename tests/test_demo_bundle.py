@@ -508,16 +508,35 @@ class TestTheBuild:
 
 
 def _docker() -> str:
-    """The docker CLI, when a daemon answers it; "" otherwise."""
+    """The docker CLI, when a daemon running LINUX containers answers it;
+    "" otherwise. A Windows runner's daemon answers `docker info` too, and
+    builds Windows images only, so the bundle's image would fail there
+    instead of skipping (batch 226, which runs this test in CI)."""
     docker = shutil.which("docker")
     if docker is None:
         return ""
     try:
-        answered = subprocess.run([docker, "info"], capture_output=True,  # nosec B603 - fixed arguments, no shell
-                                  timeout=30).returncode == 0
+        info = subprocess.run([docker, "info", "--format", "{{.OSType}}"],  # nosec B603 - fixed arguments, no shell
+                              capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return ""
-    return docker if answered else ""
+    return docker if (info.returncode == 0
+                      and info.stdout.strip() == "linux") else ""
+
+
+@pytest.mark.parametrize("os_type, expected", [
+    ("linux", "/usr/bin/docker"), ("windows", ""), ("", "")])
+def test_only_a_linux_daemon_builds_the_bundles_image(monkeypatch, os_type,
+                                                      expected):
+    """compat.yml's Windows job runs `-m integration` since batch 226, and
+    the runner's Docker answers with Windows containers."""
+    class _Info:
+        returncode = 0
+        stdout = os_type + "\n"
+
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Info())
+    assert _docker() == expected
 
 
 @pytest.mark.integration
@@ -530,7 +549,7 @@ def test_the_image_holds_exactly_the_bundles_files(tmp_path):
     else. Needs a Docker daemon, uv and the network (the real locks)."""
     docker = _docker()
     if not docker:
-        pytest.skip("no Docker daemon answers")
+        pytest.skip("no Docker daemon running Linux containers answers")
     if shutil.which("git") is None:
         pytest.skip("git is not installed")
     out = tmp_path / "bundle"

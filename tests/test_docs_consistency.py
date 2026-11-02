@@ -2740,6 +2740,75 @@ def test_no_expression_is_pasted_into_a_shell_line(name):
                 f"to the step's `env:`")
 
 
+def _runs(job: dict) -> str:
+    return "\n".join(step.get("run", "") for step in job.get("steps", []))
+
+
+def test_the_integration_tests_run_in_ci_on_both_platforms():
+    """#230. pytest.ini excludes `-m integration` from every default run,
+    and for months no workflow passed it: the comment that deferred it
+    waited on an issue closed in August. Now a Linux job and the Windows
+    job each run it, and each fails on a skip it was set up to prevent."""
+    linux = _workflow_yaml("tests.yml")["jobs"]["integration"]
+    windows = _workflow_yaml("compat.yml")["jobs"]["windows-subset"]
+    assert linux["runs-on"].startswith("ubuntu")
+    assert windows["runs-on"].startswith("windows")
+    for name, job in (("tests.yml integration", linux),
+                      ("compat.yml windows-subset", windows)):
+        assert "pytest -m integration" in _runs(job), (
+            f"{name} no longer runs the integration tests")
+        assert 'grep "^SKIPPED"' in _runs(job), (
+            f"{name} no longer fails on a skip")
+
+
+_VEN_TEST_NAME = re.compile(r"\bVEN_TEST_[A-Z0-9]+(?:_[A-Z0-9]+)*\b")
+
+
+def test_the_live_ssh_job_sets_every_variable_the_tests_read():
+    """#234. Every live test is gated on VEN_TEST_* variables, and a gated
+    test whose variable no run sets is a guarantee nobody observes, which
+    is how 24 of them went unseen. The setup script writes exactly the
+    names the suite reads, and the job runs every file that reads one."""
+    readers, read = set(), set()
+    for name in sorted(os.listdir(os.path.join(ROOT, "tests"))):
+        if not name.endswith(".py") or name == os.path.basename(__file__):
+            continue
+        with open(os.path.join(ROOT, "tests", name), encoding="utf-8") as f:
+            found = set(_VEN_TEST_NAME.findall(f.read()))
+        if found:
+            readers.add(name)
+            read |= found
+    with open(os.path.join(ROOT, "scripts", "live-ssh-setup.sh"),
+              encoding="utf-8") as f:
+        written = set(re.findall(r'echo "(VEN_TEST_[A-Z0-9_]+)=', f.read()))
+    assert read, "no test reads a VEN_TEST_ variable; repoint this"
+    assert written == read, (
+        f"read by the tests and not set by live-ssh-setup.sh: "
+        f"{sorted(read - written)}; set and read by nothing: "
+        f"{sorted(written - read)}")
+    job = _runs(_workflow_yaml("tests.yml")["jobs"]["live-ssh"])
+    assert "scripts/live-ssh-setup.sh" in job
+    assert 'grep "^SKIPPED"' in job
+    missing = sorted(n for n in readers if f"tests/{n}" not in job)
+    assert not missing, f"the live-ssh job does not run {missing}"
+
+
+def test_every_live_test_reads_its_pinned_host_key_from_a_file():
+    """The variable is a PATH. test_sudo.py pinned the path itself as the
+    key, so its live tests could not pass in any environment where
+    test_ssh_backend.py's did (batch 226, found writing the job)."""
+    sites = 0
+    for name in ("test_ssh_backend.py", "test_sudo.py"):
+        with open(os.path.join(ROOT, "tests", name), encoding="utf-8") as f:
+            text = f.read()
+        for m in re.finditer(r'_env\("VEN_TEST_SSH_(?:STACKED_)?HOSTKEY"\)',
+                             text):
+            sites += 1
+            assert text[:m.start()].rstrip().endswith("open("), (
+                f"{name}: {m.group(0)} is used as the key, not opened")
+    assert sites >= 4
+
+
 def test_the_workflow_never_deploys_unverified():
     assert "--unverified" not in _workflow_text()["deploy-demo.yml"], (
         "`--unverified` skips the CI gate; it exists for the owner's private "

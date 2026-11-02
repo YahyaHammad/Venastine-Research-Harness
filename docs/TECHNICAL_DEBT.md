@@ -4127,7 +4127,7 @@ header says so rather than naming a value nobody saw. ROADMAP_v3 §75, A67. The
 thirteen alerts themselves were all false positives; §75 and A66 carry how they
 were cleared.
 
-## 77. The suite's one `integration` test runs in no workflow (open, deferred batch 138)
+## 77. The suite's one `integration` test runs in no workflow (closed, batch 226)
 
 **Issue:** #230.
 
@@ -4196,6 +4196,18 @@ giving the real one.
 
 **Not:** moving the test out of the `integration` marker. `pytest.ini:3-6`'s
 offline default is a locked decision and the marker is what implements it.
+
+**CLOSED (batch 226, #230), with the shape above and one more platform.** The
+marker covers five tests now, not one. tests.yml's `integration` job runs them
+on Linux (the three MCP orphan tests and batch 166's bundle image build, with
+`uv==0.13.4` installed as deploy-demo.yml pins it), and compat.yml's Windows job
+runs them on Windows, where batch 130's fallback-shell wait test is the one that
+means something. Each fails on any skip but the one its platform cannot avoid.
+Writing the Windows step found that the image test would have FAILED there, not
+skipped: a Windows runner's Docker answers `docker info` and builds Windows
+images only, so `_docker()` now asks the daemon's OS. Measured before the jobs:
+Windows 4 passed, WSL 3 passed, the image test skipped on both for want of a
+daemon. The tests.yml comment now says the jobs exist.
 
 ## 78. `FakeStorage` makes eleven mirror claims and two are compared (closed, batch 222)
 
@@ -4422,7 +4434,7 @@ so it cannot leak).
 
 **CLOSED (batch 222), wider than filed, on the owner's choice of a reviewed list plus a census.** Re-counted with both of `test_probe_isolation`'s shapes over every production module, fourteen memos had no general reset where four of the five above were still open. The containers: the effort cache, the four compaction warn and log sets (two added in batches 220 and 221), loop's two notice sets (`_image_notices_shown` was reset by nothing at all), the dynamic approval defaults and the MCP `_registered` map. The second shape, names a function declares `global`, added five: `_google_budget_support`, `_ineligible_explained`, `config_edit._document_cache`, `posture._read` and `secrets._state` -- an unlocked store's plaintext, which no fixture locked. The effort cache joined its three siblings in `clear_client_cache`. The other thirteen are in `PROCESS_MEMOS` in `tests/conftest.py`, reset before and after every test by `reset_process_memos`, through the module's own function where there is one. `tests/test_process_memos.py` holds the tree to the lists in both directions, so a new memo fails until it is reset or exempted with a reason, and a listed name that has gone fails too. Eight names are exempt, each with its reason: the two schema dataclasses `config.py` binds at import, the MCP event loop and its thread, the stdin reader, a weak set of live indexes, a constant table, and the posture every seam already restores. A pair of tests dirties every memo the new fixture owns and finds each reset in the next test. Not counted, and said so in the file: memos held by a decorator or inside an object.
 
-## 81. Twenty-four env-gated skips are the guarantees nobody here has observed (open, deferred batch 138)
+## 81. Twenty-four env-gated skips are the guarantees nobody here has observed (closed, batch 226 -- all but the three WSL ones)
 
 **Issue:** #234.
 
@@ -4483,6 +4495,23 @@ with a distro installed and is a larger decision.
 **Not:** turning the env gates into hard failures. A contributor without an SSH
 host must still be able to run the suite and the skip is the right mechanism;
 what is missing is that nothing in CI ever supplies the variables.
+
+**CLOSED (batch 226, #234), for SSH and sudo; WSL stays as written.** The
+owner chose the full shape: `scripts/live-ssh-setup.sh` makes the runner a
+throwaway SSH host (an account with a password, a key, a passphrase-protected
+key and a sudo rule; sshd on 127.0.0.1:2222, and on :2223 one requiring
+`publickey,password`), writes every `VEN_TEST_*` variable to `$GITHUB_ENV`, and
+tests.yml's `live-ssh` job runs both files and fails on any skip.
+`test_the_live_ssh_job_sets_every_variable_the_tests_read` holds the script to
+the names the tests read. Measured first, against an unprivileged sshd in WSL:
+with a key and an encrypted key, 14 of the 24 ran for the first time here and
+passed (317 passed, 10 skipped, against 303 and 24 with no host); the other 10
+need root. **Writing the job found that the 24 could never all pass in one
+environment:** `test_ssh_backend.py` opens `VEN_TEST_SSH_HOSTKEY` as a file and
+`test_sudo.py` pinned its value, the path, as the key. Fixed in the sudo file,
+and `test_every_live_test_reads_its_pinned_host_key_from_a_file` holds it. The
+three `needs_wsl` tests still run only on a developer's Windows box with a
+distro, the larger decision this entry names.
 
 ## 82. The approval-timeout fixture is pinned by its value, not its effect (closed, batch 216)
 

@@ -29514,3 +29514,58 @@ text, and `max_read_chars` rather than a new key.
   export, no leaks. Under WSL the four touched files gave 366 passed and 3
   failed, and the same 3 fail at HEAD.
 - **Version**, by `scripts/version.py bump`: `0.3.4-b.8.bugfixes.r57e749187eaf`.
+
+## Batch 226 -- tests no workflow ran (2026-11-02)
+
+**#230 and #234, register items 77 and 81.** The owner chose a Linux job
+and a Windows step for the integration tests, the Docker image test run in
+CI, and the full live-SSH job, and a Docker dry run of the setup before
+pushing.
+
+- **Measured first.** `pytest -m integration`: Windows 4 passed and 1
+  skipped, WSL 3 passed and 2 skipped; the image test skipped on both for
+  want of a Docker daemon. Against an unprivileged sshd in WSL, with a key
+  and an encrypted key, 14 of the 24 env-gated SSH and sudo tests ran here
+  for the first time and passed (317 passed, 10 skipped, against 303 and
+  24 with no host). The other 10 need root: account password (3), stacked
+  auth (1), sudo (6).
+- **#230.** tests.yml's `integration` job runs `-m integration` on Linux
+  with `uv==0.13.4` for the image test's locks; compat.yml's Windows job
+  runs it too. Each fails on any skip but its platform's own. The comment
+  that waited on #10 says the jobs exist, and pytest.ini says CI runs them.
+- **The image test would have failed on Windows, not skipped.** A Windows
+  runner's Docker answers `docker info` and builds Windows images, so
+  `_docker()` asks the daemon's OS now.
+- **#234.** `scripts/live-ssh-setup.sh` makes the runner a throwaway SSH
+  host: an account with a password, a key, a passphrase-protected key and
+  a sudo rule; sshd on 127.0.0.1:2222 and a `publickey,password` one on
+  :2223. It writes every `VEN_TEST_*` variable to `$GITHUB_ENV`, masks the
+  random secrets, and tests.yml's `live-ssh` job runs both files and fails
+  on any skip.
+- **The 24 could never all pass in one environment.** `test_ssh_backend.py`
+  opens `VEN_TEST_SSH_HOSTKEY` as a file; `test_sudo.py` pinned its value,
+  the path, as the key. Fixed in the sudo file.
+- AGENTS.md's command block said `-m integration` was 4 tests; it has been
+  5 since batch 166. Its Testing section now names the jobs, the script and
+  the rule that a new `VEN_TEST_` name must be set by the script.
+
+### Verified
+
+- New tests: 6 (3 gates in `test_docs_consistency.py`, a parametrized
+  `_docker()` test of 3). Mutations, each red: the Windows step without the
+  marker, the Linux job without its skip check, the script not setting
+  `VEN_TEST_SUDO_PW`, the job not running `test_sudo.py`, `test_sudo.py`
+  pinning the path again, and `_docker()` taking any daemon.
+- **Full suite**: 8611 passed, 75 skipped and 1 failed (8687) in 9:11, on a
+  machine with 4 of 32 GB free; the failure is
+  `test_eight_concurrent_writers_all_land`'s "database is locked", item 97's
+  load flake, and it and the TUI quit test (which failed in the 13:41 run
+  before it) pass alone, 71 passed. ruff clean; bandit 47 findings, none
+  outside the baseline, no pair grew; gitleaks on an export, no leaks. Under
+  WSL the three touched files gave 278 passed and 3 failed, and the same 3
+  fail at HEAD.
+- **Not yet run anywhere: the setup script as root, and the image test.**
+  Docker Desktop would not start here (stale socket files that only a
+  reboot releases), so the dry run waits for it. Until it runs, CI's first
+  run of these two jobs is their first run anywhere.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.9.bugfixes.r57e749187eaf`.
