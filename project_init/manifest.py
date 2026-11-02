@@ -148,16 +148,28 @@ _TEST_DIRS = ("tests", "test", "__tests__", "spec")
 # anyway, so this is not the control -- it stops the agent spending one of
 # its bounded steps discovering that, and stops a credential FILENAME (which
 # can name a service, an account or an environment) reaching the model at
-# all. Dotfiles are already excluded from the walk; this covers the rest.
+# all. Dotfiles are already excluded from the walk; this covers the rest:
+# five store names, `.env*`, and since #227 the conventional shapes of key
+# material -- an SSH private key's default name, and the suffixes private
+# keys and keystores are saved under. Until then this comment claimed all
+# credential filenames and the set held the first five: `id_rsa`,
+# `deploy-key.pem` and `api.key` were listed. A public key (`id_rsa.pub`)
+# still is: it is not a secret, and its name says only that a key exists.
 _SECRET_FILENAMES = frozenset({
     "providers.json", "credentials.json", "secrets.json", "secrets.yaml",
     "secrets.yml",
 })
+_KEY_FILENAMES = frozenset({
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk",
+    "id_ed25519_sk",
+})
+_KEY_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".ppk", ".jks", ".keystore")
 
 
 def _is_secret(name: str) -> bool:
     lower = name.lower()
-    return lower in _SECRET_FILENAMES or lower.startswith(".env")
+    return (lower in _SECRET_FILENAMES or lower.startswith(".env")
+            or lower in _KEY_FILENAMES or lower.endswith(_KEY_SUFFIXES))
 
 
 _TREE_MAX_DEPTH = 2

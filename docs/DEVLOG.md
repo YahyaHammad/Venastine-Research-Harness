@@ -29345,3 +29345,65 @@ answer (keep the NULL fallbacks, correct what they say) and #233's scope
   baseline, no pair grew) and gitleaks on an export are clean.
 - **Version**, by `scripts/version.py bump`:
   `0.3.4-b.5.bugfixes.r57e749187eaf`.
+
+## Batch 223 -- stale claims and loose config (2026-11-02)
+
+**#208, #210, #213, #220, #221, #222, #223, #227, #239 and #261, register
+items 54, 56, 59, 66, 67, 68, 69, 73, 89 and 114.** The owner chose the
+answer for #210 (say `.env` is for a future tool), #227 (screen key
+material), #239 (tell the session once) and #261 (pin the premise) first.
+
+- **#213.** `ssh_port` is a `Port` (a strict whole number from 1 to
+  65535), and `db_path` is `NonEmptyStr`. An empty `db_path` was measured
+  to open SQLite's anonymous temporary database, so every thread would
+  have vanished at exit with nothing said; a refusal of a value a
+  variable set names the variable. `workspace_dir` was made `NonEmptyStr`
+  too and the first full run failed for it: an empty workspace, from
+  either route, is already refused by name at `check_workspace`, so it
+  stays `str` and a comment says why. A
+  `max_token_budget` of zero or less is refused at load by name. The trust
+  rationales name `ensemble_mode`, the live multiplier, instead of
+  `ensemble_n`, which the pipeline ignores. `/config` reads the two new
+  constraint shapes off the schema like every other.
+- **#227.** The `/init` manifest also hides SSH private keys' default names
+  and the suffixes private keys and keystores are saved under; a public key
+  is still listed.
+- **#239.** The first turn in a session that strips a control sequence
+  puts one system line on screen; the per-turn INFO line is unchanged.
+- **#220, measured further than filed.** Under textual 8.2.8 a marshal
+  after the app exits returns at once while its loop runs and raises once
+  it closes, and with `set_blocked` itself marshalled the test the comment
+  cited still passes. "Parks the worker forever" does not reproduce; the
+  comment says what does, and how to re-take it when the pin moves.
+- **#221, #223.** `_cmd_secrets` would raise, not deadlock, and since batch
+  135 the raise is contained to "/secrets failed". `_ask_lock`'s bound is
+  stated as what it is: once the holder is parked.
+- **#210.** AGENTS.md, PRIVACY.md and `.env.example` say no shipped tool
+  reads `.env` yet; PRIVACY's deletion section names it.
+- **#261.** A test requires the loader to be production's only `AgentDef`
+  constructor, and names the `max_steps` belt as the thing to add when it
+  is not.
+- **#208, #222.** The dead distribution builder is deleted, and the
+  stranded half of the `_blocking_modal` bullet is back on it (split in the
+  commit that wrote it, so nothing was lost).
+
+### Verified
+
+- New tests: 26 (`test_config_loader.py` +10, `test_project_init.py` +12,
+  `test_tui.py` +2, `test_config_edit.py` +1, `test_agents.py` +1).
+  Mutations, each red: `ssh_port` and `db_path` back to bare types, the cap
+  check removed, the closed-range phrase removed, the key suffixes
+  unscreened, the session line said every turn and never, and a second
+  `AgentDef` constructor in production.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8665 tests, 8590
+  passed and 75 skipped, in 4:47. The first run failed four: three were
+  load timing on a machine running bandit and gitleaks beside it (each
+  passes alone, and in the re-run), and one was real --
+  `test_an_empty_variable_reaches_the_guard_as_an_empty_path`, which is
+  how `workspace_dir` came back to `str`. WSL, on a Linux-filesystem
+  copy: the six touched test files, 855 passed; three fail identically on a
+  `git archive` of HEAD (two for the copy's missing `providers.json`,
+  one for the HOME redirect). ruff, bandit as CI runs it and gitleaks on
+  an export are clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.6.bugfixes.r57e749187eaf`.

@@ -829,6 +829,16 @@ def _validate_settings(data, source: str) -> None:
             raise ValueError(
                 f"settings.json at {source}: key {key!r} must be {expected_name}, "
                 f"got {type(value).__name__}")
+        if key == "max_token_budget" and value is not None and value <= 0:
+            # #213. The type gate passes 0 and -5 -- they are ints -- and
+            # the loop's check is `used >= cap`, so a cap of zero or less
+            # let every turn spend ONE model call and then die reporting a
+            # budget problem for what is a typo in this file.
+            raise ValueError(
+                f"settings.json at {source}: max_token_budget must be a "
+                f"positive number of tokens, or null for no cap -- got "
+                f"{value}, which would stop every turn after its first "
+                f"model call.")
     for section, known_keys in _NESTED_SETTINGS.items():
         block = data.get(section)
         if block is None:
@@ -1594,7 +1604,8 @@ def _bounded(source: list, prefix: str, what: str) -> list:
 def describe_project_content(project_path: str) -> str:
     """Human-readable summary shown in the trust prompt, so approving
     trust is an informed decision -- a project's settings can choose the
-    provider and multiply pipeline cost via ensemble_n, and an agent's
+    provider and multiply pipeline cost by turning on ensemble_mode over
+    config.yaml's roster (#213: ensemble_n is ignored), and an agent's
     or a skill's description can reach the system prompt (#131) --
     where, each entry says (#259, #260).
 
@@ -1643,7 +1654,8 @@ def describe_project_content(project_path: str) -> str:
 
     # settings.json and mcp.json are shown VERBATIM, the rest by name.
     # These two are the ones whose contents change what runs: settings can
-    # pick the provider and multiply pipeline cost via ensemble_n, and
+    # pick the provider and multiply pipeline cost by turning on
+    # ensemble_mode (ensemble_n is ignored; the roster is config.yaml's), and
     # mcp.json names a local command to execute. Approving trust without
     # seeing that command is not an informed decision, which is the whole
     # reason §17 moved project MCP config under .venastine/ instead of

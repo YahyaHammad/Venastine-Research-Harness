@@ -1416,3 +1416,63 @@ def test_refusing_a_spawn_stops_it_happening(mocker):
     assert not dispatched.called, "a refused spawn must not run the subagent"
     results = [e.tool_result for e in events if e.tool_result is not None]
     assert "requires approval" in results[0]["result"]["error"]
+
+
+# ---------------------------------------------------------------------------
+# ---- #261: the premise the allowed_tools composer rests on ----------------
+# ---------------------------------------------------------------------------
+
+def _agent_def_constructions():
+    """{(relative path, enclosing function)} for every `AgentDef(...)` call
+    in production, read off the source."""
+    import ast
+    import os
+
+    from tests.test_docs_consistency import _production_python, _project_root
+
+    class _Calls(ast.NodeVisitor):
+        """One pass, tracking the innermost enclosing function."""
+
+        def __init__(self, relative):
+            self.relative, self.stack = relative, ["<module>"]
+
+        def _function(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = visit_AsyncFunctionDef = _function
+
+        def visit_Call(self, node):
+            if "AgentDef" in (getattr(node.func, "id", None),
+                              getattr(node.func, "attr", None)):
+                found.add((self.relative, self.stack[-1]))
+            self.generic_visit(node)
+
+    root, found = _project_root(), set()
+    for path in _production_python():
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        _Calls(os.path.relpath(path, root).replace(os.sep, "/")).visit(tree)
+    return found
+
+
+def test_only_the_loader_constructs_an_agent_def():
+    """#261. `active_context` and `child_context` build
+    `set(agent.allowed_tools)` with no check of their own, where `max_steps`
+    has a belt in `core/loop._run` that raises naming the field. The belt is
+    absent on purpose: A55 closed every file-borne route at the loader, and
+    the loader is the only thing in production that builds an AgentDef, so
+    a check in the composers would answer a question nobody can ask.
+
+    This turns that premise into a check. The day production constructs an
+    AgentDef anywhere else, a caller can hand the composers a list holding
+    a list, and the answer is `TypeError: unhashable type` from a set
+    comprehension -- so give AgentManager the `max_steps` belt then, and
+    widen this test's expectation."""
+    assert _agent_def_constructions() == {
+        ("core/config_loader.py", "_parse_md_file")}, (
+        "production now constructs an AgentDef outside the loader, so the "
+        "loader's shape checks no longer cover every route to "
+        "AgentManager's set(agent.allowed_tools): add the max_steps-style "
+        "belt there (#261)")

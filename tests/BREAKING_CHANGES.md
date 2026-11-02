@@ -10,6 +10,20 @@ worth understanding, not a flaky mock to patch over.
 
 ---
 
+## Stale claims and loose config (batch 223)
+
+| Change | Test | Fix |
+|---|---|---|
+| Loosen `ssh_port` or `db_path` back to a bare type | `test_an_incoherent_config_yaml_is_refused_by_name` (four cases) | `Port` and `NonEmptyStr` in `config_schema.py` (#213) |
+| Make `workspace_dir` a `NonEmptyStr` too | `test_an_empty_variable_reaches_the_guard_as_an_empty_path` | Leave it `str`: `check_workspace` refuses an empty workspace by name for both routes |
+| Report a refused overlaid key without its variable | `test_a_refused_value_the_environment_set_names_the_variable` | `validate(..., overridden=_overridden())` names it |
+| Let a `max_token_budget` of zero or less load | `test_a_spend_cap_of_zero_or_less_is_refused_at_load` | Refused by name in `_validate_settings`; null is no cap |
+| Describe a closed range or a non-empty text as a bare number or "text" | `test_a_closed_range_and_a_non_empty_text_say_so` | `_number_phrase` and `describe` read the constraints |
+| Narrow the manifest's secret screen back to five names | `test_the_manifest_hides_key_material_by_its_conventional_name` | `_KEY_FILENAMES` and `_KEY_SUFFIXES` in `project_init/manifest.py` (#227) |
+| Screen every file that mentions a key | `test_a_public_key_and_an_ordinary_file_are_still_listed` | The screen is for key material, not for the word |
+| Say the strip on every turn, or never | `test_the_session_is_told_once_on_screen`, `test_a_session_that_strips_nothing_is_told_nothing` | `_strip_said`, once per app (#239) |
+| Construct an `AgentDef` outside the loader in production | `test_only_the_loader_constructs_an_agent_def` | Give AgentManager the `max_steps` belt, then widen the test (#261) |
+
 ## Untested invariants (batch 222)
 
 | Change | Test | Fix |

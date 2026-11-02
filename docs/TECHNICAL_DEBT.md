@@ -3111,7 +3111,7 @@ names, where the documented latency tradeoff stands; any change to
 
 **CLOSED (batch 213), the behaviour half.** `is_url_permitted(resolve=False)` now asks the resolver with `AI_NUMERICHOST` when `ipaddress` cannot read the host: that flag reads a number and never looks anything up, so the reason `resolve=False` exists -- no DNS per search hit -- still holds. Measured on Windows and in WSL: `2130706433`, `0x7f.0.0.1`, `0x7F000001`, `127.1`, `0177.0.0.1`, `017700000001`, `2852039166` and `0xa9fea9fe` all parse, to 127.0.0.1 or 169.254.169.254, and `example.com`, `localhost`, `999.1.1.1` and `127.0.0.1.` fail with `gaierror` and stay names. Seven spellings are refused through `is_url_permitted`, #207's three are dropped through `web_search._normalize`'s real filter, `134744072` (8.8.8.8) still passes as the control, and the two no-DNS tests now allow a numeric read and refuse a lookup. Without the fix, 10 of the 11 new tests fail; the eleventh is the control. web_search's comment says "every spelling" again, and is true this time.
 
-## 54. `probability_stats._build_distribution` is dead and is a second answer (open, deferred batch 138)
+## 54. `probability_stats._build_distribution` is dead and is a second answer (closed, batch 223)
 
 **Issue:** #208.
 
@@ -3132,6 +3132,8 @@ it is `_build_distribution_with_warnings(...)[0]`.
 
 **Not:** changing the defaults, the warning strings, or
 `_build_distribution_with_warnings`' signature.
+
+**CLOSED (batch 223), the shape above.** `_build_distribution` is deleted, and `_build_distribution_with_warnings` is the one builder; its docstring says why and that a caller wanting no warnings takes `[0]`. No test: nothing called the dead copy, so nothing could have failed.
 
 ## 55. `**`-unpacking is admitted by the math node allowlist (closed, batch 160 -- refused by the guard)
 
@@ -3177,7 +3179,7 @@ a double that fails if evaluation runs. `ast.keyword` stays listed, as the entry
 advised, and the closure argument in `AGENTS.md` names the one shape that is
 recognised rather than unlisted.
 
-## 56. Nothing imports `env_secrets`, so `.env` is read by nothing (open, deferred batch 138)
+## 56. Nothing imports `env_secrets`, so `.env` is read by nothing (closed, batch 223)
 
 **Issue:** #210.
 
@@ -3217,6 +3219,8 @@ the second is actually wanted.
 bandit baseline entry and by two pinned tests in `tests/test_credentials.py`
 whose own `tests/BREAKING_CHANGES.md:2826` row explains what reverting them
 re-breaks; and the `usecwd=True` fix it carries is correct and worth keeping.
+
+**CLOSED (batch 223), the first answer above, on the owner's choice.** The three present-tense claims now say `.env` is for a future tool: AGENTS.md's credentials paragraph, PRIVACY.md's local-storage row, and `.env.example`, which now opens by saying no shipped tool reads it and that a key put there is stored for nothing. PRIVACY's deletion section names `.env`. The module, its `usecwd=True` fix and its two pinned tests are unchanged.
 
 ## 57. `env_secrets` turns an untrusted `.env` into process environment at import (closed, batch 160 -- read, never loaded)
 
@@ -3319,7 +3323,7 @@ environment variable costs.
 
 **CLOSED (batch 219), with the shape above, on the owner's choice.** `_resolve_level` catches the `ValueError` for a value read from `AGENT_LOG_LEVEL`, prints one stderr line naming the variable, the value and the accepted forms, and returns INFO, as the `OSError` branch does for `AGENT_LOG_FILE`. A bad `level=` passed in by code still raises, because that is a bug rather than a typo. README's "garbage is a startup error" sentence says what happens now. `TestABadLogLevelWarnsLikeABadLogPath` (5 tests) pins the warning, the fallback, the forms that still parse without a word, and the raise for code.
 
-## 59. The config schema checks shape where fitness also matters, unevenly (open, deferred batch 138)
+## 59. The config schema checks shape where fitness also matters, unevenly (closed, batch 223)
 
 **Issue:** #213.
 
@@ -3364,6 +3368,8 @@ the ACCEPTED lines above.
 is deliberate and documented at `config_schema.py:271-283` and validated
 downstream with a better error; `default_effort`, which is already cross-checked;
 `tui.effort`, which downstream per-model validation owns.
+
+**CLOSED (batch 223), the shape above.** `ssh_port` is a `Port`, a strict whole number from 1 to 65535, and `db_path` is `NonEmptyStr`. An empty `db_path` was measured to open SQLite's anonymous temporary database, so every thread and memory would have vanished at exit with nothing said. Because the environment folds into the same check, a refusal of a key a variable set now names the variable (`db_path (set by APP_DB_PATH)`), not just the file. `workspace_dir` stays a bare `str`, on measurement rather than the shape above: the first full run failed `test_an_empty_variable_reaches_the_guard_as_an_empty_path`, which pins that an empty workspace, from either route, is refused by name at `protected_paths.check_workspace`. The schema refusing it too would answer the variable's case first, as an error about `config.yaml`. `_validate_settings` refuses a `max_token_budget` of zero or less by name, and null still means no cap. The three trust rationales name `ensemble_mode`, the live multiplier. `/config` reads the new constraints off the schema like every other, through one generic closed-range phrase ("whole number from 1 to 65535", "text, not empty"). Tests: four cases in `test_an_incoherent_config_yaml_is_refused_by_name`, one for the variable's name, two refusals and three controls for the cap, and one for the panel's phrases.
 
 ## 60. The loader reads `.md` files the trust hash refuses to (closed, batch 219)
 
@@ -3656,7 +3662,7 @@ single-instance assumption and would be the same future section's problem.
 
 **CLOSED (batch 213), raising, the owner's choice** over disconnecting first, which would be the reconnect F7 defers. A `connect_all()` on a client whose manager task is live raises `RuntimeError` naming `disconnect_all()`; a failed connect already sets `_task` to None, so a retry after one is unaffected. `disconnect_all()` clears `_closed` with `clients` and `_catalogs`, and since `_TrackClose` holds the same set object, the next generation's clean closes land in it. `test_a_second_connect_all_on_a_live_client_raises` (the first generation still serves a call) and `test_each_cycle_names_its_own_stragglers` (a server clean in cycle one and wedged in cycle two is named) both fail without the fix. The straggler set is still keyed by server name, which is enough while a generation must end before the next begins.
 
-## 66. A `_blocking_modal` comment states a park that does not happen (open, deferred batch 138)
+## 66. A `_blocking_modal` comment states a park that does not happen (closed, batch 223)
 
 **Issue:** #220.
 
@@ -3696,7 +3702,9 @@ D22 asks of every claim about the installed package.
 
 **Not:** changing the direct `set_blocked` call, which is right.
 
-## 67. `_cmd_secrets` says "would deadlock" where it would raise (open, deferred batch 138)
+**CLOSED (batch 223), the comment narrowed to what was measured, and the measurement went further than the review's.** Under textual 8.2.8 a worker's marshal after the app exits returns at once while its loop runs and raises once the loop has closed. With `set_blocked` itself marshalled, `test_quitting_during_an_attended_research_prompt_releases_the_worker` still passes, so "parks the worker forever" does not reproduce today in the real app either. The direct call stays, for the reason the comment always also gave: the meter touches no widget. The comment names the three-case probe to re-take when the pin moves.
+
+## 67. `_cmd_secrets` says "would deadlock" where it would raise (closed, batch 223)
 
 **Issue:** #221.
 
@@ -3723,7 +3731,9 @@ loudly" versus "it would deadlock" changes whether they trust a test to catch it
 
 **Not:** restructuring `/secrets`, which is sound.
 
-## 68. `AGENTS.md`'s `_blocking_modal` bullet is split by eight unrelated ones (open, deferred batch 138)
+**CLOSED (batch 223).** The docstring said a blocking ask from a command handler would deadlock. It would raise -- textual refuses `call_from_thread` on the app's own thread at once, measured on 8.2.8 -- and since batch 135 contained S14-02, the raise becomes "/secrets failed" rather than a crash. The rule, and `action_pick_thread` as its pattern, are unchanged.
+
+## 68. `AGENTS.md`'s `_blocking_modal` bullet is split by eight unrelated ones (closed, batch 223)
 
 **Issue:** #222.
 
@@ -3753,7 +3763,9 @@ heading. A hand fix, not a new gate.
 
 **Not:** adding a check for it.
 
-## 69. `_ask_lock`'s no-timeout argument covers half the critical section (open, deferred batch 138)
+**CLOSED (batch 223).** The four stranded lines are back on the `_blocking_modal` bullet. They were split in the commit that wrote them (412a58f), so nothing was lost between the halves. No check, per the item.
+
+## 69. `_ask_lock`'s no-timeout argument covers half the critical section (closed, batch 223)
 
 **Issue:** #223.
 
@@ -3790,6 +3802,8 @@ anything NA12 cares about, or the lock could be acquired around the park alone.
 
 **Not:** adding a timeout to `_ask_lock`, which would put a `config.py` number
 into a leaf module that deliberately imports nothing first-party.
+
+**CLOSED (batch 223), the bound stated as what it is.** `_ask_lock`'s paragraph now says the waiters are bounded once the holder is parked, and that the marshal before the TUI's park is bounded only by the UI thread staying responsive. With item 66's measurement, what is left unbounded is a UI thread that is alive and wedged. No timeout was added, per Not doing.
 
 ## 70. Three widgets measure the terminal in characters, not cells (closed, batch 214)
 
@@ -3920,7 +3934,7 @@ rather than by this file.
 
 **CLOSED (batch 221), as a refusal rather than head-plus-notice, on the owner's choice.** The initializer's reply REPLACES the hub, so a model shown its head would write it back without its tail. Above `init_max_hub_chars` (1,000,000 characters, about three times this repository's own 347 KB hub) /init stops with one line before any model call. Far past it, the refusal comes from the size in bytes before the file is read, since four bytes per character makes that safe. Below it nothing changes, except that the shown diff is cut at `init_diff_shown_lines` (2,000) with a line saying how many more there are. The read is regular-files-only too (batch 219). Both values are `config.yaml` keys with CONFIG_ARCHITECTURE sections.
 
-## 73. `_tree` is the one manifest section with no second screen (open, deferred batch 138)
+## 73. `_tree` is the one manifest section with no second screen (closed, batch 223)
 
 **Issue:** #227.
 
@@ -3952,6 +3966,8 @@ material suffixes, bare `id_rsa`/`id_ed25519`, `*.key`) with a test per shape, o
 narrow the comment to name exactly the set it covers.
 
 **Not:** changing what is readable; content redaction; `_DOC_EXTENSIONS`.
+
+**CLOSED (batch 223), the screen extended, on the owner's choice.** `_is_secret` also hides the default names of SSH private keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519` and the two `_sk` forms) and the suffixes private keys and keystores are saved under (`.pem`, `.key`, `.p12`, `.pfx`, `.ppk`, `.jks`, `.keystore`), with case folded. The comment names that rule instead of claiming every credential filename. A public key and files that merely mention keys are still listed, as the control. Eleven cases, one per shape. `_DOC_EXTENSIONS` is untouched.
 
 ## 74. Two headless runs build prompts with the attended catalog defaults (closed, batch 222)
 
@@ -5077,7 +5093,7 @@ and the script disagree.
 call and the branch is not merged yet; the point of this entry is the local
 reproduction, which is needed either way for the batches before the merge.
 
-## 89. The transcript's ANSI strip is silent, and nothing reads the count it keeps (open, filed batch 145)
+## 89. The transcript's ANSI strip is silent, and nothing reads the count it keeps (closed, batch 223)
 
 **Issue:** #239.
 
@@ -5108,6 +5124,8 @@ since the count comes from the stripper rather than from the text.
 is WARNING+ and routes into the transcript, so that is the inline marker
 arriving by a route nobody chose, with a `[warning]` prefix on an ordinary
 coloured answer.
+
+**CLOSED (batch 223), the middle option, on the owner's choice.** The first turn in a session that strips anything also puts one system line on screen, pointing at `logs/app.log`; the per-turn INFO line is unchanged. It is a system line rather than a mark in the text, so a model cannot spoof it and the answer's entry stays exactly what was stripped. Two tests: three turns give one line with the answer unmarked, and a clean session gets none. AGENTS.md's S15-01 bullet says so.
 
 ## 90. A hardlink is a second name for a file, and the one hard deny cannot see it (closed, batch 160 -- compared by inode)
 
@@ -6185,7 +6203,7 @@ declines it for the same reason.
 
 **CLOSED (batch 215), as suggested: listed, and annotated.** `_shadowing_names` reads the harness and user tiers with `_tier_dirs` and `_parse_md_file` -- `_discover`'s own order and parser -- and a project entry whose name either has says `shadowed by the harness's own "<name>"` (or `your own (user configuration)`), `which is what loads; this file is used only if that one goes away`. It stays listed, because the grant covers its bytes. `test_a_shadowed_entry_is_listed_and_says_what_loads` covers a harness and a user shadow, and `test_what_it_calls_shadowed_is_what_the_loader_ignores` trusts the project, initializes, and checks the note against what the loader registered, with an unshadowed project agent as the control. All three new tests fail without the change.
 
-## 114. `AgentManager`'s two `set()` calls have no belt, where `max_steps` does (open, measured batch 155)
+## 114. `AgentManager`'s two `set()` calls have no belt, where `max_steps` does (closed, batch 223)
 
 **Issue:** #261.
 
@@ -6209,6 +6227,8 @@ comprehension rather than a message naming the field.
 demonstrated consequence -- and a second answer to a question the loader
 already answers is the fix-at-the-consumer shape AGENTS.md names. The
 measurement worth having first is whether any caller ever will.
+
+**CLOSED (batch 223), the premise pinned rather than the belt added, on the owner's choice.** `test_only_the_loader_constructs_an_agent_def` reads production for every `AgentDef(...)` call and requires exactly the one in `_parse_md_file`. The day another appears, it fails, naming the `max_steps` belt as the thing to add then.
 
 ## 115. A release tag is not compared with the version it publishes (closed, batch 162 -- compared before anything is packed)
 

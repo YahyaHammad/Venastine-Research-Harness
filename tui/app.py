@@ -1123,6 +1123,11 @@ class VenastineApp(App):
         # that clear it; a per-turn map that outlives its turn is a
         # leak on an app that stays open for hours.
         self._file_calls: dict = {}
+        # #239. Whether this session has already said, on screen, that a
+        # turn's text had terminal control sequences removed. Once per app,
+        # because what the user needs is to know it happens; every turn's
+        # count goes to the log either way.
+        self._strip_said = False
         # Batch 59. The sidebar's view of who is running. `_agent_stack` is
         # what the panel was last told to draw and is touched ONLY on the
         # UI thread, in on_agent_stack_changed; the sink that feeds it
@@ -4679,13 +4684,19 @@ class VenastineApp(App):
             # to notice the transition. set_blocked is idempotent, so the
             # two routes are one piece of state.
             #
-            # DIRECT, never call_from_thread: this runs on a worker, and
-            # a quitting app has no message pump left to marshal into --
-            # measured, that parks the worker forever and breaks the
-            # shutdown release this method exists to keep working
-            # (test_quitting_during_an_attended_research_prompt_releases_
-            # the_worker). The meter touches no widget, so there is
-            # nothing to marshal.
+            # DIRECT, not call_from_thread, because the meter touches no
+            # widget: there is nothing to marshal, and a call on the
+            # shutdown path should not depend on a pump that may be gone.
+            #
+            # This said a marshal here "parks the worker forever", as a
+            # measurement. Re-taken under textual 8.2.8 (batch 223, #220),
+            # it does not: a worker marshalling after the app exits gets
+            # its answer at once while the loop runs, and RuntimeError
+            # once the loop has closed, and with this very line marshalled
+            # test_quitting_during_an_attended_research_prompt_releases_
+            # the_worker still passes. Re-take it when the textual pin
+            # moves (D22) -- the probe is three cases: on the UI thread,
+            # after exit with the loop running, after the loop closes.
             self._meter.set_blocked(True, monotonic())
             self.call_from_thread(
                 self.push_screen, screen, lambda answer: channel.put(answer))
@@ -4947,11 +4958,24 @@ class VenastineApp(App):
         # on screen, which is `core/ansi.py`'s locked answer for the pty
         # and the same answer here, so that `_entries`, the screen, `/copy`
         # and the replay stay byte-identical to one another.
+        #
+        # ONCE PER SESSION, ON SCREEN TOO (#239, the owner's choice). The
+        # log alone was "an audit trail for someone already reading the
+        # file", and a sequence in a model's text is an anomaly worth
+        # knowing about once. A SYSTEM line, not a mark in the text: it
+        # cannot be spoofed by a model typing it, since the count comes
+        # from the stripper, and the answer's own entry stays untouched.
         stripped = self._transcript.take_stripped_count()
         if stripped:
             logger.info(
                 "Removed %d terminal control sequence(s) from this turn's "
                 "rendered text.", stripped)
+            if not self._strip_said:
+                self._strip_said = True
+                self._transcript.write_system(
+                    "Terminal control sequences were removed from this "
+                    "turn's text before it was shown. Said once per "
+                    "session; logs/app.log counts them every turn.")
         self._permission_channel = None
         # ROADMAP_v3 §61 (CN9). Same lifetime as the channel above: with
         # no turn to stop, escape goes back to meaning only what it
@@ -7135,10 +7159,14 @@ def _cmd_secrets(app: "VenastineApp", args: str) -> None:
     written without a way to show a password by accident (SS62).
 
     CALLBACKS, NOT `ask_secret_blocking`. A command handler runs on the UI
-    THREAD, and the blocking asks are drained by that same thread -- so
-    calling one here would deadlock the app on the first `/secrets`, not
-    fail it. `action_pick_thread` is the pattern being followed: push the
-    screen, continue in its dismiss callback.
+    THREAD, and the blocking asks marshal onto that same thread -- so
+    calling one here could never ask anything. It would not deadlock, as
+    this said until #221: textual refuses `call_from_thread` on the app's
+    own thread with a RuntimeError at once (measured, textual 8.2.8), and
+    since batch 135 the dispatcher contains a handler's exception -- so
+    every `/secrets` would end in "/secrets failed", loudly, which a test
+    of the command catches. `action_pick_thread` is the pattern being
+    followed: push the screen, continue in its dismiss callback.
 
     NOT MODEL-REACHABLE, and that is a property rather than an accident:
     slash commands are typed by a human and are not tools, so nothing in a

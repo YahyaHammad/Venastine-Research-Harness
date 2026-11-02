@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8639 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 8665 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -93,7 +93,7 @@ Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio` and `pytest-xdist`)
 
 MCP servers are a *third* config file again — `mcp.json`, user-level or `.venastine/`-level. Not `.env`, not `providers.json`, not `settings.json`.
 
-**Credentials are two separate mechanisms, deliberately.** LLM provider keys → `providers.json` (managed by `credentials.py`, gitignored, template at `providers.json.example`, and written for you by `/connect` since §79; a shared hosted session keeps a connected key in memory instead and never writes it, HD5). The ChatGPT plan has no key: its hourly tokens live in `chatgpt_auth.json` beside that file, managed by `core/chatgpt_auth.py` (§83). Misc tool API keys (GitHub, NVD) → `.env` (managed by `env_secrets.py`, template at `.env.example`). Never mix them.
+**Credentials are two separate mechanisms, deliberately.** LLM provider keys → `providers.json` (managed by `credentials.py`, gitignored, template at `providers.json.example`, and written for you by `/connect` since §79; a shared hosted session keeps a connected key in memory instead and never writes it, HD5). The ChatGPT plan has no key: its hourly tokens live in `chatgpt_auth.json` beside that file, managed by `core/chatgpt_auth.py` (§83). Misc tool API keys (GitHub, NVD) → `.env` (managed by `env_secrets.py`, template at `.env.example`) — for a FUTURE tool: no shipped tool calls `get_env_secret` yet, so nothing reads that file today (#210), and the documents that mention it say so. Never mix them.
 
 ## Version naming and batch completion (batch 202)
 
@@ -2804,7 +2804,10 @@ run rather than by reading the code.
   row that broke early. Nothing is drawn in its place and the widget logs nothing —
   `tui/app.py` reads a count at `on_turn_finished` and records one INFO line per
   turn, because `Transcript.write*` doing no logging is what stops
-  `on_log_record_message` closing a loop.
+  `on_log_record_message` closing a loop. Since #239 the first turn in a session
+  that strips anything also gets ONE system line saying so (the owner's choice):
+  a system line rather than a mark in the text, so a model cannot spoof it and
+  the answer's own entry is untouched.
 - **`/copy last` is READ from that log, never tracked beside it** (batch 48).
   `_last_response` was the second buffer, updated from whichever flush site kept
   `flush_stream()`'s return — and the one that mattered did not. `on_loop_event_message`
@@ -3010,6 +3013,10 @@ worker, and how a malformed answer decodes.
   the middle one is the easy mistake; `interaction.decode` tests `isinstance`
   rather than truthiness for exactly that reason.
 - **`tui/app.py` has one `_blocking_modal`.** Four asks did the same six lines,
+  and the `_permission_channel` field each published is what
+  `_release_permission_channel` reaches for when the app exits with a modal
+  open. It is no longer the loop's channel — it is this app's parked-worker
+  queue.
 
 **Slice 2 — the two tools the channel existed for.**
 
@@ -3044,10 +3051,6 @@ worker, and how a malformed answer decodes.
   docstring aside — they differ in signature *and* in conditionality.
 - **Whole-list write** (J13): no item is ever addressed by name or index, which
   is the problem `clear_refs` refused to solve.
-  and the `_permission_channel` field each published is what
-  `_release_permission_channel` reaches for when the app exits with a modal
-  open. It is no longer the loop's channel — it is this app's parked-worker
-  queue.
 
 ### Project scaffolding (`project_init/`, §24)
 

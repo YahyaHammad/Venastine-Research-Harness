@@ -208,6 +208,14 @@ class TestTheDescriptionsComeFromTheSchema:
         assert config_edit.find("compaction_trigger_fraction").values == (
             "number from 0 to 1")
 
+    def test_a_closed_range_and_a_non_empty_text_say_so(self):
+        """#213's two shapes, read off the constraints like the rest: the
+        panel offers what the schema now refuses, not a lax `int` or `text`."""
+        assert config_edit.find("ssh_port").values == (
+            "whole number from 1 to 65535")
+        assert config_edit.find("db_path").values == "text, not empty"
+        assert config_edit.find("workspace_dir").values == "text"
+
     def test_a_container_says_so_and_is_not_settable(self):
         row = config_edit.find("domain_authority_suffixes")
         assert row.kind == "container"

@@ -657,6 +657,10 @@ WARNING, like any other unlisted model.
 
 ### `db_path`
 
+Must not be empty (#213). An empty path was accepted until then and
+opened SQLite's anonymous temporary database, so every thread and memory
+vanished at exit without a word.
+
 ## Output artifacts
 
 ### `output_dir`
@@ -673,6 +677,12 @@ one expression with no branch in it -- an unset AGENT_WORKSPACE gives
 ## File-ops workspace (ROADMAP §6)
 
 ### `workspace_dir`
+
+An empty one is refused by name at startup, by
+`protected_paths.check_workspace`, which answers both routes to it -- this
+key and an empty `AGENT_WORKSPACE`. The schema deliberately does not
+refuse it too (#213): it would answer the variable's case first, as an
+error about this file.
 
 ### `workspace_is_project`
 
@@ -975,6 +985,10 @@ THIS host; it never names one. SS35's split, unchanged: which machine this
 harness may reach is the user's question, which command needs it is the
 agent's. A named map of hosts is a later addition that this shape does not
 block.
+
+`ssh_port` is a whole number from 1 to 65535 (#213). It was a lax `int`
+until then, so `true` was read as port 1 and `99999` reached the SSH call
+before anything said no.
 
 ### `ssh_identity_file`
 

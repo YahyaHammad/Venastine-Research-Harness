@@ -133,6 +133,16 @@ PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 #: A count where zero is a real answer -- no retries, no injected memories.
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 
+#: A TCP port. `ssh_port` was a lax `int` until #213, so `true` became port
+#: 1 and `99999` reached the SSH call before anything said no.
+Port = Annotated[int, Field(strict=True, ge=1, le=65535)]
+
+#: A path that must name something. An empty `db_path` was accepted until
+#: #213 and opened SQLite's anonymous temporary database, so every thread
+#: and memory vanished at exit without a word. `workspace_dir` is NOT one,
+#: deliberately: see its field.
+NonEmptyStr = Annotated[str, Field(min_length=1)]
+
 #: A duration in seconds that must be positive.
 PositiveNumber = Annotated[float, BeforeValidator(_number_only),
                            Field(gt=0.0, allow_inf_nan=False)]
@@ -354,12 +364,18 @@ class HarnessConfig(_Model):
     google_thinking_budgets: dict[str, StrictInt]
 
     # -- Database ----------------------------------------------------------
-    db_path: str
+    db_path: NonEmptyStr
 
     # -- File-ops workspace ------------------------------------------------
     # `output_dir` and `workspace_dir_explicit` are deliberately absent --
     # see DERIVED_VALUES below. `workspace_is_project` is NOT the second of
     # those: it is an ordinary key that FEEDS one (TECHNICAL_DEBT 28).
+    # A bare `str`, not `NonEmptyStr` (#213, measured): an empty workspace
+    # is refused BY NAME at `protected_paths.check_workspace`, which answers
+    # both routes to it -- this key and an empty AGENT_WORKSPACE, which
+    # folds in here. Refusing it here too would answer the variable's case
+    # first and worse, as an error about config.yaml.
+    # test_an_empty_variable_reaches_the_guard_as_an_empty_path pins it.
     workspace_dir: str
     workspace_is_project: StrictBool
     max_file_size_bytes: PositiveInt
@@ -397,7 +413,7 @@ class HarnessConfig(_Model):
     allow_ssh_backend: StrictBool
     ssh_host: str
     ssh_user: str
-    ssh_port: int
+    ssh_port: Port
     ssh_identity_file: str
     ssh_remote_workspace: str
     ssh_host_key: str
@@ -700,11 +716,18 @@ def read_document(path: Optional[str] = None) -> dict:
     return data
 
 
-def validate(data: dict, source: Optional[str] = None) -> HarnessConfig:
+def validate(data: dict, source: Optional[str] = None,
+             overridden: Optional[dict] = None) -> HarnessConfig:
     """Validate a raw mapping, reporting every problem at once.
 
     Raises `ValueError` naming the file and each offending key. A missing key
     and an unknown key are both errors -- see rule 3 in the module docstring.
+
+    `overridden` is `{key: environment variable}` for the keys the
+    environment set (#213). A problem with one of those names the variable,
+    because the file holds a good value and someone reading only the file
+    would find nothing wrong with it -- `APP_DB_PATH=` is the case that made
+    it reachable, now that `db_path` must not be empty.
     """
     where = source or CONFIG_PATH
     name = _describe(source)
@@ -728,7 +751,9 @@ def validate(data: dict, source: Optional[str] = None) -> HarnessConfig:
         lines = []
         for err in exc.errors():
             key = ".".join(str(part) for part in err["loc"]) or "<root>"
-            lines.append(f"  {key}: {err['msg']}")
+            variable = (overridden or {}).get(key)
+            origin = f" (set by {variable})" if variable else ""
+            lines.append(f"  {key}{origin}: {err['msg']}")
         raise ValueError(
             f"{name} at {where} is not valid "
             f"({len(lines)} problem(s)):\n" + "\n".join(lines)) from None
@@ -756,6 +781,14 @@ def _overlay_env(data: dict) -> dict:
         if override is not None:
             merged[name.lower()] = override
     return merged
+
+
+def _overridden() -> dict:
+    """`{key: variable}` for each key the environment sets right now --
+    what `validate` names beside a problem with one of them."""
+    return {name.lower(): variable
+            for name, variable in ENV_OVERRIDES.items()
+            if os.environ.get(variable) is not None}
 
 
 def derived_values(cfg: HarnessConfig) -> dict:
@@ -899,6 +932,7 @@ def load(path: Optional[str] = None, force: bool = False) -> HarnessConfig:
         return validate(read_document(path), source=path)
     if _cached is None or force:
         _cached = validate(_overlay_env(read_document(None)),
+                           overridden=_overridden(),
                            source=CONFIG_PATH)
     return _cached
 

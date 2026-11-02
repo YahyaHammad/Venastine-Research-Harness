@@ -624,6 +624,9 @@ def _bounds(metadata) -> dict:
 def _number_phrase(noun: str, bounds: dict) -> str:
     if bounds.get("ge") == 0.0 and bounds.get("le") == 1.0:
         return f"{noun} from 0 to 1"
+    if "ge" in bounds and "le" in bounds:
+        # #213's `Port`, and any closed range after it.
+        return f"{noun} from {bounds['ge']} to {bounds['le']}"
     if bounds.get("gt") == 0:
         return f"{noun}, above 0"
     if bounds.get("ge") == 0:
@@ -660,7 +663,8 @@ def describe(name: str, annotation, metadata) -> tuple:
     if annotation is float:
         return "scalar", _number_phrase("number", bounds), False, False
     if annotation is str:
-        return "scalar", "text", True, False
+        return ("scalar", "text, not empty" if bounds.get("min_length")
+                else "text", True, False)
     if origin is typing.Union or origin is types.UnionType:
         inner = [a for a in args if a is not type(None)]
         if inner == [str]:

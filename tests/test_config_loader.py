@@ -230,6 +230,26 @@ def test_settings_wrong_type_raises(_redirect_roots):
         config_loader.initialize(str(_redirect_roots["project"]))
 
 
+@pytest.mark.parametrize("cap", [0, -5])
+def test_a_spend_cap_of_zero_or_less_is_refused_at_load(_redirect_roots, cap):
+    """#213. `_type_ok` passes both -- they are ints -- and the loop's check
+    is `used >= cap`, so either let every turn make one model call and then
+    die reporting a budget problem for a typo here."""
+    _write_settings(_redirect_roots["user"], {"max_token_budget": cap})
+
+    with pytest.raises(ValueError, match="max_token_budget must be a positive"):
+        config_loader.initialize(str(_redirect_roots["project"]))
+
+
+@pytest.mark.parametrize("cap", [None, 1, 250_000])
+def test_no_cap_or_a_positive_one_still_loads(_redirect_roots, cap):
+    """The control: null means no cap, and any positive count is a cap."""
+    _write_settings(_redirect_roots["user"], {"max_token_budget": cap})
+
+    config_loader.initialize(str(_redirect_roots["project"]))
+    assert config_loader.spend_cap() == cap
+
+
 def test_settings_compaction_is_consumed(_redirect_roots, caplog):
     """ROADMAP_v2 §21 replaced the "present but not implemented yet"
     warning this test used to assert. The warning was the right thing
@@ -1778,6 +1798,12 @@ _INCOHERENT = [
      "scholar_venue_weight"),
     ("a context window of zero",
      lambda d: d.update(default_context_window=0), "default_context_window"),
+    # #213: three keys whose lax type accepted values that fail far away.
+    ("a port that is a boolean", lambda d: d.update(ssh_port=True),
+     "ssh_port"),
+    ("a negative port", lambda d: d.update(ssh_port=-1), "ssh_port"),
+    ("a port past 65535", lambda d: d.update(ssh_port=99999), "ssh_port"),
+    ("an empty database path", lambda d: d.update(db_path=""), "db_path"),
 ]
 
 
@@ -1799,6 +1825,24 @@ def test_an_incoherent_config_yaml_is_refused_by_name(label, edit, key):
     assert key in str(exc.value), (
         f"{label} was refused, but the message does not name {key!r}, so the "
         f"reader is left diffing the whole file:\n{exc.value}")
+
+
+def test_a_refused_value_the_environment_set_names_the_variable(
+        monkeypatch):
+    """#213. `APP_DB_PATH=` folds into `db_path` before validation, and an
+    empty `db_path` is refused -- so the refusal has to say where the empty
+    value came from. The file holds a good one, and a reader looking only at
+    the file would find nothing wrong with it.
+
+    `workspace_dir` is deliberately NOT refused here: an empty one, by
+    either route, is refused by name at `protected_paths.check_workspace`
+    (test_an_empty_variable_reaches_the_guard_as_an_empty_path)."""
+    import config_schema
+
+    monkeypatch.setenv("APP_DB_PATH", "")
+    with pytest.raises(ValueError,
+                       match=r"db_path \(set by APP_DB_PATH\): String"):
+        config_schema.load(force=True)
 
 
 def test_the_shipped_config_yaml_satisfies_every_invariant():

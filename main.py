@@ -2377,8 +2377,8 @@ def _ask(prompt: str) -> str:
 def _ensure_workspace_trust(project_path: str, trust_flag: bool) -> None:
     """D17 one-time confirmation. Shows what would load (file list plus
     settings.json verbatim -- a project's settings can pick the provider
-    and multiply pipeline cost via ensemble_n, so approval must be
-    informed). Interactive y/N on a TTY; --trust-project grants for
+    and multiply pipeline cost by turning on ensemble_mode, so approval
+    must be informed). Interactive y/N on a TTY; --trust-project grants for
     scripts/CI; non-TTY without the flag skips project content with a
     notice instead of hanging on input()."""
     if workspace_trust.is_trusted(project_path):

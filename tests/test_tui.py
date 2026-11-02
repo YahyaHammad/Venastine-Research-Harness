@@ -9761,6 +9761,44 @@ class TestTheStrippedSequencesAreRecordedOnce:
         assert not [r for r in caplog.records
                     if "control sequence" in r.getMessage()]
 
+    @pytest.mark.asyncio
+    async def test_the_session_is_told_once_on_screen(self):
+        """#239, the owner's choice: the first turn that strips anything
+        puts ONE system line on screen, and a later one does not repeat it.
+        A system line rather than a mark in the text, so the answer's own
+        entry is exactly what it was."""
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for text in ("a \x1b[2J b", "plain", "c \x1b[31m d"):
+                app._transcript.write_answer(text)
+                app.on_turn_finished(TurnFinished(None))
+            entries = list(app._transcript._entries)
+
+        said = [text for role, text in entries
+                if role == "system" and "control sequences" in text]
+        assert len(said) == 1, said
+        assert "logs/app.log" in said[0]
+        answers = [text for role, text in entries if role == "assistant"]
+        assert answers[0] == "a  b", answers
+
+    @pytest.mark.asyncio
+    async def test_a_session_that_strips_nothing_is_told_nothing(self):
+        """The control: a line on every session would say nothing."""
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._transcript.write_answer("nothing unusual here")
+            app.on_turn_finished(TurnFinished(None))
+            entries = list(app._transcript._entries)
+
+        assert not [text for role, text in entries
+                    if "control sequences" in text]
+
 
 class TestThePermissionModalShowsWhatDrawsTextOutOfOrder:
     """TECHNICAL_DEBT 104, batch 160: the TUI half of the CLI's

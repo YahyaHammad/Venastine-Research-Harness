@@ -1146,6 +1146,32 @@ class TestDiscovery:
                                                 encoding="utf-8")
         assert "providers.json" not in manifest.build_manifest(str(project))
 
+    @pytest.mark.parametrize("name", [
+        "id_rsa", "id_ed25519", "ID_ECDSA", "deploy-key.pem", "api.key",
+        "secret.KEY", "client.p12", "signing.pfx", "putty.ppk",
+        "release.jks", "app.keystore",
+    ])
+    def test_the_manifest_hides_key_material_by_its_conventional_name(
+            self, project, name):
+        """#227. The layout's only screen used to be five store names and
+        `.env*`, while its comment claimed every credential filename -- so
+        an SSH key or a certificate's private half was named to the model
+        (never read: none of these is a readable extension). One case per
+        shape, and the case folds as the read denylist does."""
+        (project / name).write_text("x\n", encoding="utf-8")
+        assert name not in manifest.build_manifest(str(project))
+
+    def test_a_public_key_and_an_ordinary_file_are_still_listed(
+            self, project):
+        """The control: a screen that hid everything would pass the cases
+        above. `id_rsa.pub` is a public key, and `keys.py` merely mentions
+        one."""
+        for name in ("id_rsa.pub", "keys.py", "pem_notes.md"):
+            (project / name).write_text("x\n", encoding="utf-8")
+        text = manifest.build_manifest(str(project))
+        for name in ("id_rsa.pub", "keys.py", "pem_notes.md"):
+            assert name in text
+
     def test_the_manifest_is_stable_across_runs(self, project, monkeypatch):
         """Byte-identical input is what makes /init's output diffable.
 
