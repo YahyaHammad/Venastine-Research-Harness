@@ -29615,3 +29615,53 @@ session state (six of them), and that the one assembly lives in
   grew; gitleaks on an export, no leaks. Under WSL the five tier-related files
   gave 136 passed and 2 failed, and the same 2 fail at HEAD.
 - **Version**, by `scripts/version.py bump`: `0.3.4-b.10.bugfixes.r57e749187eaf`.
+
+## Batch 228 -- a CLI turn printed as it runs, and a second press to stop it (2026-11-03)
+
+**#225 and #244 (register items 71 and 94), ROADMAP_v3 §86, A81.** The owner
+took all four remaining groups as batches 228-231, this one first. Each fork
+went to the recommended option: each step printed as the replay draws it, two
+presses inside 2s, the same rule during a wake turn, and one press still
+exits at the prompt.
+
+- **Measured first.** The loop yields `thinking_delta`/`token_delta` while a
+  call streams, `retract` only then, and `tool_call_start` only after the call
+  finished and D20 saved it. So a printer that waits for each step to finish
+  never has to take anything back, and a first-press message never lands
+  inside a streaming answer, which is how the two issues meet.
+- **Found:** `todo_write`'s summary is documented as "for the CLI, which has
+  no panel" and rode only the `notice` event the CLI drained, so the CLI never
+  printed one; and CN10's CLI handler had no test at all.
+- **The live turn.** `run_to_completion(gen, observe)` hands every event to
+  an observer, and `run_agent_conversation` and `wake_conversation` pass one
+  through. `main._LiveTurn` prints a step at its first tool call from what
+  streamed and the last step from the returned response, through
+  `core.replay.step_entries`, now public and called by `replay_entries`.
+  `retract` drops the held deltas, notices print live and once, and a print
+  failure is logged rather than raised into the loop. The `[thread: ...]` line
+  moved below the answer.
+- **The second press.** `main._SecondPress` handles both turns: the first
+  press only says what a second would do, a second inside
+  `TURN_STOP_CONFIRM_S` (2.0, held equal to the TUI's `QUIT_CONFIRM_S`) acts
+  once, later presses are ignored, and a press after the window re-arms. CN10
+  and A21 carry amendment notes.
+
+### Verified
+
+- New tests: 23 (21 in `tests/test_cli_live_turn.py`, 2 in
+  `test_session_cli.py`). The parity test runs a real two-step turn through
+  the real loop and then replays its thread: the same five lines. 18
+  mutations, each red on its assertion. The one that first survived removed
+  the acted-once guard: the chat turn's action is idempotent (`cancel()` is),
+  so its test could not see a second act, and the wake's is not. A handler
+  unit test now counts acts.
+- Existing tests that changed: the wake-interrupt helper in
+  `test_session_cli.py` presses twice by default; with one press, the
+  300-second session it waits on hung the first run.
+- **Full suite:** 8642 passed, 75 skipped in 2:19, nothing failed. ruff clean.
+- bandit: 0 findings outside the baseline, no count grew. gitleaks on a worktree
+  export: no leaks. WSL, the six CLI files: 262 passed, and
+  `test_a_research_pass_creates_a_research_pass_thread` failed identically at
+  HEAD, because the export has no `providers.json` (gitignored; CI copies the
+  template).
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.11.bugfixes.r57e749187eaf`.

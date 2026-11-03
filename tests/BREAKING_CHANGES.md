@@ -15,6 +15,24 @@ other name.
 
 ---
 
+## A CLI turn printed as it runs (batch 228)
+
+| Change | Test | Fix |
+|---|---|---|
+| Print a live CLI turn by any rule but the replay's | `test_a_live_turn_prints_what_its_replay_prints` | Print each step through `core.replay.step_entries` (#225, A81) |
+| Print a step's tool line without its reasoning and text, or after the tool ran | `test_a_live_turn_prints_what_its_replay_prints`, `test_a_tool_line_prints_before_the_tool_runs` | A step prints at its first `tool_call_start`, which arrives before dispatch |
+| Print a step while it streams, or keep what a `retract` withdrew | `test_a_retried_attempt_prints_nothing_of_itself` | Hold deltas until the step finishes; `retract` clears them |
+| Assemble the answer from deltas | `test_the_answer_does_not_depend_on_it_having_streamed` | `finish` reads the last step from the returned response |
+| Print a step again at `finish`, or drop the calls never announced | `test_a_step_cut_short_after_its_tools_prints_once`, `test_a_tool_call_never_announced_prints_at_the_end` | Skip a step whose first call was announced; print only the unannounced calls |
+| Print a notice twice, or not live | `test_a_notice_prints_once_where_it_happened`, `test_the_todo_summary_reaches_the_cli` | Live when it arrives; from `response.notices` only if it never did; held by object, not `id()` |
+| Let a print failure out of the observer | `test_a_display_failure_does_not_end_the_turn` | Log it: the observer runs inside the loop's consumer |
+| Stop handing events to `observe`, or stop passing the printer | `test_run_to_completion_hands_every_event_to_its_observer`, `test_the_user_turn_hands_the_loop_a_printer`, `test_a_wake_turn_is_printed_live_like_the_users_own` | Both turns pass `observe=live` and call `live.finish(response)` |
+| Stop a turn on the first Ctrl+C | `test_one_press_stops_nothing_and_says_what_a_second_does`, `test_one_press_during_a_wake_stops_nothing` | `_SecondPress` acts on the second press inside `TURN_STOP_CONFIRM_S` (#244, A81) |
+| Act more than once, or ignore the window | `test_further_presses_after_it_acted_say_nothing_more`, `test_it_acts_once_however_often_it_is_pressed`, `test_a_press_after_the_window_arms_again`, `test_the_window_restarts_from_the_latest_first_press` | Act once; a press after the window re-arms from that press |
+| Change the CLI's window without the TUI's | `test_the_window_is_the_tuis` | `TURN_STOP_CONFIRM_S` equals `tui.app.QUIT_CONFIRM_S` |
+| Leave the turn's handler installed after it | `test_the_handler_covers_the_turn_and_is_restored_after_it` | Restore it in the `finally`, so the prompt's Ctrl+C still exits |
+| Press once in a test that expects the wake's sessions stopped | `test_the_turn_finishes_and_then_the_sessions_stop`, `test_the_handler_covers_the_turn_and_is_restored_after_it`, `test_the_wake_turn_is_never_handed_a_cancel` | `_interrupt_inside_the_wake` presses twice by default; one press only arms |
+
 ## Six prompt tiers, one assembly (batch 227)
 
 | Change | Test | Fix |

@@ -740,7 +740,7 @@ def _maybe_compact(memory, model, provider_name, notices, mode,
     yield LoopEvent(notice=notices[-1])
 
 
-def run_to_completion(gen) -> ModelResponse:
+def run_to_completion(gen, observe=None) -> ModelResponse:
     """Consumes a _run() generator fully, discarding intermediate events,
     and returns the final ModelResponse — this is what keeps
     run_agent_conversation() and continue_conversation(), the two public
@@ -751,9 +751,20 @@ def run_to_completion(gen) -> ModelResponse:
     its own value -- stream_deep_research_mode(), whose response carries
     `thread_id` attached after the loop finished -- needs the other
     question asked, and `tests/conftest.drain` is where that lives now
-    that the pass wrapper is gone."""
+    that the pass wrapper is gone.
+
+    `observe` (ROADMAP_v3 §86, A81) is handed every event as it is drawn,
+    the terminal one included, so a caller that wants the answer
+    synchronously can still draw the turn while it runs. The CLI is that
+    caller: it prints each step as it finishes, the way the replay of the
+    thread will. Discarding stays the default, and nothing here protects
+    the turn from the observer -- one that raises abandons the generator
+    exactly as an exception in any consumer would, so the observer is the
+    one that must not."""
     final = None
     for event in gen:
+        if observe is not None:
+            observe(event)
         if event.final_response is not None:
             final = event.final_response
     if final is None:
@@ -2111,6 +2122,7 @@ class RunAgentLoop:
         thread_parent_call: Optional[str] = None,
         thread_agent: Optional[str] = None,
         cancel=None,
+        observe=None,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -2157,7 +2169,10 @@ class RunAgentLoop:
         thread, ignored on a resume. They are what makes a spawned run
         reachable afterwards -- without them a `▸ spawn_subagent` line
         describes a conversation nothing can find. Only the callers that
-        know they are creating a child pass them."""
+        know they are creating a child pass them.
+
+        observe (ROADMAP_v3 §86) is `run_to_completion`'s: handed every
+        event as the turn runs. The CLI passes one to print the turn live."""
         if authorization is not None and granted_tools is not None:
             raise ValueError(
                 "run_agent_conversation: pass authorization= or "
@@ -2210,7 +2225,7 @@ class RunAgentLoop:
             response_channel=response_channel, activity=activity,
             cancel=cancel,
             **auth_kwargs,
-        ))
+        ), observe)
         response.thread_id = memory.thread_id
         return response
 
@@ -2414,6 +2429,7 @@ class RunAgentLoop:
         authorization=None,
         activity=None,
         cancel=None,
+        observe=None,
     ) -> ModelResponse:
         """A turn started by the HARNESS in an existing thread: a background
         session's result, delivered as a harness-written user row
@@ -2436,6 +2452,9 @@ class RunAgentLoop:
         run with no way to ask a human, so every gated call in it would be
         denied for a reason that is about the harness rather than the
         request, which is the silent-stripping failure §25 records.
+
+        `observe` is `run_agent_conversation`'s (§86): the CLI's wait loop
+        prints a wake turn live exactly as it prints the user's own.
 
         NOT a second `_run`. tests/test_grants.py walks this module for
         exactly one function by that name, and this is a wrapper over it.
@@ -2469,6 +2488,6 @@ class RunAgentLoop:
             response_channel=response_channel, activity=activity,
             cancel=cancel,
             **auth_kwargs,
-        ))
+        ), observe)
         response.thread_id = memory.thread_id
         return response

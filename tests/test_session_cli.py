@@ -105,6 +105,23 @@ class TestWaitingBetweenTurns:
         assert "woken 1" in out
         assert "background session" in out
 
+    def test_a_wake_turn_is_printed_live_like_the_users_own(
+            self, manager, session_starter, wakes, cli_stdin, fake_storage,
+            capsys, mocker):
+        """ROADMAP_v3 §86 (A81). A wake is the run continuing, so it hands
+        the loop the same printer the user's turn does -- printed any other
+        way, it would be #225 again one phase later."""
+        def start_and_finish(_n):
+            _start(manager)
+            session_starter.started[-1]["process"].exit(0)
+
+        _turns(mocker, during=start_and_finish)
+        cli_stdin("run the tests")
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        assert isinstance(wakes[0]["observe"], main._LiveTurn)
+
     def test_the_chat_turn_is_a_wake_consumer(self, manager, cli_stdin,
                                               fake_storage, mocker):
         """SS17: without this the manager refuses every start made from the
@@ -293,24 +310,59 @@ class TestCtrlCDuringAWakeTurn:
     """
 
     @staticmethod
-    def _interrupt_inside_the_wake(mocker, recorder):
+    def _interrupt_inside_the_wake(mocker, recorder, presses=2):
         """Replace the wake turn with one that presses Ctrl+C in the middle
         of itself and then finishes normally, the way a real turn would
-        carry on to write the rows it owes."""
+        carry on to write the rows it owes.
+
+        TWICE by default, since ROADMAP_v3 §86 (A81): the first press only
+        arms, and the second, well inside `TURN_STOP_CONFIRM_S`, acts."""
         def fake_wake(**kwargs):
             recorder.append(kwargs)
             recorder.append({"handler_during_the_turn":
                              signal.getsignal(signal.SIGINT)})
-            signal.raise_signal(signal.SIGINT)
-            # The handler runs between bytecodes; these are the bytecodes.
-            for _ in range(3):
-                pass
+            for _ in range(presses):
+                signal.raise_signal(signal.SIGINT)
+                # The handler runs between bytecodes; these are the
+                # bytecodes.
+                for _ in range(3):
+                    pass
             response = make_model_response(text="the turn finished")
             response.thread_id = THREAD
             return response
 
         mocker.patch.object(RunAgentLoop, "wake_conversation",
                             side_effect=fake_wake)
+
+    def test_one_press_during_a_wake_stops_nothing(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            capsys, mocker):
+        """ROADMAP_v3 §86 (A81). The first press only says what a second
+        would do, as during the user's own turn: a stray one costs neither
+        the turn nor the sessions.
+
+        The session still running is one that will be killed at the quit,
+        not by the press -- which is why the assertion is on the lines the
+        press would have printed rather than on its state afterwards."""
+        recorded = []
+
+        def start_and_finish(n):
+            if n == 1:
+                _start(manager)
+                session_starter.started[-1]["process"].exit(0)
+
+        _turns(mocker, during=start_and_finish)
+        self._interrupt_inside_the_wake(mocker, recorded, presses=1)
+        cli_stdin("start it")
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        out = capsys.readouterr().out
+        assert "[Ctrl+C again within 2s stops the background sessions " \
+            "once this turn finishes]" in out
+        assert "stopping the background sessions" not in out
+        assert "stopped" not in out
+        assert "the turn finished" in out
 
     def test_the_turn_finishes_and_then_the_sessions_stop(
             self, manager, session_starter, cli_stdin, fake_storage,

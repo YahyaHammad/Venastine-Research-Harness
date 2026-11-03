@@ -60,7 +60,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8694 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 8717 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -333,7 +333,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §54, §55, §58, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84 and §85 built; §53, §56, §57, §59 and §60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A80 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR6 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82 and CG1–CG24 from §83). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §54, §55, §58, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84, §85 and §86 built; §53, §56, §57, §59 and §60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A81 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85, A81 in §86), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR6 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82 and CG1–CG24 from §83). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -2211,6 +2211,14 @@ sentence used to give the CLI's table existed nowhere in the tree, for 24 batche
 leave the filesystem untouched (#101). `_classify_legacy_threads()` runs below the early-exit
 commands: it exists for the thread picker, and none of them shows one.
 
+**Ctrl+C during a turn takes TWO presses** (ROADMAP_v3 §86, A81, amending §61's CN10).
+`main._SecondPress` is the SIGINT handler for the user's own turn and for a wake turn alike: the
+first press changes nothing and prints what a second would do, a second inside
+`TURN_STOP_CONFIRM_S` (the TUI's `QUIT_CONFIRM_S`, held equal by a test) acts once, and later
+presses are ignored. The TUI's copy check cannot come with it, because in a terminal the selection
+belongs to the terminal. At the prompt one press still exits, and while merely waiting on sessions
+one press still stops them: neither has a turn running to lose.
+
 **Tests type at the CLI through `cli_stdin`**, not by patching `builtins.input` — that stopped being
 the seam, which is the fix working. `FakeStdinReader` records `prompts` and `timeouts`, so a test can
 assert what the user was asked and whether it carried a deadline.
@@ -2583,7 +2591,8 @@ And slice 1's tools, the sleeping subagent and the CLI (batch 95):
   failed before returning one is identifiable anyway.
 - **The CLI waits between turns** (`main._await_sessions`) and runs a wake turn per batch. Ctrl+C there is
   aimed at the SESSIONS, not at the conversation: they are stopped and the prompt comes back, with their
-  results held for the next message (SS19). Held results are written into the thread before the turn that
+  results held for the next message (SS19). During a wake turn it stops them only after the turn ends
+  (A21), and only on a second press inside the window (A81). Held results are written into the thread before the turn that
   answers that message, so the model reads them beside it. Quitting with sessions live confirms (SS6),
   and nobody to ask counts as yes. `main._close_sessions` kills, records a row in each owning thread and
   sweeps this process's containers -- before `teardown_mcp`, because that row needs the database.
@@ -2862,6 +2871,15 @@ independent bugs, both found by using the app.
 - **Tool calls replay as one redacted line; tool RESULTS are skipped** (T4). A
   grounding-heavy thread carries hundreds of kilobytes of fetched page text in those
   rows.
+- **A live CLI turn prints what its replay prints** (ROADMAP_v3 §86, A81). `main._LiveTurn`
+  is handed to `run_to_completion` as its observer and prints each model step when it
+  FINISHES -- at its first tool call, or from the returned response for the last one --
+  through `core.replay.step_entries`, the function the replay uses. Never while a step
+  streams: a `retract` can only arrive then, and the printer honours it by dropping what
+  it held. The answer is always read off the response, never assembled from deltas, so
+  a provider that streams no text still has its answer printed. A wake turn is printed
+  the same way. `tests/test_cli_live_turn.py` runs a real turn and then replays its
+  thread, and the two must print the same lines.
 - **`ConversationThread.kind` is a column, not an `extra_data` key** (T1), because
   `list_threads()` is the one query that must stay cheap on a database gaining ten
   rows per research run. It is deliberately **not indexed**: `ensure_columns()` ALTERs

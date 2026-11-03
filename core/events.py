@@ -61,10 +61,16 @@ class LoopEvent:
     #
     # ALSO carried on the ModelResponse, because run_to_completion()
     # discards every non-final event -- so a notice delivered only here
-    # would be invisible to the CLI and the pipeline, which drain the
-    # generator rather than watching it. That is the same defect §20 and
-    # §25 each hit once; the event is for live display, the response field
-    # is for everyone else.
+    # would be invisible to the pipeline, which drains the generator
+    # rather than watching it. That is the same defect §20 and §25 each hit
+    # once; the event is for live display, the response field is for
+    # everyone else.
+    #
+    # The CLI drained too until ROADMAP_v3 §86 (A81). It now hands
+    # run_to_completion() an observer, prints this event when it arrives,
+    # and prints from the response only a notice that never arrived. That
+    # is also how a TOOL's notice (§23 J10) reaches it: those ride only
+    # this event, never the response.
     notice: Optional[dict] = None
     # Batch 113 (TECHNICAL_DEBT 25). THE NINTH FIELD, and it argues for
     # itself where test_pipeline_events.py says it must. This is not a
@@ -84,6 +90,11 @@ class LoopEvent:
     # would be asking it to undo something that never happened. A
     # consumer with no screen correctly ignores this field, which is why
     # the research pipeline translates it into nothing at all.
+    #
+    # The CLI (ROADMAP_v3 §86, A81) has a screen and still draws nothing
+    # a retraction could reach: it prints a step only once the step has
+    # finished, which is after the last moment one can arrive. It honours
+    # this field by dropping what it was holding.
     retract: Optional[dict] = None
     final_response: Optional[Any] = None          # ModelResponse on terminal event
     # "complete" | "max_steps_reached" | "token_budget_exceeded" |

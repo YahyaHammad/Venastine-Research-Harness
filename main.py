@@ -25,6 +25,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from uuid import UUID
 
 import config
@@ -48,7 +49,7 @@ from core import ansi, config_loader, shell_sessions, workspace_trust
 from core.cancel import CancelToken
 from core.loop import DEFAULT_PROVIDER, RunAgentLoop
 from core.reasoning.authorization import GRANT_PICKER
-from core.replay import replay_entries
+from core.replay import reasoning_text, replay_entries, step_entries
 from database import create_db_and_tables, engine
 from logging_setup import configure_logging
 from security import posture, protected_paths
@@ -165,21 +166,185 @@ def _print_replay(thread_id: UUID) -> None:
     # into a terminal, which is `core/ansi.for_display`'s whole subject
     # (batch 152). Silent, because a replay decides nothing.
     for role, text, _links, _call in entries:
-        text = ansi.for_display(text)
-        if role == "user":
-            print(f"You: {text}")
-        elif role == "assistant":
-            print(f"\nAgent: {text}\n")
-        elif role == "thinking":
-            print(f"\nThinking: {text}")
-        elif role == "wake":
-            # ROADMAP_v3 §49 (SS5): written by the harness, not the person,
-            # so it does not take the "You:" label the TUI also withholds.
-            print(f"Harness: {text}")
-        else:
-            print(f"     {text}")
+        _print_entry(role, text)
     noun = "entry" if len(entries) == 1 else "entries"
     print(f"--- end of {len(entries)} replayed {noun} ---")
+
+
+def _print_entry(role: str, text: str) -> None:
+    """One display entry, labelled the way this shell labels it.
+
+    Shared by a replay and a live turn (ROADMAP_v3 §86, A81), so the two
+    cannot come to label one entry two ways.
+    """
+    text = ansi.for_display(text)
+    if role == "user":
+        print(f"You: {text}")
+    elif role == "assistant":
+        print(f"\nAgent: {text}\n")
+    elif role == "thinking":
+        print(f"\nThinking: {text}")
+    elif role == "wake":
+        # ROADMAP_v3 §49 (SS5): written by the harness, not the person,
+        # so it does not take the "You:" label the TUI also withholds.
+        print(f"Harness: {text}")
+    else:
+        print(f"     {text}")
+
+
+class _LiveTurn:
+    """Prints a chat or wake turn while it runs, one model step at a time
+    (ROADMAP_v3 §86, A81; #225).
+
+    Before this the CLI drained a turn and printed its notices and its
+    final answer, while a replay of the same thread showed the reasoning
+    and a line per tool call. One run looked different depending on
+    whether its thread had been closed, which is what `core/replay.py`
+    exists to prevent.
+
+    A STEP IS PRINTED WHEN IT FINISHES, never while it streams: at its
+    first tool call, or at `finish` for the last one. The loop announces a
+    step's tool calls only after the step is complete and saved, and a
+    `retract` arrives only while it streams, so this printer never has to
+    take anything back. It drops what it was holding. And no answer is
+    printed in pieces, so the line a Ctrl+C prints never lands inside one.
+
+    WHAT a step prints is `core.replay.step_entries`, the replay's own
+    function. The one difference is where an intermediate step's text
+    comes from: the event that ends it carries no response, so its
+    reasoning and text are what streamed. The last step is read from the
+    response itself, so the answer never depends on a provider having
+    streamed it.
+
+    Notices print when they arrive, which is when they happened. The ones
+    a response also carries print at `finish` only if they never arrived
+    live, so each prints once. That includes `todo_write`'s one-line
+    summary, whose docstring says it is "for the CLI, which has no panel".
+    The CLI could not show it until now, because it drained the event
+    that carries it.
+    """
+
+    def __init__(self):
+        self._reasoning: list[str] = []
+        self._text: list[str] = []
+        self._announced: set = set()
+        # The notices themselves rather than their ids: a tool's notice
+        # is popped out of its result and referenced by nothing else, so
+        # its id could be reused by a later one.
+        self._noticed: list = []
+
+    def __call__(self, event) -> None:
+        try:
+            self._draw(event)
+        except Exception:  # noqa: BLE001 -- display must not end a turn
+            # An exception here would propagate out of the generator the
+            # loop is running, abandoning the turn over a print.
+            logger.exception("Could not print a live turn event")
+
+    def _draw(self, event) -> None:
+        if event.retract:
+            self._reasoning.clear()
+            self._text.clear()
+        elif event.thinking_delta:
+            self._reasoning.append(event.thinking_delta)
+        elif event.token_delta:
+            self._text.append(event.token_delta)
+        elif event.notice:
+            self._notice(event.notice)
+        elif event.tool_call_start:
+            call = event.tool_call_start
+            self._announced.add(call.get("id"))
+            self._step("".join(self._reasoning).strip(),
+                       "".join(self._text), [call])
+
+    def _step(self, reasoning: str, text: str, calls) -> None:
+        self._reasoning.clear()
+        self._text.clear()
+        for role, line, _links, _opens in step_entries(reasoning, text,
+                                                       calls):
+            _print_entry(role, line)
+
+    def _notice(self, notice) -> None:
+        if any(notice is seen for seen in self._noticed):
+            return
+        self._noticed.append(notice)
+        text = notice.get("text") if isinstance(notice, dict) else None
+        if text:
+            print(f"— {ansi.for_display(text)} —")
+
+    def finish(self, response) -> None:
+        """The turn's last step, from the response the turn returned.
+
+        Called by the shell rather than by the loop's terminal event, so a
+        turn that was never observed still prints its answer.
+        """
+        for notice in getattr(response, "notices", ()):
+            self._notice(notice)
+        calls = [{"id": c.id, "name": c.name, "input": c.input}
+                 for c in getattr(response, "tool_calls", None) or ()]
+        if any(c["id"] in self._announced for c in calls):
+            # This step's reasoning and text printed with its first tool
+            # line: the turn ran out of steps or was stopped between its
+            # tool calls, after the step itself had finished.
+            reasoning, text = "", ""
+        else:
+            reasoning = reasoning_text(getattr(response, "thinking", None))
+            text = response.text
+        self._step(reasoning, text,
+                   [c for c in calls if c["id"] not in self._announced])
+
+
+TURN_STOP_CONFIRM_S = 2.0
+"""How long the first Ctrl+C during a turn waits for a second (§86, A81).
+
+The TUI's `QUIT_CONFIRM_S`, and held equal to it by a test: one gesture,
+one window, in both shells. Not imported from there because `tui.app`
+imports Textual, which a CLI run never otherwise loads."""
+
+
+class _SecondPress:
+    """A SIGINT handler that acts on the SECOND press inside the window
+    (ROADMAP_v3 §86, A81; #244).
+
+    The first press changes nothing and says what a second would do. A
+    second within `TURN_STOP_CONFIRM_S` acts, once, and every press after
+    that is ignored. A press after the window closes arms it again. This
+    is the TUI's two-press quit, without its copy check, which the CLI
+    cannot port because the selection belongs to the terminal.
+
+    It exists because CN10 made the FIRST press stop the turn, and a press
+    aimed at copying, or a stray one, cost a model turn. A21 refused one
+    press in the session wait for that reason. Here the same rule covers
+    both places a turn runs, the user's own and a wake.
+
+    `__name__` is set because a signal handler is usually a function, and
+    whoever inspects `signal.getsignal` should still see which one is
+    installed.
+    """
+
+    def __init__(self, name: str, armed: str, act):
+        self.__name__ = name
+        self._armed = armed
+        self._act = act
+        self._armed_at = None
+        self._acted = False
+
+    def __call__(self, _signum, _frame) -> None:
+        if self._acted:
+            return
+        now = time.monotonic()
+        if (self._armed_at is not None
+                and now - self._armed_at <= TURN_STOP_CONFIRM_S):
+            self._acted = True
+            self._act()
+            return
+        self._armed_at = now
+        print(f"\n[{self._armed}]", flush=True)
+
+
+def _again_within() -> str:
+    """'Ctrl+C again within 2s', from the constant rather than a copy."""
+    return f"Ctrl+C again within {TURN_STOP_CONFIRM_S:g}s"
 
 
 
@@ -293,7 +458,10 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
     for the duration of each wake turn a handler of this function's own
     DEFERS the interrupt: the sessions stop once the turn has finished and
     written the rows it owes, which is CN10's own "the current step finishes
-    first" pointed at the sessions instead of the turn.
+    first" pointed at the sessions instead of the turn. Since ROADMAP_v3
+    §86 (A81) that handler acts only on a second press inside
+    `TURN_STOP_CONFIRM_S`, as the user's own turn does, and a wake turn
+    prints its steps live as the user's own turn does.
 
     The wake turn carries the run's own `authorization`, because it is that
     run continuing -- without it every gated call inside a wake would be
@@ -310,16 +478,19 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
     # cannot be rebound by accident.
     interrupted = []
 
-    def _stop_sessions_after_this_turn(_signum, _frame):
+    def _stop_sessions_after_this_turn():
         # Installed only while a wake turn runs, and restored in a
         # `finally`, so Ctrl+C while merely WAITING still takes the
         # `except KeyboardInterrupt` below -- there is no turn to protect
         # there, and nothing to defer for. `signal.signal` is main-thread
         # only, which is where the CLI's chat loop and therefore this runs.
-        if not interrupted:
-            interrupted.append(True)
-            print("\n[stopping the background sessions - this turn "
-                  "finishes first]", flush=True)
+        #
+        # §86 (A81): the SECOND press inside the window, so a stray one
+        # during a wake turn costs nothing, as it costs nothing during the
+        # user's own.
+        interrupted.append(True)
+        print("\n[stopping the background sessions - this turn "
+              "finishes first]", flush=True)
 
     try:
         while True:
@@ -339,8 +510,12 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                     return
                 continue
             text, record = build_wake(batch)
-            previous_sigint = signal.signal(
-                signal.SIGINT, _stop_sessions_after_this_turn)
+            previous_sigint = signal.signal(signal.SIGINT, _SecondPress(
+                "_stop_sessions_after_this_turn",
+                f"{_again_within()} stops the background sessions once "
+                f"this turn finishes",
+                _stop_sessions_after_this_turn))
+            live = _LiveTurn()
             try:
                 # A wake turn may start sessions of its own, and something
                 # is still here to report them: this loop.
@@ -348,7 +523,8 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                     response = RunAgentLoop.wake_conversation(
                         thread_id=thread_id, text=text, harness=record,
                         model=model, provider_name=provider_name,
-                        effort=effort, authorization=authorization)
+                        effort=effort, authorization=authorization,
+                        observe=live)
             except Exception as e:
                 logger.exception("Wake turn failed")
                 print(f"\n[Error: {ansi.for_display(e)}]")
@@ -358,9 +534,7 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                 # error path too: outside a wake turn the interrupt belongs
                 # to the sessions and takes the handler below.
                 signal.signal(signal.SIGINT, previous_sigint)
-            for notice in getattr(response, "notices", ()):
-                print(f"— {ansi.for_display(notice['text'])} —")
-            print(f"\nAgent: {ansi.for_display(response.text)}\n")
+            live.finish(response)
             if interrupted:
                 # The turn finished and wrote its rows; now the key does
                 # what it said. Returning to the prompt rather than waiting
@@ -439,8 +613,8 @@ def run_chat(
     # ROADMAP_v3 §61 (CN10). The key did only one thing before and now
     # does two, so the banner says which is which. A control whose
     # meaning depends on state and does not announce it is the thing
-    # this project keeps closing.
-    print("Ctrl+C stops the current turn; Ctrl+C or Ctrl+D at the "
+    # this project keeps closing. "Twice" since §86 (A81).
+    print("Ctrl+C twice stops the current turn; Ctrl+C or Ctrl+D at the "
           "prompt exits.\n")
 
     while True:
@@ -497,17 +671,25 @@ def run_chat(
         # which defers the interrupt instead of raising it. See §64 A21.
         #
         # `signal.signal` is main-thread only, which is where this runs.
-        # The CLI drains through run_to_completion, so nothing else is
-        # writing to stdout during a turn and the one line below cannot
-        # interleave with streamed output.
+        # Since §86 the turn prints while it runs, but a step at a time and
+        # only once it has finished, so the line below lands between
+        # printed steps and never inside a streaming answer.
+        #
+        # §86 (A81, #244): the SECOND press inside TURN_STOP_CONFIRM_S. CN10
+        # made the first press stop the turn, and a stray press or one
+        # aimed at copying cost a model turn -- A21's reason, applied to
+        # the binding A21 left alone.
         cancel = CancelToken()
 
-        def _stop_this_turn(_signum, _frame, _token=cancel):
+        def _stop_this_turn(_token=cancel):
             if _token.cancel():
                 print("\n[stopping — the current step finishes first]",
                       flush=True)
 
-        previous_sigint = signal.signal(signal.SIGINT, _stop_this_turn)
+        previous_sigint = signal.signal(signal.SIGINT, _SecondPress(
+            "_stop_this_turn", f"{_again_within()} stops this turn",
+            _stop_this_turn))
+        live = _LiveTurn()
         try:
             # SS17. The CLI chat turn is a wake consumer: a session started
             # here is reported by the loop below, which is what makes
@@ -521,6 +703,7 @@ def run_chat(
                     authorization=authorization,
                     effort=effort,
                     cancel=cancel,
+                    observe=live,
                 )
         except Exception as e:
             logger.exception("Chat turn failed")
@@ -531,19 +714,12 @@ def run_chat(
 
         current_thread_id = response.thread_id
 
-        if not printed_thread_id and current_thread_id:
-            print(f"[thread: {current_thread_id}]")
-            printed_thread_id = True
-
-        # ROADMAP_v2 §21's "no silent compaction, ever". The CLI drains
-        # the generator through run_to_completion(), which discards every
-        # non-final event -- so these arrive on the response rather than as
-        # LoopEvents. Printed BEFORE the answer, because that is when they
-        # happened.
-        for notice in getattr(response, "notices", ()):
-            print(f"— {ansi.for_display(notice['text'])} —")
-
-        print(f"\nAgent: {ansi.for_display(response.text)}")
+        # ROADMAP_v2 §21's "no silent compaction, ever": a notice printed
+        # live when it happened, and one that never arrived live is printed
+        # here, before the answer. §86 (A81): the turn's last step, the
+        # answer included, read from the response it returned.
+        live.finish(response)
+        trailer = False
         if response.stop_reason != "complete":
             # #4: name the figures, not just the reason. A user who sees
             # "token_budget_exceeded" reads it as a size problem -- the
@@ -568,7 +744,17 @@ def run_chat(
                 figures += " (the stopped step is not counted)"
             print(f"[stopped early: {ansi.for_display(response.stop_reason)}"
                   f"{figures}]")
-        print()
+            trailer = True
+        # After the answer rather than above it, since §86: above, it
+        # would split a turn's printed steps from its last one.
+        if not printed_thread_id and current_thread_id:
+            print(f"[thread: {current_thread_id}]")
+            printed_thread_id = True
+            trailer = True
+        if trailer:
+            # The answer's own line ends in a blank one; a trailer gets
+            # one of its own before the prompt.
+            print()
 
         # SS2/SS5. The turn is over, but this conversation may not be: a
         # session it started reports later, and that report starts a turn

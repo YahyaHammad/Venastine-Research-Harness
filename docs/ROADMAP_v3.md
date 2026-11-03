@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§86. A CLI turn printed as it runs, and a second press to stop it** - **(BUILT in batch 228)** (a CLI chat turn printed its notices and its final answer, while a replay of the same thread showed its reasoning and a line per tool call, and the first Ctrl+C during a turn stopped it. Each step now prints when it finishes, through the replay's own function, and a turn stops on a second press inside two seconds, during a wake turn too; A81)
 - **§85. Six prompt tiers, one assembly** - **(BUILT in batch 227)** (three call sites appended the same thread and session tiers by hand, with the memories guard spelled three ways and the boundary test's canaries two members short. `core.loop.session_tiers` appends all six, the guard is one argument, and the pin follows `SESSION_TIERS`; A80)
 - **§84. An MCP result with no size bound** - **(BUILT in batch 225)** (whatever an MCP tool returned reached the thread and the model whole: 10 MB of text, structured content or an error message went through, behind a redaction pass that took 1.2-2.5 s over it. The whole result is now cut at `max_read_chars` with a note, a structured payload is kept whole or dropped, and a word the cut splits goes too; A79)
 - **§83. A ChatGPT plan, spent in a local install** — **(COMPLETE: measurement in batches 181–183 and 187; sign-in BUILT in batch 184; Responses BUILT in batch 188 and checked live in batch 189; final owner checks and the signed-out header fixed in batch 203)** (a local install can sign in, refresh, use the plan and disconnect; the header distinguishes a selected CHATGPT provider from signed-in plan access)
@@ -1709,7 +1710,7 @@ partial output kept -- but nothing here is shaped by it.
 | **CN7** | **A child inherits the switch.** `cancel` joins `_INJECTABLE_PARAMS`, so `spawn_subagent` receives the parent's token and a stop reaches a run that happens INSIDE a tool call -- the one place a LoopEvent cannot. That list is `activity`'s own argument, one line up |
 | **CN8** | **TUI: `escape`, app level, no `priority=True`.** The SECOND app-level binding on the key, working the way the `ctrl+c` pair does: whichever `check_action` refuses with **`False`** gives up the slot. `False` and never `None` is measured rather than stylistic -- `active_bindings` is keyed by KEY and skips a binding only on `is False`. Precedence falls out of machinery that already exists: suggestion panel, then thread view, then cancel. The one-sentence rule survives -- escape means back to the conversation, and stopping a turn is that |
 | **CN9** | **The predicate is the live token, not `_busy`.** `_busy` is also true through the post-turn session wait, where SS2 keeps `ctrl+b` reachable precisely so the user can stop what is running there. Two keys meaning adjacent things would make neither clear, so escape stops the CONVERSATION and `ctrl+b` stops the SESSIONS, and neither quietly does the other's job |
-| **CN10** | **CLI: Ctrl+C stops the turn; at the prompt it still exits.** A signal HANDLER rather than an `except KeyboardInterrupt`, and the difference is what the thread looks like afterwards: an interrupt unwinds from wherever it lands, which can be between a `tool_use` D20 has persisted and the `tool_result` that pairs with it. Installed per turn and restored in a `finally`, so `_await_sessions` keeps catching its own interrupt and Ctrl+C there still stops the SESSIONS -- the aim of that key in that place was already right |
+| **CN10** | **CLI: Ctrl+C stops the turn; at the prompt it still exits.** A signal HANDLER rather than an `except KeyboardInterrupt`, and the difference is what the thread looks like afterwards: an interrupt unwinds from wherever it lands, which can be between a `tool_use` D20 has persisted and the `tool_result` that pairs with it. Installed per turn and restored in a `finally`, so `_await_sessions` keeps catching its own interrupt and Ctrl+C there still stops the SESSIONS -- the aim of that key in that place was already right **Amended by §86 (A81, batch 228):** the turn now stops on the SECOND press inside `TURN_STOP_CONFIRM_S`; the first only says what a second would do |
 | **CN11** | **Cancelling under an open approval modal needs no new path.** `core/interaction.decode()` already substitutes the declining default for *"a modal torn down by shutdown"*, so the call is denied and the token is seen at the next boundary |
 | **CN12** | **The research pipeline is DEFERRED, not out of scope** (owner), and so are compaction and the `/grill-me` one-shot. See the next section for what the pipeline has to learn first |
 
@@ -2029,7 +2030,7 @@ arriving at the CLI.
 | id | decision |
 |---|---|
 | **A20** | **Under `supports_stream_usage`, a token count that is not a number RAISES, and the coercion happens in one place for all three branches.** D21 says a stream must not silently degrade token accounting; what it compared was `input == 0 and output == 0`, which a PARTIAL report defeats without reporting anything usable. The flag is the per-provider statement that this provider DOES report usage, so a missing number is that promise broken, and the widened rule is what D21 already said rather than a new policy. Chosen over coercing to zero and leaving the comparison alone -- the report's shape -- because the reachable case the report itself names is `usageMetadata` omitting `candidatesTokenCount`, which that shape accepts silently with the output count as zero. **It cannot break a case that works today**: every input it raises on currently dies with a `TypeError` in `core/loop.py`, so the change is in the diagnosis, not in the outcome. Two messages are kept distinct, and the nothing-at-all wording is kept verbatim so the guards matching on it keep their meaning. With the flag FALSE only the coercion happens and both counts are zero, which is the opt-out's whole purpose -- `providers.json.example` ships GOOGLE false, so the blocked-completion shape still runs. `_stream_usage` returns two ints always, which is what makes a belt in `core/loop.py` unnecessary rather than merely unfashionable: fix at the producer |
-| **A21** | **Ctrl+C in the session wait stops the SESSIONS and never the turn, and it stops them once the running turn has finished.** The key keeps the one meaning `_await_sessions` has always advertised; what changes is that it no longer delivers it by unwinding a turn. For the duration of each wake turn that function installs a handler of its own which DEFERS the interrupt -- CN10's own "the current step finishes first", pointed at the sessions instead of the turn -- and restores it in a `finally`, so a press while merely waiting still takes the `except KeyboardInterrupt` that was always there. **Ruled against binding the key to the turn**, which was this batch's recommendation, and the owner's reason is the TUI's own measurement: a user copying or pasting around a running turn can press ctrl+c by accident, which is why batch 57 settled on "ctrl+c copies when there is something to copy, and starts a quit when there is not" and why a quit there takes two presses. Also ruled against one key doing both jobs, which CN9 refused for the TUI (*"escape stops the CONVERSATION and `ctrl+b` stops the SESSIONS, and neither quietly does the other's job"*). A stopped wait returns to the prompt with the sessions killed and anything that arrives afterwards held for the next message, which is SS19 unchanged |
+| **A21** | **Ctrl+C in the session wait stops the SESSIONS and never the turn, and it stops them once the running turn has finished.** The key keeps the one meaning `_await_sessions` has always advertised; what changes is that it no longer delivers it by unwinding a turn. For the duration of each wake turn that function installs a handler of its own which DEFERS the interrupt -- CN10's own "the current step finishes first", pointed at the sessions instead of the turn -- and restores it in a `finally`, so a press while merely waiting still takes the `except KeyboardInterrupt` that was always there. **Ruled against binding the key to the turn**, which was this batch's recommendation, and the owner's reason is the TUI's own measurement: a user copying or pasting around a running turn can press ctrl+c by accident, which is why batch 57 settled on "ctrl+c copies when there is something to copy, and starts a quit when there is not" and why a quit there takes two presses. Also ruled against one key doing both jobs, which CN9 refused for the TUI (*"escape stops the CONVERSATION and `ctrl+b` stops the SESSIONS, and neither quietly does the other's job"*). A stopped wait returns to the prompt with the sessions killed and anything that arrives afterwards held for the next message, which is SS19 unchanged **Amended by §86 (A81, batch 228):** during a wake turn the handler acts on the SECOND press inside the window, as the user's own turn does |
 
 ### What §64 deliberately does not change
 
@@ -2800,6 +2801,116 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §86. A CLI turn printed as it runs, and a second press to stop it
+
+**Built in batch 228**, from #225 (register item 71) and #244 (register item
+94). Both live in `main.run_chat`, and they meet there: what a live turn
+prints decides what a first press's message has to compete with.
+
+**#225, as measured.** `run_chat` drained the turn through
+`run_to_completion()` and printed the notices and the final answer. Resuming
+the same thread with `--thread` replayed a `Thinking:` block and a `▸` line
+per tool call; `--mode research` narrated its tool calls live. One run,
+three renderings, and `core/events.py` gave a draining consumer permission to
+ignore `retract` and no permission to ignore anything else. The measurement
+found a second casualty: `todo_write`'s one-line summary says it is "for the
+CLI, which has no panel", and it rides only the `notice` event the CLI
+drained, so the CLI had never printed one.
+
+**What the loop's events allow.** `thinking_delta` and `token_delta` arrive
+while a model call streams; `retract` arrives only then, when a transient
+failure is about to be retried; and `tool_call_start` arrives only after
+the call has finished and D20 has saved the step. So a printer that prints
+a step when it FINISHES never has anything to take back.
+
+**The owner's choice for #225: each step as the replay draws it.**
+`core.replay.step_entries(reasoning, text, tool_calls)` is the replay's own
+rule for one assistant message: reasoning, then text, then a line per call,
+through `_tool_marker` and the registry's redacted digest. It is public now,
+and `replay_entries` calls it. `main._LiveTurn` is an observer that
+`run_to_completion(gen, observe)` hands every event:
+
+- **A step prints at its first `▸`**, from what streamed: the event that
+  ends it carries no response.
+- **The last step prints at `finish(response)`**, called by the shell with
+  the response the turn returned, and read from that response:
+  `reasoning_text(response.thinking)` and `response.text`. The answer never
+  depends on a provider having streamed it, and a turn whose events were
+  never observed still prints its answer.
+- **A step that already printed is not printed again.** `max_steps_reached`
+  and a stop between tool groups both return a step whose first call was
+  announced; `finish` prints only the calls never announced.
+- **`retract` drops what the printer held.** Nothing was drawn.
+- **A notice prints when it arrives**, and `finish` prints from
+  `response.notices` only the ones that never arrived. Held by object, not
+  by `id()`: a tool's notice is popped out of its result and referenced by
+  nothing else, so its id could be reused.
+- **A display failure is logged, never raised.** The observer runs inside
+  the loop's consumer, and an exception there would abandon the turn.
+
+A wake turn hands `wake_conversation` the same printer, because a wake is the
+run continuing. The `[thread: ...]` line moved below the answer, since above
+it would have split a turn's printed steps from its last one. Not chosen:
+tool lines with a thinking count (the issue's own suggestion, which leaves
+live and replay disagreeing about reasoning), token streaming (a retried
+call cannot take back what it printed, and #244's message would land
+mid-sentence), and recording the silence as deliberate.
+
+**#244: CN10's first press.** CN10 made the first Ctrl+C during a CLI turn
+stop it. A21 had refused exactly that binding for the session wait, on the
+owner's measurement that a press aimed at copying can end a turn, and left
+CN10 alone because reversing a locked decision is its own batch. This is
+that batch. **The owner's choice: two presses inside the window, during the
+user's turn and during a wake turn alike.** `main._SecondPress` is the
+handler for both:
+
+- the first press changes nothing and prints `[Ctrl+C again within 2s stops
+  this turn]`, or for a wake `... stops the background sessions once this
+  turn finishes`;
+- a second inside `TURN_STOP_CONFIRM_S` acts, once: the turn's token is
+  cancelled, or the wake's sessions are marked to stop after it;
+- every press after that is ignored, and a press after the window closes
+  arms it again, measured from the press that armed it.
+
+`TURN_STOP_CONFIRM_S` is 2.0, the TUI's `QUIT_CONFIRM_S`, and a test holds
+them equal. It is not imported from `tui.app`, which would load Textual into
+every CLI run. The TUI's copy check does not come with it: the selection
+belongs to the terminal, and whether a press over one even reaches the
+process depends on which terminal it is. **At the prompt one press still
+exits** (the owner left it): nothing is running there, and the thread is
+saved and resumable. While merely waiting on sessions one press still stops
+them, for the same reason.
+
+**The tests, and what they found.** CN10's CLI handler had no test at all;
+`tests/test_cancel.py`'s presses are the TUI's. `tests/test_cli_live_turn.py`
+runs a real two-step turn through the real loop, then replays the thread it
+wrote, and asserts the same five lines in the same order. Eighteen
+mutations went red, each on its assertion. The one that first survived
+removed the guard that ignores presses after the handler has acted: the
+chat turn's action is idempotent, because `cancel()` is, so its test could
+not see a second one, while the wake's action is not. A unit test of the
+handler's count now catches it.
+
+### What §86 deliberately does not change
+
+**What is persisted or replayed.** T3, T4 and the replay's policy are as
+they were; the live printer calls the replay's function rather than
+changing it.
+
+**The research CLI.** It already printed its passes and tool calls live, by
+its own volume rule (§22, §26), and still does.
+
+**What a press does once it acts.** CN10's boundary stop and A21's deferred
+session stop are unchanged; only the first press is new.
+
+### Design Decisions Record — §86 (A81)
+
+| id | decision |
+|---|---|
+| **A81** | **A CLI turn prints each model step when it finishes, through the replay's own function, and stops on a second Ctrl+C.** `main._LiveTurn` observes `run_to_completion` and prints a step at its first tool call, from what streamed, and the last step from the returned response, through `core.replay.step_entries`; a wake turn is printed the same way, and a step is never printed while it streams. Ctrl+C during the user's turn or a wake turn acts only on a second press inside `TURN_STOP_CONFIRM_S`, which equals the TUI's `QUIT_CONFIRM_S`; the first press only says what a second would do. Amends §61's CN10 and §64's A21. At the prompt and while merely waiting on sessions one press still acts. The owner chose replay's rendering over a thinking count, token streaming or recorded silence, and two presses for both turns over keeping one |
+
 ---
 
 ## §85. Six prompt tiers, one assembly

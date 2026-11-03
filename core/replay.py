@@ -148,22 +148,44 @@ def replay_entries(thread_id: UUID) -> list[ReplayEntry]:
             if failure:
                 entries.append(("error", f"This run failed: {failure}", (), ()))
         elif role == "assistant":
-            # BEFORE the answer, because that is the order it happened in
-            # and the order the live transcript drew it in (§43 RM1 puts
-            # one `venastine ›` above whichever came first). A replay that
-            # reordered the turn would be the same defect as one that
-            # reflowed it.
-            reasoning = _reasoning_text(message.get("thinking"))
-            if reasoning:
-                entries.append(("thinking", reasoning, (), ()))
-            text = _as_text(message.get("text"))
-            if text:
-                entries.append(("assistant", text, (), ()))
-            for call in message.get("tool_calls") or []:
-                entries.append(("tool", *_tool_marker(call)))
+            entries.extend(step_entries(
+                _reasoning_text(message.get("thinking")),
+                _as_text(message.get("text")),
+                message.get("tool_calls") or []))
         # role == "tool": skipped by T4. Not a gap -- see the module
         # docstring. The CALL above is the record that it happened.
     return entries
+
+
+def step_entries(reasoning: str, text: str, tool_calls) -> list[ReplayEntry]:
+    """One model step as display entries: its reasoning, its text, then a
+    line per tool call.
+
+    BEFORE the answer, because that is the order it happened in and the
+    order the live transcript drew it in (§43 RM1 puts one `venastine ›`
+    above whichever came first). A replay that reordered the turn would be
+    the same defect as one that reflowed it.
+
+    PUBLIC SINCE ROADMAP_v3 §86 (A81), because the CLI's live turn prints
+    each step through this as it finishes. A replay and the turn it
+    replays are then one function's output over the same three things,
+    which is what keeps the CLI from showing a turn one way while it runs
+    and another way when its thread is resumed (#225).
+    """
+    entries: list[ReplayEntry] = []
+    if reasoning:
+        entries.append(("thinking", reasoning, (), ()))
+    if text:
+        entries.append(("assistant", text, (), ()))
+    for call in tool_calls:
+        entries.append(("tool", *_tool_marker(call)))
+    return entries
+
+
+def reasoning_text(record) -> str:
+    """`_reasoning_text`, for a caller outside this module (§86, A81): the
+    CLI reads a live response's reasoning with the replay's own reader."""
+    return _reasoning_text(record)
 
 
 def _reasoning_text(record) -> str:

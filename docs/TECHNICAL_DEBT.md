@@ -3880,7 +3880,7 @@ the bound.
 
 **CLOSED (batch 214).** All three measure cells now, with `rich.cells.cell_len`, the measure `markdown.wrap_display`, `plain_wrap` and `display_len` already used. `wrap_source` cuts at the most characters that fit the row's cells and still breaks at the last space within them; a glyph wider than the row goes whole, so the wrap always makes progress. `AgentPanel._fit` (and `SessionPanel`, which shares it) truncates to `width - 1` cells before the ellipsis and drops a glyph that would straddle it. `_write_padded` pads with `total - cell_len(text)` spaces instead of `ljust`. Six tests in `tests/test_diff_view.py`'s `TestCellsNotCharacters`, wide text held in a variable per the cp1252 rule: the issue's 20-in-20 case is two rows, an 18-cell box holds 8 wide characters and the ellipsis, a padded row is exactly `total` cells for wide and ASCII text alike. Five fail without the fix; the sixth, a glyph wider than its row, is the progress guard the new loop needs and passes on either.
 
-## 71. A live chat turn shows neither reasoning nor tool lines; a replay of it shows both (open, deferred batch 138)
+## 71. A live chat turn shows neither reasoning nor tool lines; a replay of it shows both (closed, batch 228 -- each step printed as the replay draws it, ROADMAP_v3 §86, A81)
 
 **Issue:** #225.
 
@@ -3914,6 +3914,19 @@ asserting a live tool line and no live thinking content.
 **Not:** changing what is persisted or replay policy (T3/T4 stay); `retract`
 handling in the CLI, explicitly not required; any TUI work. Do not leak thinking
 content into research-style volume lines.
+
+**CLOSED (batch 228, #225, ROADMAP_v3 §86, A81).** The owner chose the
+replay's rendering over the two alternatives this entry named. `main._LiveTurn`
+observes `run_to_completion` and prints each model step when it finishes --
+at its first tool call, from what streamed, and the last one from the
+returned response -- through `core.replay.step_entries`, the function the
+replay itself now calls. Nothing prints while a step streams, so a `retract`
+only ever drops what the printer held, and `core/events.py` says so beside
+the sentence this entry pointed at. A wake turn prints the same way. The
+measurement found one more casualty of the drain: `todo_write`'s summary,
+written "for the CLI, which has no panel", rode only the event the CLI
+discarded, and it prints now. `tests/test_cli_live_turn.py` runs a real turn
+and replays its thread, and the two print the same five lines.
 
 ## 72. The existing hub document is read, diffed, embedded and printed whole (closed, batch 221)
 
@@ -5400,7 +5413,7 @@ unrelated directory, because launched from the harness root the empty path
 resolved to the install tree and was refused already -- the "what limits it
 today" above.
 
-## 94. The CLI's Ctrl+C stops a turn on the FIRST press, with nothing between a stray press and a stopped turn (open, filed batch 147)
+## 94. The CLI's Ctrl+C stops a turn on the FIRST press, with nothing between a stray press and a stopped turn (closed, batch 228 -- two presses, ROADMAP_v3 §86, A81)
 
 **Issue:** #244.
 
@@ -5446,6 +5459,18 @@ tears a thread in half. §64's A21 made the wake turn's handler defer rather
 than unwind, and CN10's own handler already stops the turn at a BOUNDARY
 and writes every row it owes (CN4), so the cost of a stray press is a lost
 turn rather than an unresumable thread.
+
+**CLOSED (batch 228, #244, ROADMAP_v3 §86, A81).** The owner chose two presses
+inside a window, the TUI's shape, for the user's own turn and for a wake turn
+alike. `main._SecondPress` is the handler for both: the first press changes
+nothing and says what a second would do, a second inside
+`TURN_STOP_CONFIRM_S` (2.0s, held equal to the TUI's `QUIT_CONFIRM_S` by a
+test) acts once, and later presses are ignored. The stdout competition this
+entry worried about is gone with #225's choice, since a step prints only once
+it has finished. CN10 and A21 carry amendment notes. At the prompt one press
+still exits, by the owner's choice: nothing is running there. CN10's CLI
+handler had no test before this batch; it has ten now, in
+`tests/test_cli_live_turn.py`.
 
 ## 95. A credential straddling the output buffer's DROPPED MIDDLE is still recoverable from two pages (closed, batch 160 -- the cut word moves into the gap)
 
