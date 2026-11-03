@@ -266,6 +266,7 @@
     "config_schema.py",
     "config_edit.py",
     "config_update.py",
+    "cli_commands.py",
     "storage.py",
     "database.py",
     "credentials.py",
