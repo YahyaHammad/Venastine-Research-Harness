@@ -29835,3 +29835,35 @@ the count, not the other candidates' answers, as what 6a is told.
   changed nothing; it is enforced once.
 - **Full suite:** 8797 passed, 77 skipped in 1:50, nothing failed; the touched files again with AGENT_WORKSPACE unset (804 passed), and under WSL (808 passed, plus register item 102's known failure). ruff clean; bandit 0 outside the baseline, no count grew; pip-audit clean; gitleaks on an export: no leaks. The two pass-prompt digests in `test_untrusted_content.py` moved with the two prompt edits, deliberately, and say so.
 - **Version**, by `scripts/version.py bump`: `0.3.4-b.15.bugfixes.r57e749187eaf`.
+
+## Batch 233 -- a confined child may write its own result (2026-11-03)
+
+**PR #272's first CI run.** `pytest` in `tests.yml` and `py313-info` in
+`compat.yml` failed the same nine tests, all in `test_confine.py`'s
+`TestTheWallsHold`: every confined probe returned "no usable result (exit
+120)". Nothing else failed, and the new `integration` and `live-ssh` jobs
+passed on their first run.
+
+- **Cause, batch 221's.** #204 moved a math child's stdout and stderr from
+  pipes to temporary files capped by `RLIMIT_FSIZE`, and
+  `security/confine.py`'s limits layer set `RLIMIT_FSIZE` to zero. A
+  confined child could not write its own result, and Python exits 120 when
+  the final flush fails. In a shared deployment that is every math call.
+  Reproduced under WSL, which has Landlock: the same nine fail.
+- **Fix.** The limits layer keeps the cap already in force and lowers only
+  an unlimited one to zero. Landlock is what refuses opening any file for
+  writing; the only files a confined child can grow are the two outputs
+  `isolation.py` hands it, already capped at twice the result bound.
+- **Found.** The startup self-test passed throughout, because its child
+  writes to pipes. Recorded as register item 116 rather than changed here:
+  it is what a deployment checks before serving anyone.
+
+### Verified
+
+- Two new tests in `test_confine.py`, each running the limits layer in a
+  child. Under WSL `test_confine.py`, `test_tool_budgets.py` and
+  `test_math_tools.py` pass (420). Mutations under WSL: zero again fails ten
+  (CI's nine and the new cap test), an unlimited parent left unlimited fails
+  the control, and a comment change stays green.
+- **Full suite:** 8797 passed, 79 skipped in 1:55, nothing failed (the two new tests skip on Windows and ran under WSL). ruff clean; bandit 0 outside the baseline once the new test's subprocess call carried its reasoned `nosec`, no count grew; gitleaks on an export: no leaks.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.16.bugfixes.r57e749187eaf`.

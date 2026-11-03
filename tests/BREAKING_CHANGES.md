@@ -15,6 +15,19 @@ other name.
 
 ---
 
+## A confined child may write its own result (batch 233)
+
+`security/confine.py`'s limits layer keeps the `RLIMIT_FSIZE` already in
+force and lowers only an unlimited one to zero. Since batch 221 a math
+child's stdout and stderr are files `_resource_limits` caps, and zero
+refused the child's own result: every confined call exited 120 (PR #272's
+CI). The self-test's child, which has no cap from a parent, still gets zero.
+
+| Change | Test | Fix |
+|---|---|---|
+| Set `RLIMIT_FSIZE` to zero whatever is in force | `test_a_cap_already_in_force_is_kept`, `test_math_still_works_behind_them` | The cap in force is the transport's; Landlock refuses opening a file for writing |
+| Leave an unlimited `RLIMIT_FSIZE` unlimited | `test_no_cap_becomes_zero` | With no cap from a parent, no file may grow |
+
 ## Disagreement routed to a check, not deducted (batch 232)
 
 The disagreement penalty is gone (#12, ROADMAP_v3 §90, A85):

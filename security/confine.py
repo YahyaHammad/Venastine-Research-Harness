@@ -21,9 +21,11 @@ it was relied on (2026-10-20: Amazon Linux kernel 6.18, x86_64, sessions
 running as root with Docker's default capabilities less NET_RAW, Landlock
 ABI 7, seccomp filters installable):
 
-  1. LIMITS. No file may grow (RLIMIT_FSIZE 0), few descriptors, no core
-     dump, and the process is non-dumpable. CPU and memory are already
-     bounded by isolation.py's preexec_fn.
+  1. LIMITS. No file may grow past the cap already in force (RLIMIT_FSIZE:
+     zero, or the cap isolation.py puts on the two output files it hands
+     a math child), few descriptors, no core dump, and the process is
+     non-dumpable. CPU and memory are already bounded by isolation.py's
+     preexec_fn.
   2. IDENTITY. A child started as root becomes `nobody`, and loses every
      capability with it -- DAC_OVERRIDE above all, which is what lets root
      read a 0700 directory it does not own. Why the session environment
@@ -206,7 +208,17 @@ def _apply_limits() -> Optional[str]:
     import resource
 
     try:
-        resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+        # THE LIMIT ALREADY IN FORCE, or zero where there is none. Since
+        # batch 221 (#204) isolation.py hands a math child two FILES for
+        # stdout and stderr and caps them, so zero here refused the child's
+        # own result: every confined call exited 120 with "no usable
+        # result", while the self-test, whose child writes to pipes, still
+        # passed. Landlock is what refuses opening any file for writing; the
+        # only files this child can grow are those two, and their cap is
+        # the transport's. Never raised, so a caller with no cap gets zero.
+        soft, _hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+        grow = 0 if soft == resource.RLIM_INFINITY else soft
+        resource.setrlimit(resource.RLIMIT_FSIZE, (grow, grow))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         resource.setrlimit(resource.RLIMIT_NOFILE, (_OPEN_FILES, _OPEN_FILES))
     except (OSError, ValueError) as exc:

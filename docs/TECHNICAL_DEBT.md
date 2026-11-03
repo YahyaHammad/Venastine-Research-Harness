@@ -6429,6 +6429,32 @@ the step would have gone red. What this closure prevents is the silent case the
 example stands for: a tag on a commit whose files name a version npm does not
 have yet.
 
+## 116. The confinement self-test runs its child on pipes, not on the transport a math call uses (open, found batch 233)
+
+**Found on PR #272's first CI run.** Batch 221 (#204) moved a math child's
+stdout and stderr from pipes to temporary files, capped by `RLIMIT_FSIZE`.
+`security/confine.py`'s limits layer then set `RLIMIT_FSIZE` to zero, so in
+a shared deployment every confined call's child failed to write its own
+result and exited 120. Batch 233 fixed the limit. Severity `S3`, `stability`.
+
+**This entry is about the self-test not noticing.** `confine.verify` runs
+`python -m security.confine --self-test` with `capture_output=True`, so its
+child writes its verdict to a pipe, and `RLIMIT_FSIZE` does not apply to a
+pipe. The self-test passed on the commit where every real confined call
+failed, and it is what a shared deployment runs at startup before telling its
+sessions `VENASTINE_CONFINEMENT=verified`. The test that runs a confined call
+through the real transport, `TestTheWallsHold`, needs Landlock: it skips on
+Windows, and batch 221's WSL run did not include it, though it fails there
+deterministically on that transport.
+
+**Shape, not done here.** `verify` runs its child the way `run_isolated` runs
+a math child: stdout and stderr to temporary files under
+`isolation._resource_limits()`, read back the same way. A transport change
+would then fail the startup gate rather than every call after it. Left for
+its own batch because it changes what a deployment checks before it serves
+anyone, which wants a run on the Space; meanwhile `TestTheWallsHold` runs the
+real path in CI on every push.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both
