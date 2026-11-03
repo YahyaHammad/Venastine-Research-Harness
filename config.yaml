@@ -112,9 +112,17 @@ ensemble_models: null
 # Sampling-parameter support
 # ======================================================================
 
-# Models that reject temperature / top_p / top_k outright. core/client.py
-# omits those parameters entirely for anything listed. Steering on these
-# happens through prompting and model_effort_levels instead.
+# Models that reject temperature / top_p / top_k outright, or ignore them.
+# core/client.py omits those parameters entirely for anything listed, with a
+# WARNING. Steering on these happens through prompting and
+# model_effort_levels instead.
+#
+# The two gemini names IGNORE the parameters (ROADMAP_v3 §87): no error and
+# no effect. Google says every later Gemini will do the same, then refuse
+# them with a 400, so a new Gemini model belongs here when it ships. OpenAI's
+# reasoning models are not listed: core/client.py drops the parameters on
+# OPENAI whenever a reasoning effort other than "none" is sent, which is
+# OpenAI's own rule and needs no model names.
 models_rejecting_sampling_params:
   - claude-fable-5
   - claude-mythos-5
@@ -122,6 +130,8 @@ models_rejecting_sampling_params:
   - claude-opus-4-8
   - claude-opus-5
   - claude-sonnet-5
+  - gemini-3.5-flash-lite
+  - gemini-3.6-flash
 
 # ======================================================================
 # Critic and embedder routing

@@ -848,6 +848,10 @@ Implemented against `google-genai==1.0.0` with all SDK shapes verified by inspec
 > so the guard likely did not fire for `gpt-5.1` — the model AGENTS.md's example command
 > names. Also needs a live check; both are moot for ensemble mode now.
 >
+> **Both answered in ROADMAP_v3 §87 (batch 229)**, from the providers' documentation:
+> the default is 1.0 on both, and OpenAI's reasoning models refuse a temperature
+> whenever reasoning effort is not `none`, which `_sampling_kwargs` now follows.
+>
 > **What shipped is not what this note proposed.** It proposed prompt-level framing
 > variation. That was rejected: framings partition what each candidate looks for, so a
 > claim two of three candidates omit is an artifact of having told them to look elsewhere —

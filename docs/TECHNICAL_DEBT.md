@@ -393,7 +393,7 @@ again. The pin lives in test_load_skill.py
 test_config_loader.py's own `_redirect_roots` is autouse and points HARNESS_ROOT
 at an empty dir — exactly the state the pin exists to forbid.
 
-## 11. Two provider facts about sampling parameters are unverified (open, needs network)
+## 11. Two provider facts about sampling parameters are unverified (closed, batch 229 -- answered from the providers' documentation, ROADMAP_v3 §87, A82)
 
 Found while redesigning ROADMAP §10's ensemble mode. Both are recorded rather
 than resolved because neither can be settled offline, and neither blocks
@@ -445,6 +445,21 @@ this file's rule is that an entry is evidence rather than instruction, and
 batches 126 and 127 each found one wrong about its own defect. This one is
 accurate. Neither half can be settled offline, so it stays open for the reason
 it was filed.
+
+**CLOSED (batch 229, #6, ROADMAP_v3 §87, A82).** Checked against the
+providers' own documentation on 2026-11-03, since no live key is set here.
+(a) is right: the default is 1.0 on Gemini 3 by Google's guide, and on OpenAI
+by the posts quoting its reference (the page itself refused the fetch), so
+the deleted constant was a no-op there. (b) is right and worse than this
+entry said: OpenAI's rule is "When reasoning effort is not `none`, remove
+`temperature`, `top_p`, and `top_logprobs`", and the harness ships effort
+`high`, so the guard would have let a 400 through on every OpenAI reasoning
+model, not only `gpt-5.1`. The owner chose to follow the rule rather than
+list names: on `OPENAI`, `_sampling_kwargs` drops a temperature whenever the
+effort being sent is not `none`. The measurement found a third fact: Gemini
+3.6 Flash and 3.5 Flash-Lite silently IGNORE the parameters, and Google says
+every later Gemini will; those two are now in the set. The negative result
+this entry asked to be written down is written down, in §87.
 
 ---
 

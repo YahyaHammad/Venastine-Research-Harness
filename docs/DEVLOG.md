@@ -29665,3 +29665,38 @@ exits at the prompt.
   HEAD, because the export has no `providers.json` (gitignored; CI copies the
   template).
 - **Version**, by `scripts/version.py bump`: `0.3.4-b.11.bugfixes.r57e749187eaf`.
+
+## Batch 229 -- two provider facts about temperature, answered from the providers' own pages (2026-11-03)
+
+**#6 (register item 11), ROADMAP_v3 §87, A82.** Both facts §10's revisit
+recorded as needing a live key were checked against the providers'
+documentation instead, since no key is set here. The owner chose to follow
+OpenAI's own rule rather than list model names, and to list the two Gemini
+models that ignore a temperature.
+
+- **(a) The default is 1.0.** Google's Gemini 3 guide recommends leaving it
+  at 1.0; OpenAI's reference refused the fetch (403) and posts quoting it say
+  it defaults to 1. The installed SDKs (openai 2.45.0, google-genai 2.29.0)
+  state no default. The deleted `ENSEMBLE_TEMPERATURE = 1.0` was a no-op.
+- **(b) OpenAI's reasoning models refuse one** whenever reasoning effort is
+  not `none` ("remove `temperature`, `top_p`, and `top_logprobs`"). The
+  harness ships effort `high`, so the backstop would have let a 400 through
+  on every one of them. The current guide names a GPT-6 family the register
+  never mentioned, which is the case against a name list.
+- **Found: (c).** Gemini 3.6 Flash and 3.5 Flash-Lite silently ignore
+  `temperature`, `top_p` and `top_k`, and Google says all later Geminis will,
+  then refuse them with a 400.
+- **The change.** `_sampling_kwargs` takes the `effort` `call_model_stream`
+  is about to send and, on `OPENAI`, drops a temperature with its WARNING
+  when that effort is not `none`. `gemini-3.6-flash` and
+  `gemini-3.5-flash-lite` join `models_rejecting_sampling_params`. A
+  reasoning model sent no effort still gets the loud 400 an unlisted model
+  always has.
+
+### Verified
+
+- New tests: 6 (4 in `test_client_effort.py`, 2 at the wire in
+  `test_client_translation.py`). 7 mutations, each red on its assertion;
+  the call site passing no effort is visible only to the wire test.
+- **Full suite:** 8648 passed, 75 skipped in 2:15, nothing failed. ruff clean; bandit 0 outside the baseline, no count grew; gitleaks on an export: no leaks.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.12.bugfixes.r57e749187eaf`.

@@ -386,6 +386,14 @@ as §21's MODEL_CONTEXT_WINDOWS -- honest about being incomplete, and
 incompleteness is safe here because the failure is a loud 400, not a
 silent wrong answer.
 
+EXCEPT FOR A MODEL THAT IGNORES THEM, which is why two Google names are
+listed (ROADMAP_v3 §87, A82). Gemini 3.6 Flash and 3.5 Flash-Lite ignore
+the parameters: no error, no effect. Google says every later Gemini will do
+the same and then refuse them with a 400, so a new Gemini belongs here when
+it ships. OpenAI's reasoning models are NOT listed: core/client.py drops a
+temperature on OPENAI whenever a reasoning effort other than "none" is
+sent, which is OpenAI's documented rule and needs no names.
+
 ## Critic-model routing (ROADMAP §11)
 
 ### `critic_model`

@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§87. Two provider facts about temperature, answered from the providers' own pages** - **(BUILT in batch 229)** (two checks §10's revisit recorded as needing a live key: the default really is 1.0, so the deleted `ENSEMBLE_TEMPERATURE` sent what the provider would have used; and OpenAI's reasoning models refuse a temperature whenever reasoning effort is not `none`, which at the shipped `high` is always, while the guard listed only Anthropic names. It now follows OpenAI's rule on `OPENAI`, and the two Gemini models that silently ignore a temperature are listed; A82)
 - **§86. A CLI turn printed as it runs, and a second press to stop it** - **(BUILT in batch 228)** (a CLI chat turn printed its notices and its final answer, while a replay of the same thread showed its reasoning and a line per tool call, and the first Ctrl+C during a turn stopped it. Each step now prints when it finishes, through the replay's own function, and a turn stops on a second press inside two seconds, during a wake turn too; A81)
 - **§85. Six prompt tiers, one assembly** - **(BUILT in batch 227)** (three call sites appended the same thread and session tiers by hand, with the memories guard spelled three ways and the boundary test's canaries two members short. `core.loop.session_tiers` appends all six, the guard is one argument, and the pin follows `SESSION_TIERS`; A80)
 - **§84. An MCP result with no size bound** - **(BUILT in batch 225)** (whatever an MCP tool returned reached the thread and the model whole: 10 MB of text, structured content or an error message went through, behind a redaction pass that took 1.2-2.5 s over it. The whole result is now cut at `max_read_chars` with a note, a structured payload is kept whole or dropped, and a word the cut splits goes too; A79)
@@ -2801,6 +2802,76 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §87. Two provider facts about temperature, answered from the providers' own pages
+
+**Built in batch 229**, from #6 (register item 11). §10's revisit deleted
+`ENSEMBLE_TEMPERATURE` and recorded two facts it could not check without a
+live key. No key is set on this machine, so both were checked against the
+providers' own documentation on 2026-11-03, and the answers are written down
+here so the check is not run a third time.
+
+**(a) The default is 1.0.** Google's Gemini 3 guide recommends leaving
+`temperature` at its default of 1.0. OpenAI's API reference refused the fetch
+(403), and posts quoting it give "defaults to 1"; the installed SDKs (openai
+2.45.0, google-genai 2.29.0) describe the parameter and state no default. So
+the "raised temperature" that was §10's diversity mechanism sent, on both
+providers, the value they would have used anyway, as the register suspected.
+Nothing depends on it now.
+
+**(b) OpenAI's reasoning models refuse one.** OpenAI's current model guide:
+"When reasoning effort is not `none`, remove `temperature`, `top_p`, and
+`top_logprobs`." Forum reports of the error read "Only the default (1) value
+is supported". This harness ships `default_effort: high`, and the set
+`_sampling_kwargs` consulted listed six Anthropic names, so the backstop
+would have let a 400 through on every OpenAI reasoning model.
+
+**(c), found while measuring: two Gemini models ignore one.** Google's page
+for Gemini 3.6 Flash and Gemini 3.5 Flash-Lite: "`temperature`, `top_p`, and
+`top_k` are deprecated and ignored", "in future model generations, supplying
+these parameters returns an HTTP 400 error", and the change applies to
+"these models and all future Gemini model releases". Ignored is the one
+outcome worse than a 400: no error, and no effect.
+
+**The owner's choices.** For OpenAI, follow OpenAI's rule rather than list
+names: on `OPENAI`, `_sampling_kwargs` drops a temperature with its WARNING
+whenever a reasoning effort other than `none` is being sent. `call_model_stream`
+now passes it the `effort` that `_thinking_for_provider` is about to send, so
+the two cannot disagree about the request. There is no model list to go
+stale; the current guide already names a GPT-6 family the register never
+mentioned. A reasoning model sent no effort at all still reasons at its own
+default and still refuses, and that stays the loud 400 an unlisted model has
+always been. Another OpenAI-compatible endpoint keeps the set's posture: its
+rules are its own. For Google, list the two named models in
+`models_rejecting_sampling_params`, so a temperature sent to one is dropped
+with the WARNING rather than having no effect, and record that a later Gemini
+belongs there when it ships.
+
+Not chosen: listing the GPT-5, GPT-6 and o-series names (drops a temperature
+those models accept at effort `none`, and goes stale every release), and
+recording without a code change.
+
+Four unit tests and two at the wire, where the OpenAI request that carries
+`reasoning_effort: high` carries no `temperature` and one at `none` does.
+Seven mutations, each red on its assertion, including the call site passing
+no effort, which only the wire test can see.
+
+### What §87 deliberately does not change
+
+**Whether anything passes a temperature.** Nothing does; the function is
+still the backstop §10's revisit kept, and the threading through
+`core/loop.py` stays for the same reason.
+
+**OpenAI's other sampling parameters.** The harness sends no `top_p` or
+`top_logprobs` anywhere, so there is nothing to drop.
+
+### Design Decisions Record — §87 (A82)
+
+| id | decision |
+|---|---|
+| **A82** | **On OPENAI a temperature is dropped whenever a reasoning effort other than `none` is sent, and the Gemini models that ignore one are listed.** `_sampling_kwargs(provider, model, temperature, effort)` follows OpenAI's documented rule using the effort `call_model_stream` is about to send, with the WARNING the set's drop already logs; a reasoning model sent no effort still fails as a loud 400, and other OpenAI-compatible providers are not covered by the rule. `gemini-3.6-flash` and `gemini-3.5-flash-lite` join `models_rejecting_sampling_params` because they ignore the parameters silently, and Google says later Geminis will too. The default really is 1.0 on OpenAI and Gemini 3, so §10's deleted temperature was a no-op there. Checked from documentation on 2026-11-03, no live key. The owner chose OpenAI's rule over a name list, and listing the two Geminis over recording only |
+
 ---
 
 ## §86. A CLI turn printed as it runs, and a second press to stop it

@@ -1240,7 +1240,8 @@ def _chatgpt_unlisted(model: str, entries: list) -> None:
         ", ".join(listed) or "no models")
 
 
-def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
+def _sampling_kwargs(provider_name: str, model: str, temperature,
+                     effort: Optional[str] = None) -> dict:
     """Sampling parameters for this call, or {} when the model rejects them.
 
     Current Anthropic models removed temperature/top_p/top_k outright (any
@@ -1248,6 +1249,16 @@ def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
     one anyway is not a degraded request, it is a failed one -- which is how
     ROADMAP §10's ensemble mode came to be built, documented as working, and
     incapable of running against this harness's own default model.
+
+    TWO MORE, MEASURED FROM THE PROVIDERS' OWN DOCUMENTATION (ROADMAP_v3
+    §87, #6). OpenAI's rule for its reasoning models is "When reasoning
+    effort is not `none`, remove `temperature`, `top_p`, and
+    `top_logprobs`", and a model that reasons refuses one with a 400 -- so
+    `effort` decides it on OPENAI, the value `_thinking_for_provider` is
+    about to send, with no model list to go stale. And Google's Gemini 3.6
+    Flash and 3.5 Flash-Lite IGNORE a temperature, as Google says every
+    later Gemini will: no error, no effect, which is the one failure here
+    worse than a 400. Those are named in the set below like the rest.
 
     Dropping the parameter is logged at WARNING rather than done silently.
 
@@ -1274,6 +1285,15 @@ def _sampling_kwargs(provider_name: str, model: str, temperature) -> dict:
         logger.warning(
             "Dropping temperature=%s: the ChatGPT plan's route refuses "
             "sampling parameters.", temperature)
+        return {}
+    if provider_name == "OPENAI" and effort and effort != "none":
+        # §87. Sent no effort at all, a reasoning model still reasons at
+        # its own default and still refuses: that stays the loud 400 an
+        # unlisted model has always been, rather than a guess here.
+        logger.warning(
+            "Dropping temperature=%s: OpenAI refuses sampling parameters "
+            "while a model reasons (reasoning effort %r).", temperature,
+            effort)
         return {}
     if model in config.MODELS_REJECTING_SAMPLING_PARAMS:
         logger.warning(
@@ -2115,7 +2135,7 @@ def call_model_stream(
     translated_messages = _messages_for_provider(
         provider_name, messages, model, echoes_reasoning,
         images=accepts_images(provider_name))
-    sampling = _sampling_kwargs(provider_name, model, temperature)
+    sampling = _sampling_kwargs(provider_name, model, temperature, effort)
     thinking = _thinking_for_provider(provider_name, effort)
 
     if provider_name == "CHATGPT":

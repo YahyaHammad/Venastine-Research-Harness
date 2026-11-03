@@ -15,6 +15,15 @@ other name.
 
 ---
 
+## Two provider facts about temperature (batch 229)
+
+| Change | Test | Fix |
+|---|---|---|
+| Send a temperature to OpenAI alongside a reasoning effort | `test_openai_drops_temperature_while_a_model_reasons`, `test_openai_is_sent_no_temperature_while_it_reasons` | OpenAI's rule: remove it when effort is not `none` (#6, A82) |
+| Stop passing `effort` to `_sampling_kwargs` at the call site | `test_openai_is_sent_no_temperature_while_it_reasons` | Pass the effort `_thinking_for_provider` is about to send |
+| Drop it at effort `none`, or for every OpenAI-compatible provider | `test_openai_keeps_it_at_effort_none`, `test_the_effort_rule_is_openais_alone` | `none` keeps it; the rule is OpenAI's alone |
+| Remove a Gemini name from `models_rejecting_sampling_params` | `test_the_geminis_that_ignore_it_are_in_the_set`, `test_a_gemini_that_ignores_temperature_is_sent_none` | They ignore the parameter silently; listed, a temperature sent to them warns |
+
 ## A CLI turn printed as it runs (batch 228)
 
 | Change | Test | Fix |
