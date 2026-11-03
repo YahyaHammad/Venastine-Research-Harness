@@ -872,6 +872,54 @@ def _attended_only(provider):
 _DEFAULT_TIMEOUT = object()
 
 
+def _flush_console_input(handle) -> None:
+    """Windows: empty a console's input buffer, then clear the edit line of
+    a cooked read in progress with one Escape key (ROADMAP_v3 §88, A83).
+
+    `_StdinReader._flush_terminal` says why both halves are needed. The
+    structures are declared here, on first use, because only a Windows
+    console ever reaches this.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class _Char(ctypes.Union):
+        _fields_ = [("UnicodeChar", wintypes.WCHAR),
+                    ("AsciiChar", ctypes.c_char)]
+
+    class _KeyEvent(ctypes.Structure):
+        _fields_ = [("bKeyDown", wintypes.BOOL),
+                    ("wRepeatCount", wintypes.WORD),
+                    ("wVirtualKeyCode", wintypes.WORD),
+                    ("wVirtualScanCode", wintypes.WORD),
+                    ("uChar", _Char),
+                    ("dwControlKeyState", wintypes.DWORD)]
+
+    class _Event(ctypes.Union):
+        _fields_ = [("KeyEvent", _KeyEvent), ("_pad", ctypes.c_byte * 16)]
+
+    class _InputRecord(ctypes.Structure):
+        _fields_ = [("EventType", wintypes.WORD), ("Event", _Event)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.FlushConsoleInputBuffer.argtypes = [wintypes.HANDLE]
+    kernel32.WriteConsoleInputW.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(_InputRecord), wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD)]
+    kernel32.FlushConsoleInputBuffer(handle)
+
+    key_event, vk_escape = 0x0001, 0x1B
+    records = (_InputRecord * 2)()
+    for record, down in zip(records, (True, False)):
+        record.EventType = key_event
+        record.Event.KeyEvent.bKeyDown = down
+        record.Event.KeyEvent.wRepeatCount = 1
+        record.Event.KeyEvent.wVirtualKeyCode = vk_escape
+        record.Event.KeyEvent.uChar.UnicodeChar = "\x1b"
+    written = wintypes.DWORD()
+    kernel32.WriteConsoleInputW(handle, records, 2, ctypes.byref(written))
+
+
 class _StdinReader:
     """The ONE reader of stdin in this process (ROADMAP_v2 §29, N1).
 
@@ -1004,6 +1052,52 @@ class _StdinReader:
         """stdin is closed AND nothing typed before it closed is left."""
         return self._eof.is_set() and self._lines.empty()
 
+    @staticmethod
+    def _flush_terminal() -> None:
+        """Discard what was typed at a real terminal and not yet read
+        (ROADMAP_v3 §88, A83; TECHNICAL_DEBT 44).
+
+        ask()'s drain empties the QUEUE, which holds only what the pump has
+        already taken. Measured in a console of its own, three things got
+        past it: a line typed before the first ask() of a process, which
+        the pump had not started reading yet; half a line typed before it,
+        which became the front of the real answer ("sta" + "fresh"); and
+        half a line typed between two questions, which the pump, parked in
+        a read, was still holding unfinished. All three are input typed
+        before the question was asked, and none is an answer to it.
+
+        POSIX: `tcflush(TCIFLUSH)` discards all three, the half line in the
+        line discipline included. Windows: `FlushConsoleInputBuffer`
+        discards the first two, and NOT the third -- a cooked read already
+        in progress holds its half line in its own edit buffer, out of the
+        input buffer's reach. So one Escape key is written after the flush:
+        conhost's cooked read clears its edit line on Escape, echo included,
+        and with no read in progress the pump's next read clears an empty
+        line, which does nothing. Measured: all three cases clean on both
+        platforms, and a line typed after the prompt still answers it.
+
+        Only a real terminal. Piped stdin is input someone wrote down on
+        purpose, and flushing it would throw away a script's answers. Best
+        effort, like the drain it sits beside: a failure is logged and the
+        question is still asked.
+        """
+        try:
+            if not sys.stdin.isatty():
+                return
+            fd = sys.stdin.fileno()
+        except (AttributeError, OSError, ValueError):
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                handle = msvcrt.get_osfhandle(fd)
+                _flush_console_input(handle)
+            else:
+                import termios
+                termios.tcflush(fd, termios.TCIFLUSH)
+        except Exception as e:  # noqa: BLE001 -- best effort, as the drain is
+            logger.debug("could not flush the terminal's input: %s", e)
+
     def ask(self, prompt: str, timeout: float | None = None):
         """Returns the typed line, or None if nobody answered in time.
 
@@ -1020,6 +1114,10 @@ class _StdinReader:
             # word for that -- interaction.decode turns it into the
             # kind's declining default.
             return None
+        # §88 (A83): the terminal's own buffer first, and BEFORE the pump
+        # can start, so on a process's first ask() there is nothing left
+        # for it to read; then the queue, for what it already took.
+        self._flush_terminal()
         self._start()
         while True:                      # drop anything typed too late
             try:

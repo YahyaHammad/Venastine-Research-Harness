@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§88. Input typed before a question, and the launcher's stdin** - **(BUILT in batch 230)** (`ask()` drained the queue, which holds only what the pump already took, so half a line typed before a question became the front of its answer -- measured "sta" + "fresh" on both platforms -- and on Windows a line typed before the first question answered it. The terminal's own buffer is flushed first now, with an Escape for a Windows read in progress; and the npm launcher pauses and unrefs stdin after its consent question, measured harmless both ways; A83)
 - **§87. Two provider facts about temperature, answered from the providers' own pages** - **(BUILT in batch 229)** (two checks §10's revisit recorded as needing a live key: the default really is 1.0, so the deleted `ENSEMBLE_TEMPERATURE` sent what the provider would have used; and OpenAI's reasoning models refuse a temperature whenever reasoning effort is not `none`, which at the shipped `high` is always, while the guard listed only Anthropic names. It now follows OpenAI's rule on `OPENAI`, and the two Gemini models that silently ignore a temperature are listed; A82)
 - **§86. A CLI turn printed as it runs, and a second press to stop it** - **(BUILT in batch 228)** (a CLI chat turn printed its notices and its final answer, while a replay of the same thread showed its reasoning and a line per tool call, and the first Ctrl+C during a turn stopped it. Each step now prints when it finishes, through the replay's own function, and a turn stops on a second press inside two seconds, during a wake turn too; A81)
 - **§85. Six prompt tiers, one assembly** - **(BUILT in batch 227)** (three call sites appended the same thread and session tiers by hand, with the memories guard spelled three ways and the boundary test's canaries two members short. `core.loop.session_tiers` appends all six, the guard is one argument, and the pin follows `SESSION_TIERS`; A80)
@@ -2802,6 +2803,78 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §88. Input typed before a question, and the launcher's stdin
+
+**Built in batch 230**, from register items 44 and 43, neither filed as an
+issue. Both are about who reads the terminal, which ROADMAP_v2 §29 (N1) and
+batch 121 made a rule: one reader at a time.
+
+**Item 44, measured.** `ask()` drops stale input before a gated question:
+"a line typed after a question timed out was an answer to THAT question".
+It did that by draining the pump's queue, which holds only what the pump
+has already read. Measured with the real `_StdinReader`, in a Windows
+console of its own with keys injected by `WriteConsoleInputW`, and on a
+real pty under WSL:
+
+| typed | Windows, before | POSIX, before | both, after |
+|---|---|---|---|
+| a whole line before the first question | answered it (`stale`, 3/3) | dropped (the pump won the race to the drain) | dropped |
+| half a line before the first question, the answer after | `stafresh` (2/2) | `stafresh` | `fresh` |
+| half a line between two questions, the answer after | `stafresh` (2/2) | `stafresh` | `fresh` |
+| the answer after the prompt (control) | `fresh` | `fresh` | `fresh` |
+
+The approvals compare the whole answer with `y`/`yes`, so `yn` denies. But a
+stray `y` with no Enter before a prompt, and then Enter to decline, reads as
+`y`.
+
+**The owner's choice: an OS-level flush, and on Windows an Escape too.**
+`_StdinReader._flush_terminal()` runs at the top of every `ask()`, before
+the pump can start and before the queue drain. On POSIX it is
+`tcflush(TCIFLUSH)`, which also discards a half line held by the line
+discipline. On Windows `FlushConsoleInputBuffer` cleared the first two rows
+and not the third: a cooked read already in progress keeps its half line in
+its own edit buffer, out of the input buffer's reach. So
+`_flush_console_input` then writes one Escape key, which conhost's cooked
+read takes as "clear this line", echo included; with no read in progress,
+the pump's next read clears an empty line. The owner chose to add it after
+the measurement showed the gap. Only a real terminal is flushed: piped stdin
+is a script's answers. Best effort, like the drain: a failure is logged and
+the question is still asked.
+
+**Item 43, measured.** The npm launcher asks its first-run consent through
+Node's `readline`, then runs the harness under itself with the console
+inherited. `rl.close()` only asks libuv to stop reading. Reproduced in a
+console of its own (the same three calls, and a child reading the console
+the way Textual's EventMonitor does), five keys typed at the child reached
+it in every run, three as shipped and three with the fix. **The owner's
+choice: fix it and measure.** `ask()` now calls `process.stdin.pause()` and
+`unref()` after `rl.close()`, so the release is made in so many words; the
+measurement shows the old shape lost nothing and the new one loses nothing.
+
+**Tests.** Two pty tests (POSIX; CI's Linux job runs them) for the two half
+lines, an ordering test for flush-before-pump, a pipe that is never flushed,
+the Windows Escape pinned by shape against a fake `kernel32`, the platform
+dispatch, and a source pin on the launcher's `ask()`. Six mutations, every
+one red under WSL and the five that Windows can see red there. One test was
+rewritten when its mutation survived: a `StringIO` has no descriptor, so the
+first "never flushed" test passed with the `isatty` check removed.
+
+### What §88 deliberately does not change
+
+**`readline()`.** The chat prompt keeps type-ahead (N1's mirror image): a line
+typed while the model streams is the next message.
+
+**The pump.** It still starts at the first `ask()`, and a deadline still
+needs it.
+
+### Design Decisions Record — §88 (A83)
+
+| id | decision |
+|---|---|
+| **A83** | **`ask()` flushes a real terminal's own input before every gated question, and the npm launcher releases stdin after its one.** `_StdinReader._flush_terminal()` runs before the pump can start and before the queue drain: `tcflush(TCIFLUSH)` on POSIX, and on Windows `FlushConsoleInputBuffer` followed by one Escape key, which clears the edit line of a cooked read in progress. Piped stdin is never flushed. `bin/venastine.mjs`'s consent `ask()` calls `process.stdin.pause()` and `unref()` after `rl.close()`. Amends ROADMAP_v2 §29's `ask()` rule, which drained the queue only. Measured on a Windows console and a WSL pty; the owner chose the flush, then the Escape once the measurement showed a Windows read in progress was out of the flush's reach, and the launcher fix with measurement |
+
 ---
 
 ## §87. Two provider facts about temperature, answered from the providers' own pages

@@ -29700,3 +29700,42 @@ models that ignore a temperature.
   the call site passing no effort is visible only to the wire test.
 - **Full suite:** 8648 passed, 75 skipped in 2:15, nothing failed. ruff clean; bandit 0 outside the baseline, no count grew; gitleaks on an export: no leaks.
 - **Version**, by `scripts/version.py bump`: `0.3.4-b.12.bugfixes.r57e749187eaf`.
+
+## Batch 230 -- input typed before a question, and the launcher's stdin (2026-11-03)
+
+**Register items 44 and 43, ROADMAP_v3 §88, A83.** The owner chose an
+OS-level flush for `ask()`, then one Escape key on Windows once the
+measurement showed the flush alone missed a read in progress, and the
+launcher fix with measurement.
+
+- **Measured item 44** with the real `_StdinReader`: in a Windows console of
+  its own with keys injected by `WriteConsoleInputW`, and on a WSL pty. A
+  whole line typed before the first question answered it on Windows (3/3);
+  half a line typed before a question, or between two, became the front of
+  the answer on both platforms ("sta" + "fresh"). The approvals match
+  `y`/`yes` exactly, so a stray `y` and then Enter to decline would read
+  as yes.
+- **The fix.** `_flush_terminal()` runs before the pump starts and before
+  the drain: `tcflush(TCIFLUSH)` on POSIX, which cleared every case;
+  `FlushConsoleInputBuffer` on Windows, which cleared all but the half line
+  a cooked read in progress holds, so `_flush_console_input` then writes one
+  Escape, which conhost takes as "clear the line". Every case clean on both
+  platforms afterwards, and a line typed after the prompt still answers it.
+  Only a real terminal is flushed.
+- **Item 43.** The launcher's consent shape reproduced in a console of its
+  own: five keys typed at the child reached it in all three runs as shipped
+  and all three with `process.stdin.pause()` and `unref()` after
+  `rl.close()`. Fixed as the owner chose; benign either way.
+- Probes stayed in the scratchpad. Redirecting `APPDATA` hid the Python user
+  site (pydantic), the Windows twin of the WSL `HOME` trap, so the Windows
+  probe redirects `HOME` and `USERPROFILE` only, and the WSL one sets
+  `PYTHONUSERBASE`.
+
+### Verified
+
+- New tests: 7 in `test_cli.py` (two real-pty tests skip on Windows). Six
+  mutations, all red under WSL and the five Windows can see red there. The
+  first "never flushed" test used a `StringIO`, which has no descriptor, and
+  survived the `isatty` check's removal; it uses a pipe with one now.
+- **Full suite:** 8653 passed, 77 skipped in 2:14, nothing failed (the two pty tests are the new skips on Windows; they passed under WSL). ruff clean; bandit 0 outside the baseline, no count grew; gitleaks on an export: no leaks.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.13.bugfixes.r57e749187eaf`.

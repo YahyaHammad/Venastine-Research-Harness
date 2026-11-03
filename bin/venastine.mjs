@@ -198,11 +198,22 @@ function countRequirements() {
     .length;
 }
 
+// ROADMAP_v3 §88 (A83). The harness runs under this process with the console
+// inherited, and it is the terminal's one reader from then on, so this
+// process stops reading in so many words: rl.close() only ASKS libuv to stop,
+// and on Windows its console reader is a thread whose read in flight cannot
+// be cancelled. pause() is the same request made of the stream itself, and
+// unref() lets nothing about stdin keep this process alive. Measured in a
+// console of its own, five keys typed at the child after the consent all
+// reached it, before this and after it, three runs each: the old shape
+// lost nothing there, and this one loses nothing either.
 function ask(question) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     rl.question(question, (answer) => {
       rl.close();
+      process.stdin.pause();
+      if (typeof process.stdin.unref === 'function') process.stdin.unref();
       resolve(/^y(es)?$/i.test(answer.trim()));
     });
   });

@@ -15,6 +15,16 @@ other name.
 
 ---
 
+## Input typed before a question (batch 230)
+
+| Change | Test | Fix |
+|---|---|---|
+| Ask without flushing the terminal, or flush after the pump starts | `test_half_a_line_typed_before_the_question_is_not_its_answer`, `test_half_a_line_typed_between_two_questions_is_dropped`, `test_the_terminal_is_flushed_before_the_pump_can_start` | Flush, then start the pump, then drain (A83) |
+| Drop the Escape after a Windows console flush | `test_a_windows_console_is_flushed_and_sent_one_escape` | A cooked read in progress keeps its half line out of the flush's reach |
+| Flush piped stdin | `test_piped_stdin_is_never_flushed` | Only `isatty()`; a pipe is a script's answers |
+| Flush by the wrong platform's call | `test_each_platform_flushes_its_own_way` | `tcflush(fd, TCIFLUSH)` on POSIX, the console handle on Windows |
+| Leave the npm launcher's stdin unpaused after its consent | `test_the_npm_launcher_lets_go_of_stdin_after_its_one_question` | `rl.close()`, then `process.stdin.pause()` and `unref()` |
+
 ## Two provider facts about temperature (batch 229)
 
 | Change | Test | Fix |

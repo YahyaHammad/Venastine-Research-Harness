@@ -2561,7 +2561,7 @@ docstring rather than left to be discovered. Cost: one extra
 **0.065ms per step** of a research run in absolute ones, against **4.696ms**
 for one ordinary tool result's redaction pass.
 
-## 43. The npm launcher reads stdin on first run, then waits with the console inherited (open)
+## 43. The npm launcher reads stdin on first run, then waits with the console inherited (closed, batch 230 -- paused and unref'd, measured harmless both ways, ROADMAP_v3 §88, A83)
 
 `bin/venastine.mjs` opens a Node `readline` on `process.stdin` for the
 first-run install consent (`ask()`, line 194), then runs the harness under
@@ -2593,7 +2593,16 @@ reviewer of the harness's own shells can name this and nothing more. Item 49
 is the fourth instance of the same one-reader-at-a-time property (§29 N1), on
 the sandbox's one-shot executors.
 
-## 44. `ask()`'s drain can only drop what the pump already took (open)
+**CLOSED (batch 230, ROADMAP_v3 §88, A83).** Measured the way this entry
+prescribed: the launcher's three calls reproduced in a console of its own,
+with a child reading the console as Textual's EventMonitor does and five keys
+injected with `WriteConsoleInputW` after the consent. All five reached the
+child in three runs as shipped and three with the fix, so "probably benign"
+held. The owner chose to fix it anyway and measure: `ask()` calls
+`process.stdin.pause()` and `unref()` after `rl.close()`, and a test pins
+the order.
+
+## 44. `ask()`'s drain can only drop what the pump already took (closed, batch 230 -- the terminal is flushed first, ROADMAP_v3 §88, A83)
 
 `ask()` drops stale input before each gated prompt, because "a line typed
 after a question timed out was an answer to THAT question". It does that
@@ -2621,6 +2630,17 @@ scope for this entry by its own statement, and the honest-fix direction above
 is untouched. Nothing to add -- and item 49 now cites this entry for the half
 it explains: a one-shot child reading the terminal directly is consuming input
 the drain was never able to reach.
+
+**CLOSED (batch 230, ROADMAP_v3 §88, A83).** Measured with the line typed
+BEFORE the prompt, as this entry asked, and with half a line: on a Windows
+console a whole line typed before the first question answered it (3/3), and
+on both platforms half a line typed before a question, or between two, became
+the front of the answer ("sta" + "fresh"). The owner chose the flush this
+entry named, and `tcflush` cleared every case on POSIX. On Windows
+`FlushConsoleInputBuffer` did not clear the half line a cooked read already
+in progress held, so the owner added one Escape key after it, which conhost's
+cooked read takes as "clear the line"; measured clean in every case on both
+platforms, with a line typed after the prompt still answering it.
 
 ## 45. A view policy module in `core/` that only one shell reads (open)
 
