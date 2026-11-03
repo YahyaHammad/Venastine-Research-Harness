@@ -323,7 +323,8 @@ def session_tiers(system_prompt: str, memory: ConversationMemory, *,
 
     Active skill bodies go LAST on purpose (§19 K1): an activated skill is
     the most specific instruction the user has given, and should read as
-    governing what precedes it. The CLI has none to pass.
+    governing what precedes it. The CLI's arrive through
+    `run_agent_conversation` and `wake_conversation` since ROADMAP_v3 §89.
     """
     from skills.manager import manager as skills
 
@@ -336,6 +337,66 @@ def session_tiers(system_prompt: str, memory: ConversationMemory, *,
         prompt = with_file_mentions(prompt, memory, text=mention_text)
     fragment = skills.prompt_fragment(list(active_skills or ()))
     return f"{prompt}\n\n{fragment}" if fragment else prompt
+
+
+@dataclass(frozen=True)
+class AgentTurn:
+    """What a session's active agent makes of one conversation turn."""
+
+    model: str
+    provider_name: str
+    context: Optional[ToolContext]
+    # None runs the default prompt, which the loop builds itself.
+    system_prompt: Optional[str]
+    max_steps: int
+
+
+def agent_turn(agent, model: str, provider_name: str, active_skills=(), *,
+               callable_only: bool = False, granted=None,
+               one_shot: bool = False) -> AgentTurn:
+    """§18's session-scoped agent, applied to one turn, for either shell.
+
+    An active agent supplies the system prompt, the ToolContext, and
+    model/provider/max_steps overrides; with none active the turn is the
+    default harness run (base + catalogs, built by the loop). The session
+    tiers are NOT added here -- `_conversation_prompt` adds them to
+    whichever prompt runs, which is what keeps a wake turn's prompt the
+    same as the turn it continues.
+
+    ONE COPY (ROADMAP_v3 §89). The TUI's chat turn built this inline, and
+    the CLI's `/agent` needs the same answer: an agent that pins a model
+    in one shell and not the other is two agents with one name.
+
+    `callable_only` / `granted` are `advertisement_facts`' (#68), so an
+    unattended CLI turn under an agent does not advertise gated tools it
+    cannot call -- the TUI always has a channel and passes neither.
+
+    `one_shot` is §18's /grill-me: ONE turn in the session's thread under
+    the agent's prompt, and nothing else of the agent's -- the session's
+    model and provider, no ToolContext, the default step budget. That is
+    the TUI's `run_one_shot` assembly, kept as it was and now shared.
+    """
+    if agent is None:
+        return AgentTurn(model, provider_name, None, None,
+                         config.MAX_ITERATIONS)
+    from agents.manager import manager
+
+    if one_shot:
+        prompt = manager.system_prompt_for(
+            agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
+            list(active_skills or ()),
+            callable_only=callable_only, granted=granted)
+        return AgentTurn(model, provider_name, None, prompt,
+                         config.MAX_ITERATIONS)
+    context = manager.active_context(agent)
+    model = agent.model or model
+    provider_name = agent.provider or provider_name
+    prompt = manager.system_prompt_for(
+        agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
+        list(active_skills or ()), context=context,
+        callable_only=callable_only, granted=granted)
+    return AgentTurn(model, provider_name, context, prompt,
+                     agent.max_steps or config.MAX_ITERATIONS)
 
 
 def attach_ref(memory: ConversationMemory, thread_id, summary: str,
@@ -2123,6 +2184,7 @@ class RunAgentLoop:
         thread_agent: Optional[str] = None,
         cancel=None,
         observe=None,
+        active_skills=(),
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -2172,7 +2234,12 @@ class RunAgentLoop:
         know they are creating a child pass them.
 
         observe (ROADMAP_v3 §86) is `run_to_completion`'s: handed every
-        event as the turn runs. The CLI passes one to print the turn live."""
+        event as the turn runs. The CLI passes one to print the turn live.
+
+        active_skills (§89) are the session's `/skill` activations: marked
+        in the default prompt's catalog and their bodies pinned last by
+        session_tiers (§19 K1). The TUI builds its own prompt and passes
+        none here; the CLI passes its session's."""
         if authorization is not None and granted_tools is not None:
             raise ValueError(
                 "run_agent_conversation: pass authorization= or "
@@ -2197,7 +2264,8 @@ class RunAgentLoop:
         prompt = RunAgentLoop._conversation_prompt(
             memory, system_prompt, model=model, provider_name=provider_name,
             authorization=authorization,
-            response_channel=response_channel, granted_tools=granted_tools)
+            response_channel=response_channel, granted_tools=granted_tools,
+            active_skills=active_skills)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
             else {"granted_tools": granted_tools}
@@ -2386,7 +2454,8 @@ class RunAgentLoop:
     @staticmethod
     def _conversation_prompt(memory, system_prompt, *, model, provider_name,
                              authorization=None,
-                             response_channel=None, granted_tools=None) -> str:
+                             response_channel=None, granted_tools=None,
+                             active_skills=()) -> str:
         """The system prompt a conversation turn runs under -- ONE copy, for a
         turn the user started and a turn a background session's result
         started (ROADMAP_v3 §49), so a wake turn cannot run under a prompt
@@ -2401,6 +2470,7 @@ class RunAgentLoop:
         base = (system_prompt if system_prompt is not None
                 else system_prompts.with_catalogs(
                     with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
+                    list(active_skills or ()) or None,
                     callable_only=_callable_only,
                     granted=_granted))
         # A system_prompt handed in is an agent's, built by
@@ -2409,7 +2479,8 @@ class RunAgentLoop:
         # wrapper, and their source is not a person's file mention.
         return session_tiers(base, memory,
                              agent_built=system_prompt is not None,
-                             mentions=memory.kind == THREAD_KIND_CHAT)
+                             mentions=memory.kind == THREAD_KIND_CHAT,
+                             active_skills=active_skills)
 
     @staticmethod
     def wake_conversation(
@@ -2430,6 +2501,7 @@ class RunAgentLoop:
         activity=None,
         cancel=None,
         observe=None,
+        active_skills=(),
     ) -> ModelResponse:
         """A turn started by the HARNESS in an existing thread: a background
         session's result, delivered as a harness-written user row
@@ -2471,7 +2543,8 @@ class RunAgentLoop:
         prompt = RunAgentLoop._conversation_prompt(
             memory, system_prompt, model=model, provider_name=provider_name,
             authorization=authorization,
-            response_channel=response_channel, granted_tools=granted_tools)
+            response_channel=response_channel, granted_tools=granted_tools,
+            active_skills=active_skills)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
             else {"granted_tools": granted_tools}

@@ -175,11 +175,13 @@ python main.py --provider OPENAI --model gpt-5.1  # override provider/model
 python main.py --tui                              # the full-screen interface
 ```
 
-The line-based CLI is the default and is never going away — every feature is reachable from it. The TUI is a nicer shell over the same code.
+The line-based CLI is the default and is never going away. The TUI is a nicer shell over the same code, and most of it is reachable from the CLI too: the CLI's `/help` lists its slash commands, then each TUI command it does not have yet and where to find it instead.
 
-Every launch flag is tabulated in the [CLI flag reference](#cli-flag-reference) below; every slash command under [The TUI](#the-tui).
+Every launch flag is tabulated in the [CLI flag reference](#cli-flag-reference) below; every slash command under [The TUI](#the-tui), and the CLI's just below.
 
 A turn prints as it runs, one step at a time: the model's reasoning, what it said, and a line for each tool call as it starts. During a turn, Ctrl+C twice within two seconds stops it at the next safe point; the first press only says so, so a stray one costs nothing. At the prompt, Ctrl+C or Ctrl+D exits. The thread id is printed after the first response so you can resume later — and resuming **replays the conversation**, so you can see what you are picking up. Tool calls replay as one line each; their results do not, since a single research turn can carry hundreds of kilobytes of fetched pages.
+
+A line that starts with `/` is a command, as in the TUI, and never reaches the model; an unknown one is an error rather than a chat turn. The CLI has eighteen: `/help`, `/quit`, `/threads`, `/resume`, `/new`, `/goal`, `/agent`, `/skill`, `/grill-me`, `/effort`, `/model`, `/compact`, `/summary`, `/ref`, `/memories`, `/forget`, `/claims` and `/call`. They mean what the TUI's do: both shells read one catalog of commands, so a name, its arguments and its description cannot differ between them. `/threads` and `/ref` print a numbered list and ask for a number, or a thread id for one the list does not show. `/call` lists this conversation's tool calls, numbered, and `/call 3` shows the third in full: the whole command and what it returned, or a background session's output, or the run a subagent made. It is the CLI's version of ctrl+clicking a tool line in the TUI. `/model` here lasts for the session, since the CLI starts from `--model` or settings.json.
 
 ---
 
@@ -1003,7 +1005,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 8730 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
+Run the test suite with `pytest` — 8846 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
 
 ## Documentation
 

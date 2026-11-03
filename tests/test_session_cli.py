@@ -155,6 +155,45 @@ class TestWaitingBetweenTurns:
 
         assert wakes[0]["authorization"] is provider
 
+    def test_a_wake_turn_runs_under_the_turns_agent_and_skills(
+            self, manager, session_starter, wakes, cli_stdin, fake_storage,
+            mocker):
+        """ROADMAP_v3 §89. A wake is the turn continuing, so it runs under
+        the prompt, context and step budget the turn ran under -- an agent
+        set with /agent, and the skills set with /skill. Under the default
+        prompt instead, it would be a different agent answering."""
+        from agents.manager import manager as agents
+        from core.config_loader import AgentDef
+        from skills.manager import manager as skills
+
+        agent = AgentDef(
+            name="narrow", description="d", model=None, provider=None,
+            allowed_tools=None, approval_overrides={},
+            use_project_context=False, use_memory=False, max_steps=7,
+            body="You are narrow.", tier="harness", path="narrow.md")
+        mocker.patch.object(agents, "get", return_value=agent)
+        mocker.patch.object(skills, "get", return_value=mocker.Mock(
+            name="tidy", description="tidies"))
+        mocker.patch.object(skills, "missing_tools", return_value=[])
+
+        def start_and_finish(_n):
+            _start(manager)
+            session_starter.started[-1]["process"].exit(0)
+
+        turns = _turns(mocker, during=start_and_finish)
+        cli_stdin("/agent narrow", "/skill tidy", "run the tests")
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        [turn] = turns
+        [wake] = wakes
+        for key in ("system_prompt", "context", "max_steps",
+                    "active_skills"):
+            assert wake[key] == turn[key], key
+        assert wake["max_steps"] == 7
+        assert "You are narrow." in wake["system_prompt"]
+        assert wake["active_skills"] == ["tidy"]
+
     def test_ctrl_c_stops_the_sessions_and_keeps_the_harness(
             self, manager, session_starter, wakes, cli_stdin, fake_storage,
             capsys, mocker):

@@ -29739,3 +29739,49 @@ launcher fix with measurement.
   survived the `isatty` check's removal; it uses a pipe with one now.
 - **Full suite:** 8653 passed, 77 skipped in 2:14, nothing failed (the two pty tests are the new skips on Windows; they passed under WSL). ruff clean; bandit 0 outside the baseline, no count grew; gitleaks on an export: no leaks.
 - **Version**, by `scripts/version.py bump`: `0.3.4-b.13.bugfixes.r57e749187eaf`.
+
+## Batch 231 -- one command catalog, and the CLI's slash commands (2026-11-03)
+
+**Issue #8 and register item 45, ROADMAP_v3 §89, A84.** The owner chose one
+catalog with each shell's own handlers, the commands #8 names as real gaps
+plus item 45's view, `/call` to list and open a thread's tool calls, and
+refusal of a `/` line that names nothing.
+
+- **Measured.** The TUI registers 32 slash commands and the CLI had none:
+  every line at its prompt went to the model, so `/help` there was a billed
+  chat turn, and each feature that wanted the CLI shipped a launch flag
+  instead. `main.py` imported neither of the two view modules item 45 says
+  were put in `core/` for both shells.
+- **One catalog.** `core/commands.py` declares every command once (name,
+  summary, usage, aliases, and why a shell lacks it), with the registry
+  mechanism moved there from `tui/commands.py`. A shell binds handlers with
+  `bind()`, and its registry refuses an undeclared name, one declared absent
+  for it, and a description that differs; the catalog refuses its own
+  collisions when built. A name one shell lacks gets the catalog's reason,
+  not "unknown".
+- **Shared decisions.** What the TUI's handlers decided inline moved to
+  functions both shells call: `core.connect.model_switch`,
+  `core.client.effort_choice`, `core.compaction.parse_compact_args`,
+  `core/claims_view.py`, `core.replay.thread_row` and `tool_lines`, and
+  `core.loop.agent_turn`, which the TUI's chat turn and one-shot now use.
+- **The CLI.** `cli_commands.py` binds 18 commands; `run_chat` keeps a
+  `ChatSession` every turn reads. `/skill` reaches the prompt through a new
+  `active_skills` argument on `run_agent_conversation` and
+  `wake_conversation`, a wake runs under the turn's agent and skills, and
+  `/call` routes as the TUI's click does. The module never imports `main`,
+  which runs as `__main__`.
+- **Found.** The TUI's `/model` note for an agent that pins a model said
+  "/agent clear", which `/agent` refuses as an unknown agent; the shared note
+  says `/agent default`.
+
+### Verified
+
+- New tests: 91 in `test_cli_commands.py`, 24 in `test_command_catalog.py`,
+  one in `test_session_cli.py`. Thirty mutations: 29 red, one equivalent.
+  Two survived the first pass and got tests: a `/grill-me` request left
+  armed fires again only on the next `/` line, and a picker test that chose
+  the last row could not see an answer off by one.
+- A piped smoke run of the real CLI: `/help`, an unknown name, `/theme`,
+  `/call`, `/goal`, `/new`, `/effort` and `/exit`, none reaching the model.
+- **Full suite:** 8769 passed, 77 skipped in 1:45, nothing failed; the CLI and TUI files again with AGENT_WORKSPACE unset, and under WSL (872 passed). ruff clean; bandit 0 outside the baseline, no count grew; gitleaks on an export: no leaks.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.14.bugfixes.r57e749187eaf`.

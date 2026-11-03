@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§89. One command catalog, and the CLI's slash commands** - **(BUILT in batch 231)** (the CLI had no command layer, so `/help` at its prompt was a billed chat turn and every feature that wanted the CLI shipped a launch flag. One catalog in `core/commands.py` now declares every command once and both shells bind handlers to it; the CLI gets 18 commands, among them `/call`, the CLI's route to item 45's call and session views, and a `/` line that names nothing is refused; A84)
 - **§88. Input typed before a question, and the launcher's stdin** - **(BUILT in batch 230)** (`ask()` drained the queue, which holds only what the pump already took, so half a line typed before a question became the front of its answer -- measured "sta" + "fresh" on both platforms -- and on Windows a line typed before the first question answered it. The terminal's own buffer is flushed first now, with an Escape for a Windows read in progress; and the npm launcher pauses and unrefs stdin after its consent question, measured harmless both ways; A83)
 - **§87. Two provider facts about temperature, answered from the providers' own pages** - **(BUILT in batch 229)** (two checks §10's revisit recorded as needing a live key: the default really is 1.0, so the deleted `ENSEMBLE_TEMPERATURE` sent what the provider would have used; and OpenAI's reasoning models refuse a temperature whenever reasoning effort is not `none`, which at the shipped `high` is always, while the guard listed only Anthropic names. It now follows OpenAI's rule on `OPENAI`, and the two Gemini models that silently ignore a temperature are listed; A82)
 - **§86. A CLI turn printed as it runs, and a second press to stop it** - **(BUILT in batch 228)** (a CLI chat turn printed its notices and its final answer, while a replay of the same thread showed its reasoning and a line per tool call, and the first Ctrl+C during a turn stopped it. Each step now prints when it finishes, through the replay's own function, and a turn stops on a second press inside two seconds, during a wake turn too; A81)
@@ -2803,6 +2804,119 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §89. One command catalog, and the CLI's slash commands
+
+**Built in batch 231**, from issue #8 and register item 45. Both are D12's
+debt: the CLI is a permanent fallback, and it had no command layer at all.
+
+**Measured.** The TUI registers 32 slash commands. The CLI had none: every
+line typed at its prompt went to the model, so `/help` there was a chat
+turn, billed. Each feature that wanted the CLI shipped a launch flag instead
+(`--summary`, `--ref`, `--memories`, `--forget`, `--init`, `--secrets`),
+none usable mid-conversation, and three of the parser's own comments gave
+the missing layer as the reason. Register item 45 is the same gap from the
+other end: `core/session_view.py` and `core/call_view.py` sit in `core/` so
+both shells can read them, and `main.py` imported neither. README said "every
+feature is reachable from it" of the CLI.
+
+**The owner's choices.** One catalog, each shell its own handlers. The CLI
+gets the commands #8 names as real gaps plus item 45's view (18 of them).
+`/call` lists a thread's tool calls and `/call N` opens one. A `/` line that
+names nothing is refused, as the TUI has refused one since §16.
+
+**One catalog.** `core/commands.py` declares every command once: name,
+summary, usage, aliases, and, for a shell that lacks it, the sentence that
+says why. The registry mechanism moved there from `tui/commands.py`
+unchanged, because the CLI needs it and must not import from `tui/` to get
+it; `tui/commands.py` is the TUI's instance. A shell does not describe a
+command, it binds a handler with `bind(name, handler)`, and a shell's
+registry refuses at registration a name the catalog lacks, a name declared
+absent from that shell, and a description that differs. The catalog refuses
+its own collisions when it is built. A command one shell lacks is answered
+with the catalog's reason rather than "unknown": `/theme` in the CLI, `/call`
+in the TUI. The census test (`tests/test_command_catalog.py`) holds each
+shell to exactly what the catalog gives it.
+
+**Thin handlers, shared functions.** A handler is where the shells really
+differ (the TUI pushes a modal and runs a worker, the CLI prints and reads a
+line), so each keeps its own. What a command decides was moved out of the
+TUI's handler into one function both call: `core.connect.model_switch` (and
+`configured_providers`, `agent_pin_note`, `MODEL_USAGE`,
+`CHATGPT_SIGNED_OUT`), `core.client.effort_choice`,
+`core.compaction.parse_compact_args`, `core/claims_view.py` (the renderer
+`tui/screens.py` had), `core.replay.thread_row` (the picker's row) and
+`tool_lines`, and `core.loop.agent_turn`, which says what an active agent
+makes of a turn and replaces the TUI turn's inline copy.
+
+**The CLI's commands.** `cli_commands.py`: `/help`, `/quit` (with `/exit` and
+`/bye`), `/threads`, `/resume`, `/new`, `/goal`, `/agent`, `/skill`,
+`/grill-me`, `/effort`, `/model`, `/compact`, `/summary`, `/ref`,
+`/memories`, `/forget`, `/claims` and `/call`. The TUI's two pickers
+(`/threads`, `/ref`) are a numbered list and a question here, and the
+question also takes a thread id the list did not show. `run_chat` holds the
+session on a `ChatSession` (thread, model, effort, agent, skills), which
+every turn reads. The module must not import `main`, which runs as
+`__main__`: a second copy would mean a second stdin reader, so `run_chat`
+hands it `ask`, `replay` and `show` instead. A handler that raises is
+contained and logged, as the TUI's dispatch site contains one (batch 135);
+Ctrl+C during a command returns to the prompt.
+
+**What reaches the turn.** `/agent` makes the turn `agent_turn`'s: the
+agent's prompt, ToolContext, model and step budget. `/skill`'s activations
+reach the prompt through `run_agent_conversation(active_skills=...)` and
+`wake_conversation`, into `_conversation_prompt`, where the catalog marks
+them and `session_tiers` pins their bodies last (§19 K1). Before this,
+`session_tiers` said "The CLI has none to pass". A wake turn runs under the
+turn's agent and skills, because it is that turn continuing. `/grill-me` is
+`agent_turn(one_shot=True)`: the agent's prompt in the session's run, which
+is the TUI's `run_one_shot` assembly, now shared, and the TUI's one-shot
+calls it too.
+
+**`/call`, item 45.** The TUI opens a call by ctrl+clicking its `▸` line.
+The CLI's lines carry nothing to click, so `/call` numbers them, off
+`tool_lines`: the lines a replay prints, so a number names the line the
+reader sees. `/call N` routes as `on_call_selected` does: a session's call
+shows the session, from the manager while this process holds it and
+rebuilt from the archive otherwise (SS18); a spawn prints the run it
+started; anything else, or either of those whose target cannot be found,
+shows the call (TR12).
+
+**Found on the way.** The TUI's `/model` note for an agent that pins a model
+said to switch back with "/agent clear", which `/agent` answers with
+"Unknown agent 'clear'". The shared `agent_pin_note` names `/agent default`.
+
+**Tests.** 91 in `tests/test_cli_commands.py`, 24 in
+`tests/test_command_catalog.py`, and a wake test in `test_session_cli.py`.
+Thirty mutations: 29 red, one equivalent (`/effort` applying a refused
+level, which `effort_choice` returns unchanged). Two survived the first pass
+and have tests now: a `/grill-me` request not cleared after its turn fires
+again only on the next `/` line, and a picker test that chose the last row
+could not see an answer off by one.
+
+### What §89 deliberately does not change
+
+**The flags.** `--summary`, `--ref`, `--memories`, `--forget`, `--init` and
+`--secrets` stay, for a scripted run. `--memories`, `--forget` and `--ref`
+now print and attach through the same helpers as their commands.
+
+**The fourteen the CLI still lacks.** Four by design: `/theme`, `/copy`,
+`/mentions` and `/kill`, the last because the CLI's prompt waits until
+background sessions finish. The rest are catalogued as not yet built, and
+the CLI's `/help` lists them with where to go instead.
+
+**`/model` in the CLI is not remembered.** The TUI's choice is stored in its
+preference store beside settings.json, which the CLI does not read; the CLI
+starts from `--model` or settings.json, and its `/model` says "for this
+session".
+
+### Design Decisions Record — §89 (A84)
+
+| id | decision |
+|---|---|
+| **A84** | **One slash-command catalog, `core/commands.py`, that both shells bind handlers to; the CLI dispatches `/` lines.** Each command's name, summary, usage, aliases and per-shell absence reason are declared once. A shell binds with `bind()`; a shell's `CommandRegistry` refuses an undeclared name, a name declared absent for it, and a description that differs from the catalog's. A name one shell lacks is answered with the catalog's reason. The CLI's handlers are in `cli_commands.py`, which never imports `main`; what a command decides is a shared core function both shells' handlers call. A CLI line starting with `/` is never sent to the model. Amends ROADMAP_v2 §16's registry, which described the TUI only, and M21, whose accepted limit (references attached at launch only) `/ref` lifts. Resolves issue #8's design note; the owner chose one catalog with per-shell handlers, the gaps #8 names, `/call` for item 45, and refusal of an unknown `/` line |
+
 ---
 
 ## §88. Input typed before a question, and the launcher's stdin

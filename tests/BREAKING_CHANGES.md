@@ -15,6 +15,27 @@ other name.
 
 ---
 
+## One command catalog, and the CLI's slash commands (batch 231)
+
+A CLI line starting with `/` is a command now and never reaches the model
+(#8); the registry mechanism moved to `core/commands.py`, and a shell's
+registry takes only what the catalog declares. `SlashCommand` and
+`CommandRegistry` are still importable from `tui.commands`. A test that
+registers a command of its own into a shell's registry declares it in
+`core.commands.CATALOG` first (`monkeypatch.setitem`), as the three in
+`test_tui.py` now do.
+
+| Change | Test | Fix |
+|---|---|---|
+| Send a `/` line to the model, or answer an unknown one without the catalog | `test_help_runs_and_no_turn_happens`, `test_an_unknown_name_is_refused_not_sent`, `test_a_tui_command_is_answered_with_its_reason` | `run_command` dispatches every `/` line; `absent_reason` before "unknown" (A84) |
+| Let a CLI command's exception or Ctrl+C leave `run_chat` | `test_a_raising_handler_is_reported_and_logged`, `test_ctrl_c_during_a_command_returns_to_the_prompt` | `run_command` contains both, as the TUI's dispatch site does |
+| Register a command the catalog lacks, one absent for that shell, or one described differently | `test_each_shell_binds_exactly_what_the_catalog_declares_for_it`, `test_a_description_that_differs_from_the_catalogs` | Declare it in `core/commands.py`, then `bind()` |
+| Build the CLI turn without `agent_turn`, or the wake without the turn's agent and skills | `test_an_agent_shapes_the_next_turn`, `test_a_wake_turn_runs_under_the_turns_agent_and_skills` | One `AgentTurn` for the turn and its wakes |
+| Drop `active_skills` from `_conversation_prompt` | `test_the_conversation_prompt_pins_active_skill_bodies` | `session_tiers(..., active_skills=...)` pins the bodies last (K1) |
+| Give `/grill-me` the agent's whole turn, or leave it armed | `test_one_turn_under_the_agents_prompt`, `test_it_is_spent_by_its_one_turn` | `agent_turn(one_shot=True)`; clear `session.one_shot` when it runs |
+| Number `/call`'s rows differently from the replay | `test_a_bare_call_lists_the_lines_a_replay_prints`, `test_a_long_list_keeps_its_numbers` | `core.replay.tool_lines`, numbered from the thread's first call |
+| Import `_render_claims` or `_thread_row` from `tui.screens`, or `_parse_compact_args` from `tui.app` | `test_the_worst_claims_are_listed_first`, `test_the_picker_row_shows_the_preview`, `test_a_strength_override_is_parsed_both_ways` | `core.claims_view.render_claims`, `core.replay.thread_row`, `core.compaction.parse_compact_args` |
+
 ## Input typed before a question (batch 230)
 
 | Change | Test | Fix |

@@ -2642,7 +2642,7 @@ in progress held, so the owner added one Escape key after it, which conhost's
 cooked read takes as "clear the line"; measured clean in every case on both
 platforms, with a line typed after the prompt still answering it.
 
-## 45. A view policy module in `core/` that only one shell reads (open)
+## 45. A view policy module in `core/` that only one shell reads (closed, batch 231 -- the CLI's `/call` reads both, ROADMAP_v3 §89, A84)
 
 Found while building ROADMAP_v3 §55 (TR14), and PRE-EXISTING: it is §49's,
 not this batch's.
@@ -2693,6 +2693,19 @@ no CLI route to a session view, live or rebuilt. Two things to add:
   the CLI side needs no new data, only a surface. That narrows "designing what
   a CLI session view IS" to the question of the command, which is what this
   entry says the real cost is.
+
+**CLOSED (batch 231, with #8, ROADMAP_v3 §89, A84).** The surface is a slash
+command, now that the CLI has slash commands: the owner chose `/call`, which
+lists the thread's tool calls numbered (off `core.replay.tool_lines`, the lines
+a replay prints) and `/call N` opens one. It routes as the TUI's
+`on_call_selected` does -- a session's call shows `live_entries` while this
+process holds the session and `stored_entries` once it does not, a spawn
+prints the run it started, and anything else, or either of those whose target
+cannot be found, shows `call_entries`. As this entry's recheck predicted, no
+new data was needed. `main.py` still imports neither module: the CLI's
+commands are `cli_commands.py`, which does. So both policy modules now have
+two shells reading them, which is the convention made true rather than
+argued.
 
 ## 46. `check_output_policy`'s walk bounds depth and not breadth (closed, batch 127 -- breadth is the wrong axis)
 
@@ -6440,3 +6453,6 @@ re-verification as a comment since batch 159, made against `main` at
   `:1975-1982`). One thing to add: **item 71 above is the live-rendering half
   of the same D12 debt**, so the two should be read together -- a shell with no
   command layer and no live narration is less capable in two ways that compound.
+  **Fixed in batch 231 (ROADMAP_v3 §89, A84)**, after item 71 in batch 228: one
+  catalog in `core/commands.py` both shells bind to, and 18 commands in the
+  CLI's `cli_commands.py`. Item 45 closed with it.

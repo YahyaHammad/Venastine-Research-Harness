@@ -5023,7 +5023,7 @@ class TestNothingPaintsAColourThePaletteDidNotChoose:
         KeyError in a test-only construction."""
         from datetime import datetime
 
-        from tui.screens import _thread_row
+        from core.replay import thread_row as _thread_row
 
         full = _thread_row({"id": "t-1",
                             "created_at": datetime(2026, 8, 24, 9, 30),
@@ -6171,11 +6171,17 @@ class TestThePanelOpensOnWhatIsTyped:
                 app.query_one("#transcript").as_text())
 
     @pytest.mark.asyncio
-    async def test_a_command_registered_anywhere_reaches_the_panel(self):
+    async def test_a_command_registered_anywhere_reaches_the_panel(
+            self, monkeypatch):
         """§18/§19/§21b/§24 register into the same registry, and the panel
-        must see theirs without knowing they exist."""
+        must see theirs without knowing they exist. Declared in the
+        catalog first, which is what registering anywhere means since
+        ROADMAP_v3 §89."""
+        from core.commands import CATALOG, CommandSpec
         from tui.commands import SlashCommand
 
+        monkeypatch.setitem(CATALOG, "zzz-registered-late", CommandSpec(
+            "zzz-registered-late", "a command added at runtime"))
         commands.register(SlashCommand(
             "zzz-registered-late", "a command added at runtime",
             lambda app, args: None))
@@ -7674,12 +7680,21 @@ class TestTheCommandAliases:
                 f"the quit row is {rows[0].strip()!r}; an alias that is "
                 f"named nowhere is one nobody finds")
 
-    def test_an_alias_that_would_shadow_something_is_refused(self):
+    def test_an_alias_that_would_shadow_something_is_refused(
+            self, monkeypatch):
         """Both directions, because both resolve SILENTLY otherwise:
         `get` prefers real names, so the alias would simply stop working
-        and nothing would say why."""
+        and nothing would say why.
+
+        The two are declared in the catalog first, past its own refusal of
+        the same collisions (ROADMAP_v3 §89), so this is still the
+        registry's check being tested."""
+        from core.commands import CATALOG, CommandSpec
         from tui.commands import SlashCommand
 
+        monkeypatch.setitem(CATALOG, "zzz-shadowing-alias", CommandSpec(
+            "zzz-shadowing-alias", "x", aliases=("help",)))
+        monkeypatch.setitem(CATALOG, "exit", CommandSpec("exit", "x"))
         with pytest.raises(ValueError, match="already a command"):
             commands.register(SlashCommand(
                 "zzz-shadowing-alias", "x", lambda app, args: None,
@@ -8418,7 +8433,7 @@ class TestAConfigEditedUnderTheSessionIsSaidNotLogged:
         edited the file in another window."""
         self._file_without(tmp_path, monkeypatch, "max_tokens")
 
-        with caplog.at_level(logging.ERROR, logger="tui.commands"):
+        with caplog.at_level(logging.ERROR, logger="core.commands"):
             rows = commands.matching("/config max_")
 
         assert rows == []
@@ -9018,10 +9033,14 @@ class TestARaisingCommandDoesNotKillTheApp:
     """
 
     @pytest.fixture
-    def raising_command(self):
+    def raising_command(self, monkeypatch):
         """Register `/probeboom`, whose handler raises S08's AttributeError,
         and take it back out again whatever the test does."""
+        from core.commands import CATALOG, CommandSpec
         from tui.commands import SlashCommand
+
+        monkeypatch.setitem(CATALOG, "probeboom", CommandSpec(
+            "probeboom", "raises, for the containment test"))
 
         def _handler(app, args):
             # Exactly what a non-string `additional_tools` element produces.

@@ -1174,6 +1174,45 @@ def _input_budget(model: str, provider_name: Optional[str] = None) -> int:
                - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS)
 
 
+def parse_compact_args(args: str) -> tuple:
+    """(overrides, error). ROADMAP_v2 §21's per-invocation override --
+    applies to this one run and persists nothing, which is the last step
+    of D27's resolution order.
+
+    `/compact`'s grammar in either shell: both parse here, so one cannot
+    accept a spelling the other refuses (ROADMAP_v3 §89; moved from
+    tui/app.py).
+
+    An unrecognised flag is an ERROR, not something to ignore. Silently
+    dropping `--strenght 4` would compact at the default strength while
+    the user believes they asked for something else, and the result looks
+    exactly like a compaction that obeyed them.
+    """
+    overrides: dict = {}
+    tokens = args.split()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("--strength", "-s"):
+            index += 1
+            if index >= len(tokens):
+                return None, "--strength needs a value from 1 to 5."
+            try:
+                overrides["strength"] = int(tokens[index])
+            except ValueError:
+                return None, f"--strength needs a number, got {tokens[index]!r}."
+        elif token.startswith("--strength="):
+            value = token.split("=", 1)[1]
+            try:
+                overrides["strength"] = int(value)
+            except ValueError:
+                return None, f"--strength needs a number, got {value!r}."
+        else:
+            return None, f"Unknown option {token!r}. Usage: /compact [--strength N]"
+        index += 1
+    return overrides, None
+
+
 def compact(memory, model: str, provider_name: str,
             current_turn_start: Optional[int] = None,
             overrides: Optional[dict] = None,

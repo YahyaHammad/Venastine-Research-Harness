@@ -206,7 +206,7 @@ class TestWhatThePickerIsOffered:
     def test_the_picker_row_shows_the_preview(self):
         """The renderer, separately from the query -- a row carrying a
         preview that the screen drops reads as unfixed."""
-        from tui.screens import _thread_row
+        from core.replay import thread_row as _thread_row
 
         text = _thread_row({"id": "abc", "created_at": "2026-08-06",
                             "kind": "chat", "preview": "how does TLS work"})

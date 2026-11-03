@@ -1364,6 +1364,35 @@ def effort_levels_for_model(client, provider_name: str, model: str) -> list[str]
     return _effort_levels(client, provider_name, model)[0]
 
 
+def effort_choice(levels, requested: str, current: Optional[str],
+                  model: str) -> tuple:
+    """`/effort`'s decision in either shell: `(level, sentence, refused)`.
+
+    `levels` is what `effort_levels_for_model` answered for the session's
+    model, `requested` the command's argument and `current` the level in
+    force. The level comes back unchanged for a report or a refusal, None
+    for `auto`, and the requested one when the model accepts it.
+
+    ONE COPY (ROADMAP_v3 §89): the TUI answers on a worker's message and
+    the CLI inline, and what each may accept is the same decision. Moved
+    out of the TUI's `_apply_effort_command`.
+    """
+    if not levels:
+        return current, f"{model} exposes no reasoning-effort control.", False
+    available = ", ".join(levels)
+    if not requested:
+        return (current,
+                f"Effort: {current or 'auto'}. Available: {available} "
+                f"(or 'auto').", False)
+    if requested == "auto":
+        return None, "Effort set to auto.", False
+    if requested in levels:
+        return requested, f"Effort set to {requested}.", False
+    return (current,
+            f"{model} does not support effort {requested!r}. "
+            f"Available: {available}.", True)
+
+
 def _effort_levels(client, provider_name: str, model: str) -> tuple:
     """(levels, authoritative).
 

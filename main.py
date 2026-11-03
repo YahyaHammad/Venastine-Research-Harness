@@ -45,9 +45,22 @@ import core.reasoning.pipeline_storage  # noqa: F401 -- registers PipelineRunRec
 # already run, so a FRESH database never got a pipelinerunrecord table and the
 # first research run died on "no such table". Do not "tidy" these away.
 import storage  # noqa: F401 -- registers ConversationThread, MessageLog
+from agents.manager import GRILL_ME_TASK
+from cli_commands import (
+    ChatSession,
+    attach_summary,
+    forget_memory,
+    print_memories,
+    run_command,
+)
 from core import ansi, config_loader, shell_sessions, workspace_trust
 from core.cancel import CancelToken
-from core.loop import DEFAULT_PROVIDER, RunAgentLoop
+from core.loop import (
+    DEFAULT_PROVIDER,
+    RunAgentLoop,
+    advertisement_facts,
+    agent_turn,
+)
 from core.reasoning.authorization import GRANT_PICKER
 from core.replay import reasoning_text, replay_entries, step_entries
 from database import create_db_and_tables, engine
@@ -428,7 +441,7 @@ def _deliver_held(thread_id) -> None:
 
 
 def _await_sessions(thread_id, *, model, provider_name, effort,
-                    authorization) -> None:
+                    authorization, turn=None, active_skills=()) -> None:
     """Between turns, wait on this conversation's live sessions and run a
     wake turn for each batch (SS2, SS5).
 
@@ -465,12 +478,19 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
 
     The wake turn carries the run's own `authorization`, because it is that
     run continuing -- without it every gated call inside a wake would be
-    denied for a reason about the harness rather than the request.
+    denied for a reason about the harness rather than the request. For the
+    same reason it carries the turn's agent (`turn`, `core.loop.AgentTurn`)
+    and the session's active skills (ROADMAP_v3 §89): a wake under a
+    different prompt from the turn it continues is a different agent
+    answering.
     """
     from core.session_wake import build_wake
 
     if thread_id is None:
         return
+    as_agent = ({} if turn is None else {
+        "context": turn.context, "system_prompt": turn.system_prompt,
+        "max_steps": turn.max_steps})
     announced = False
     # §64 A21. Set by the handler below instead of an unwind; read after the
     # wake turn has finished. A list rather than a `nonlocal` because the
@@ -524,7 +544,8 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                         thread_id=thread_id, text=text, harness=record,
                         model=model, provider_name=provider_name,
                         effort=effort, authorization=authorization,
-                        observe=live)
+                        observe=live, active_skills=active_skills,
+                        **as_agent)
             except Exception as e:
                 logger.exception("Wake turn failed")
                 print(f"\n[Error: {ansi.for_display(e)}]")
@@ -587,35 +608,48 @@ def run_chat(
     Batch 25 (#139): `effort` is the resolved level (resolve_effort). It
     rides every run_agent_conversation call and is printed in the header,
     because a setting that shapes every answer should be visible where the
-    provider and model are."""
-    current_thread_id = thread_id
-    printed_thread_id = False
-    # §21b M16. Built once for the session rather than per turn: the
-    # provider wraps the single _stdin_reader, and building one per turn
-    # would be a new object round the same reader for no gain. None on a
-    # non-tty, which keeps a piped run headless exactly as before.
-    authorization = build_chat_authorization()
+    provider and model are.
+
+    ROADMAP_v3 §89 (#8): a line starting with `/` is a COMMAND, run by
+    `cli_commands.run_command` against the catalog both shells bind to,
+    and never sent to the model -- the TUI's rule since §16. What the
+    commands can change between turns (the thread, the model, the effort,
+    the active agent and skills) is held on one `ChatSession`, which every
+    turn reads."""
+    session = ChatSession(
+        provider_name, model, effort=effort, thread_id=thread_id,
+        # §21b M16. Built once for the session rather than per turn: the
+        # provider wraps the single _stdin_reader, and building one per
+        # turn would be a new object round the same reader for no gain.
+        # None on a non-tty, which keeps a piped run headless exactly as
+        # before.
+        authorization=build_chat_authorization(),
+        # What cli_commands needs from this module, handed over rather
+        # than imported: this file runs as __main__ (see its docstring).
+        ask=lambda prompt: _stdin_reader().readline(prompt),
+        replay=_print_replay, show=_print_entry)
 
     print("Venastine Research Harness — chat mode.")
     print(f"Provider: {provider_name} | Model: {model} | "
           f"Effort: {effort or 'auto'}")
-    if current_thread_id:
-        print(f"Resuming thread: {current_thread_id}")
+    if session.thread_id:
+        print(f"Resuming thread: {session.thread_id}")
         # §27 AC4/T5. --thread had the same gap as the TUI picker: the
         # history loaded and nothing showed it, so a resumed conversation
         # was indistinguishable from a new one until the model answered
         # with context the user could not see. D12 makes the CLI a
         # permanent fallback, so it replays too rather than this being a
         # TUI feature.
-        _print_replay(current_thread_id)
+        _print_replay(session.thread_id)
     else:
         print("Starting a new conversation thread.")
     # ROADMAP_v3 §61 (CN10). The key did only one thing before and now
     # does two, so the banner says which is which. A control whose
     # meaning depends on state and does not announce it is the thing
-    # this project keeps closing. "Twice" since §86 (A81).
+    # this project keeps closing. "Twice" since §86 (A81), and the
+    # commands named since §89, which is how a reader learns they exist.
     print("Ctrl+C twice stops the current turn; Ctrl+C or Ctrl+D at the "
-          "prompt exits.\n")
+          "prompt exits. /help lists commands.\n")
 
     while True:
         if first_message is not None:
@@ -643,125 +677,171 @@ def run_chat(
         if not user_input:
             continue
 
-        if current_thread_id is not None:
-            # SS2/SS19: what was held because nothing was waking this
-            # conversation arrives WITH the user's next message, in the
-            # same thread, before the turn that answers them both.
-            _deliver_held(current_thread_id)
-            sessions.note_user_input(current_thread_id)
+        agent = session.active_agent
+        one_shot = False
+        if user_input.startswith("/"):
+            run_command(session, user_input)
+            if session.quit_requested:
+                # /quit takes Ctrl+D's route, confirmation and all.
+                session.quit_requested = False
+                if _quit_confirmed():
+                    print("Exiting.")
+                    break
+                continue
+            if session.one_shot is None:
+                continue
+            # /grill-me: one turn in this thread under that agent's prompt,
+            # run like a typed message so it prints live and stops the same
+            # way (§18; the TUI's run_one_shot).
+            agent, session.one_shot = session.one_shot, None
+            user_input, one_shot = GRILL_ME_TASK, True
 
-        # ROADMAP_v3 §61 (CN10). A HANDLER rather than an `except
-        # KeyboardInterrupt`, and the difference is what the thread
-        # looks like afterwards. An interrupt unwinds from wherever it
-        # lands -- which can be between a `tool_use` D20 has persisted
-        # and the `tool_result` that pairs with it, leaving a thread the
-        # provider will refuse to continue (#42, M4). The token lets the
-        # loop stop at a boundary it chose and write every row it owes.
-        #
-        # Installed per turn and restored in the `finally`, so Ctrl+C at
-        # the prompt still exits and Ctrl+C during the session wait
-        # still stops the SESSIONS.
-        #
-        # The aim of the key there was always right; the MECHANISM was
-        # not, and batch 147 fixed that end rather than this one. Because
-        # this handler is restored before `_await_sessions` is called, a
-        # Ctrl+C during a WAKE turn met the default handler and unwound
-        # the turn from wherever it landed -- so `_await_sessions` now
-        # installs a handler of its own for the duration of each wake,
-        # which defers the interrupt instead of raising it. See §64 A21.
-        #
-        # `signal.signal` is main-thread only, which is where this runs.
-        # Since §86 the turn prints while it runs, but a step at a time and
-        # only once it has finished, so the line below lands between
-        # printed steps and never inside a streaming answer.
-        #
-        # §86 (A81, #244): the SECOND press inside TURN_STOP_CONFIRM_S. CN10
-        # made the first press stop the turn, and a stray press or one
-        # aimed at copying cost a model turn -- A21's reason, applied to
-        # the binding A21 left alone.
-        cancel = CancelToken()
+        _chat_turn(session, user_input, agent, one_shot=one_shot)
 
-        def _stop_this_turn(_token=cancel):
-            if _token.cancel():
-                print("\n[stopping — the current step finishes first]",
-                      flush=True)
 
-        previous_sigint = signal.signal(signal.SIGINT, _SecondPress(
-            "_stop_this_turn", f"{_again_within()} stops this turn",
-            _stop_this_turn))
-        live = _LiveTurn()
-        try:
-            # SS17. The CLI chat turn is a wake consumer: a session started
-            # here is reported by the loop below, which is what makes
-            # starting one allowed at all.
-            with shell_sessions.consuming():
-                response = RunAgentLoop.run_agent_conversation(
-                    user_goal=user_input,
-                    model=model,
-                    provider_name=provider_name,
-                    thread_id=current_thread_id,
-                    authorization=authorization,
-                    effort=effort,
-                    cancel=cancel,
-                    observe=live,
-                )
-        except Exception as e:
-            logger.exception("Chat turn failed")
-            print(f"\n[Error: {ansi.for_display(e)}]")
-            continue
-        finally:
-            signal.signal(signal.SIGINT, previous_sigint)
+def _chat_turn(session: ChatSession, user_input: str, agent,
+               one_shot: bool = False) -> None:
+    """One turn of `run_chat`'s conversation, and the wake turns after it.
 
-        current_thread_id = response.thread_id
+    `agent` is the session's active agent, or /grill-me's for its one turn
+    (`one_shot`). What the agent changes about the turn is
+    `core.loop.agent_turn`'s to say, the function the TUI's turn calls, so
+    an agent is the same agent in either shell (§89).
+    """
+    if session.thread_id is not None:
+        # SS2/SS19: what was held because nothing was waking this
+        # conversation arrives WITH the user's next message, in the
+        # same thread, before the turn that answers them both.
+        _deliver_held(session.thread_id)
+        sessions.note_user_input(session.thread_id)
 
-        # ROADMAP_v2 §21's "no silent compaction, ever": a notice printed
-        # live when it happened, and one that never arrived live is printed
-        # here, before the answer. §86 (A81): the turn's last step, the
-        # answer included, read from the response it returned.
-        live.finish(response)
-        trailer = False
-        if response.stop_reason != "complete":
-            # #4: name the figures, not just the reason. A user who sees
-            # "token_budget_exceeded" reads it as a size problem -- the
-            # exact misreading item 9 recorded -- so the line now says
-            # what actually happened (spend this turn) alongside the
-            # thread's real size (the provider's own last count). Rare
-            # path, so a storage read for the ctx figure costs nothing.
-            billed = getattr(response, "turn_billed_tokens", None)
-            ctx = 0
-            if current_thread_id:
-                row = storage.get_thread(current_thread_id) or {}
-                ctx = int((row.get("extra_data") or {}).get(
-                    "last_input_tokens") or 0)
-            figures = f" — billed {billed:,} this turn · ctx ~{ctx:,}" \
-                if billed is not None else ""
-            # ROADMAP_v3 §61 (CN5). An empty usage dict means the loop
-            # synthesised this response because the stream was cut, so
-            # the step that was interrupted reported no usage at all and
-            # `billed` is short by it. Stated, because a figure that is
-            # quietly incomplete is worse than one that admits it.
-            if response.stop_reason == "cancelled" and not response.usage:
-                figures += " (the stopped step is not counted)"
-            print(f"[stopped early: {ansi.for_display(response.stop_reason)}"
-                  f"{figures}]")
-            trailer = True
-        # After the answer rather than above it, since §86: above, it
-        # would split a turn's printed steps from its last one.
-        if not printed_thread_id and current_thread_id:
-            print(f"[thread: {current_thread_id}]")
-            printed_thread_id = True
-            trailer = True
-        if trailer:
-            # The answer's own line ends in a blank one; a trailer gets
-            # one of its own before the prompt.
-            print()
+    # #68's facts, for an agent's prompt only: with no agent the loop
+    # builds the default prompt and reads them itself.
+    callable_only, granted = (advertisement_facts(session.authorization)
+                              if agent is not None else (False, None))
+    turn = agent_turn(agent, session.model, session.provider_name,
+                      session.active_skills, callable_only=callable_only,
+                      granted=granted, one_shot=one_shot)
 
-        # SS2/SS5. The turn is over, but this conversation may not be: a
-        # session it started reports later, and that report starts a turn
-        # of its own. Nothing is read from the user until they are done.
-        _await_sessions(current_thread_id, model=model,
-                        provider_name=provider_name, effort=effort,
-                        authorization=authorization)
+    # ROADMAP_v3 §61 (CN10). A HANDLER rather than an `except
+    # KeyboardInterrupt`, and the difference is what the thread
+    # looks like afterwards. An interrupt unwinds from wherever it
+    # lands -- which can be between a `tool_use` D20 has persisted
+    # and the `tool_result` that pairs with it, leaving a thread the
+    # provider will refuse to continue (#42, M4). The token lets the
+    # loop stop at a boundary it chose and write every row it owes.
+    #
+    # Installed per turn and restored in the `finally`, so Ctrl+C at
+    # the prompt still exits and Ctrl+C during the session wait
+    # still stops the SESSIONS.
+    #
+    # The aim of the key there was always right; the MECHANISM was
+    # not, and batch 147 fixed that end rather than this one. Because
+    # this handler is restored before `_await_sessions` is called, a
+    # Ctrl+C during a WAKE turn met the default handler and unwound
+    # the turn from wherever it landed -- so `_await_sessions` now
+    # installs a handler of its own for the duration of each wake,
+    # which defers the interrupt instead of raising it. See §64 A21.
+    #
+    # `signal.signal` is main-thread only, which is where this runs.
+    # Since §86 the turn prints while it runs, but a step at a time and
+    # only once it has finished, so the line below lands between
+    # printed steps and never inside a streaming answer.
+    #
+    # §86 (A81, #244): the SECOND press inside TURN_STOP_CONFIRM_S. CN10
+    # made the first press stop the turn, and a stray press or one
+    # aimed at copying cost a model turn -- A21's reason, applied to
+    # the binding A21 left alone.
+    cancel = CancelToken()
+
+    def _stop_this_turn(_token=cancel):
+        if _token.cancel():
+            print("\n[stopping — the current step finishes first]",
+                  flush=True)
+
+    previous_sigint = signal.signal(signal.SIGINT, _SecondPress(
+        "_stop_this_turn", f"{_again_within()} stops this turn",
+        _stop_this_turn))
+    live = _LiveTurn()
+    try:
+        # SS17. The CLI chat turn is a wake consumer: a session started
+        # here is reported by the loop below, which is what makes
+        # starting one allowed at all.
+        with shell_sessions.consuming():
+            response = RunAgentLoop.run_agent_conversation(
+                user_goal=user_input,
+                model=turn.model,
+                provider_name=turn.provider_name,
+                max_steps=turn.max_steps,
+                thread_id=session.thread_id,
+                context=turn.context,
+                system_prompt=turn.system_prompt,
+                active_skills=session.active_skills,
+                authorization=session.authorization,
+                effort=session.effort,
+                cancel=cancel,
+                observe=live,
+            )
+    except Exception as e:
+        logger.exception("Chat turn failed")
+        print(f"\n[Error: {ansi.for_display(e)}]")
+        return
+    finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+
+    session.thread_id = response.thread_id
+
+    # ROADMAP_v2 §21's "no silent compaction, ever": a notice printed
+    # live when it happened, and one that never arrived live is printed
+    # here, before the answer. §86 (A81): the turn's last step, the
+    # answer included, read from the response it returned.
+    live.finish(response)
+    trailer = False
+    if response.stop_reason != "complete":
+        # #4: name the figures, not just the reason. A user who sees
+        # "token_budget_exceeded" reads it as a size problem -- the
+        # exact misreading item 9 recorded -- so the line now says
+        # what actually happened (spend this turn) alongside the
+        # thread's real size (the provider's own last count). Rare
+        # path, so a storage read for the ctx figure costs nothing.
+        billed = getattr(response, "turn_billed_tokens", None)
+        ctx = 0
+        if session.thread_id:
+            row = storage.get_thread(session.thread_id) or {}
+            ctx = int((row.get("extra_data") or {}).get(
+                "last_input_tokens") or 0)
+        figures = f" — billed {billed:,} this turn · ctx ~{ctx:,}" \
+            if billed is not None else ""
+        # ROADMAP_v3 §61 (CN5). An empty usage dict means the loop
+        # synthesised this response because the stream was cut, so
+        # the step that was interrupted reported no usage at all and
+        # `billed` is short by it. Stated, because a figure that is
+        # quietly incomplete is worse than one that admits it.
+        if response.stop_reason == "cancelled" and not response.usage:
+            figures += " (the stopped step is not counted)"
+        print(f"[stopped early: {ansi.for_display(response.stop_reason)}"
+              f"{figures}]")
+        trailer = True
+    # After the answer rather than above it, since §86: above, it
+    # would split a turn's printed steps from its last one.
+    if not session.printed_thread_id and session.thread_id:
+        print(f"[thread: {session.thread_id}]")
+        session.printed_thread_id = True
+        trailer = True
+    if trailer:
+        # The answer's own line ends in a blank one; a trailer gets
+        # one of its own before the prompt.
+        print()
+
+    # SS2/SS5. The turn is over, but this conversation may not be: a
+    # session it started reports later, and that report starts a turn
+    # of its own -- under the same agent, prompt and skills, because it
+    # IS this turn continuing. Nothing is read from the user until they
+    # are done.
+    _await_sessions(session.thread_id, model=turn.model,
+                    provider_name=turn.provider_name, effort=session.effort,
+                    authorization=session.authorization, turn=turn,
+                    active_skills=session.active_skills)
 
 
 def build_research_authorization(grant_spec, attended: bool = False):
@@ -1882,31 +1962,11 @@ def run_memory_command(args) -> int:
     each row, because "which of these follows me to another project" is the
     question a user pruning memories is actually asking.
     """
-    from memories.manager import manager as memory_manager
-    from storage import forget_memory
-
+    # cli_commands prints both, so the flags and /memories and /forget
+    # cannot come to list or refuse two ways (§89).
     if args.forget:
-        try:
-            memory_id = UUID(args.forget)
-        except ValueError:
-            print(f"Not a memory id: {args.forget!r}. Run --memories to list them.")
-            return 1
-        if forget_memory(memory_id):
-            print(f"Forgot {memory_id}.")
-            return 0
-        print(f"No memory with id {memory_id}.")
-        return 1
-
-    rows = memory_manager.visible()
-    if not rows:
-        where = memory_manager.scope_path() or "(no project resolved)"
-        print(f"No durable memories visible from {where}.")
-        return 0
-    for row in rows:
-        marker = "global " if row["scope"] == "global" else "project"
-        category = f" [{row['category']}]" if row.get("category") else ""
-        print(f"{row['id']}  {marker}{category}  "
-              f"{ansi.for_display(row['content'])}")
+        return 0 if forget_memory(args.forget, "--memories") else 1
+    print_memories()
     return 0
 
 
@@ -1946,7 +2006,8 @@ def run_summary_command(args, provider_name: str, model: str) -> int:
 def run_init_command(args, provider_name: str, model: str) -> int:
     """`--init`, ROADMAP_v2 §24 (M21's precedent again).
 
-    A flag rather than a slash command because the CLI has no command layer;
+    A flag because the CLI had no command layer when it was written, and
+    `/init` is still not one of its commands (core/commands.py says why);
     everything else -- which document set, whether an existing file is
     overwritten, whether workspace trust is re-granted -- is decided in
     project_init.generator, exactly as it is for the TUI's /init.
@@ -2038,10 +2099,7 @@ def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
     Goes through core.loop.attach_ref, the same writer the TUI's /ref uses, so
     the two shells cannot disagree about the cap or the stored shape.
     """
-    from core import compaction
-    from core.loop import attach_ref
     from core.memory import ConversationMemory
-    from storage import thread_preview
 
     memory = ConversationMemory(thread_id=thread_id)
     for spec in specs:
@@ -2054,24 +2112,17 @@ def attach_cli_refs(thread_id, specs, provider_name: str, model: str) -> None:
             print("[--ref: that is this thread; skipped]")
             continue
         try:
-            notice = compaction.summarize_thread(source, model, provider_name)
+            # #171's label and the shared writer, through the helper /ref
+            # uses too (§89).
+            _ok, message = attach_summary(memory, source, model,
+                                          provider_name)
         except Exception as e:  # noqa: BLE001 -- a failed reference must not
             # stop the session from starting.
             logger.warning("Could not summarise thread %s: %s", source, e)
             print(f"[--ref: could not summarise {source}: "
                   f"{ansi.for_display(e)}]")
             continue
-        if notice is None:
-            print(f"[--ref: nothing to summarise in {source}]")
-            continue
-        # #171. The label the TUI's picker has always attached: the same
-        # first-user-message preview, so both shells store identical rows
-        # and the prompt tier names what the material IS instead of
-        # "(no preview)". Computed only after the summarise succeeded --
-        # a failed reference stores no row to label.
-        ok, message = attach_ref(memory, source, notice["text"],
-                                 thread_preview(source))
-        print(f"[--ref: {message}]")
+        print(f"[--ref: {ansi.for_display(message)}]")
 
 
 def build_chat_authorization():
@@ -2426,10 +2477,12 @@ def build_parser() -> argparse.ArgumentParser:
              ".venastine/ content -- intended for scripts/CI where the "
              "interactive prompt is unavailable.",
     )
-    # ROADMAP_v2 §21b (M15). The CLI has no slash-command layer, so these
-    # are flags rather than /memories and /forget -- and they exist for the
-    # CLI specifically because M16 makes a CLI-only user able to WRITE a
-    # durable memory, and they would otherwise have no way to remove one.
+    # ROADMAP_v2 §21b (M15). Flags because the CLI had no slash-command
+    # layer then -- and they exist for the CLI specifically because M16
+    # makes a CLI-only user able to WRITE a durable memory, and they would
+    # otherwise have no way to remove one. ROADMAP_v3 §89 added /memories
+    # and /forget mid-chat; the flags stay for a scripted run, and both
+    # print through cli_commands, so they cannot list two ways.
     parser.add_argument(
         "--memories",
         action="store_true",
@@ -2441,11 +2494,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ID",
         help="Delete one durable memory by id (see --memories) and exit.",
     )
-    # ROADMAP_v2 §21c (M21). Flags rather than /summary and /ref for the same
-    # reason --memories is a flag: the CLI has no slash-command layer, and
-    # adding one is §23's business rather than this section's. The accepted
-    # limit is that a CLI user attaches a reference at LAUNCH -- mid-conversation
-    # referencing is the TUI's.
+    # ROADMAP_v2 §21c (M21). Flags for the reason --memories is a flag. M21's
+    # accepted limit -- a CLI user attaches a reference only at LAUNCH -- was
+    # lifted by ROADMAP_v3 §89's /summary and /ref; the flags stay for a
+    # scripted run, and --ref attaches through the helper /ref uses.
     parser.add_argument(
         "--summary",
         metavar="THREAD",

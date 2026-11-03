@@ -25,6 +25,9 @@ from core.config_loader import AgentDef
 from memories.manager import manager as memory_manager
 from tools.context import ToolContext
 
+#: What /grill-me asks, in either shell (§18; shared since ROADMAP_v3 §89).
+GRILL_ME_TASK = "Grill this thread: surface what still needs a decision."
+
 
 class AgentManager:
     """Lookup + scope composition over the loader's discovered agents."""

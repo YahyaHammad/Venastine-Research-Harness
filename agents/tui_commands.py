@@ -13,8 +13,8 @@ deliberately does NOT import tui.app, so app.py can import it without a
 cycle.
 """
 
-from agents.manager import manager
-from tui.commands import SlashCommand
+from agents.manager import GRILL_ME_TASK, manager
+from tui.commands import bind
 from tui.commands import registry as commands
 
 
@@ -132,21 +132,15 @@ def _cmd_grill(app, args: str) -> None:
     # decided here. (Review f19's "no context, deliberately" answered a
     # question §25 R15 replaced -- what matters now is not which policy
     # governs but whether anything can answer, and only the run knows.)
-    app.run_one_shot(
-        agent,
-        "Grill this thread: surface what still needs a decision.",
-    )
+    app.run_one_shot(agent, GRILL_ME_TASK)
 
 
 def register_agent_commands() -> None:
     """Idempotent — registering by name overwrites, matching §16's
     register_builtin_commands()."""
     for command in (
-        SlashCommand("agent", "switch the active agent", _cmd_agent,
-                     "[name|default]"),
-        SlashCommand("goal", "set the thread's persistent objective",
-                     _cmd_goal, "[text|clear]"),
-        SlashCommand("grill-me", "surface what still needs a decision",
-                     _cmd_grill),
+        bind("agent", _cmd_agent),
+        bind("goal", _cmd_goal),
+        bind("grill-me", _cmd_grill),
     ):
         commands.register(command)
