@@ -166,6 +166,9 @@ _KNOWN_CONFIDENCE = {
     "grounding_weight_factor": float,
     "critic_weight_factor": float,
     "assumption_flag_penalty": float,
+    # Retired by ROADMAP_v3 §90 and still KNOWN, as `ensemble_n` is (E4):
+    # unknown keys raise, so dropping it would stop every settings.json
+    # that sets it from loading. effective_confidence warns instead.
     "disagreement_penalty_factor": float,
     "non_factual_score_cap": float,
     "source_quality_floor": float,
@@ -1740,7 +1743,6 @@ _CONFIDENCE_KNOBS = {
     "grounding_weight_factor": _UNIT,
     "critic_weight_factor": _UNIT,
     "assumption_flag_penalty": _UNIT,
-    "disagreement_penalty_factor": _UNIT,
     "non_factual_score_cap": _UNIT,
     "source_quality_floor": _UNIT,
     "authority_full_credit": _UNIT,
@@ -1770,7 +1772,6 @@ def _confidence_defaults() -> dict:
         "grounding_weight_factor": cs.GROUNDING_WEIGHT_FACTOR,
         "critic_weight_factor": cs.CRITIC_WEIGHT_FACTOR,
         "assumption_flag_penalty": cs.ASSUMPTION_FLAG_PENALTY,
-        "disagreement_penalty_factor": cs.DISAGREEMENT_PENALTY_FACTOR,
         "non_factual_score_cap": cs.NON_FACTUAL_SCORE_CAP,
         "source_quality_floor": cs.SOURCE_QUALITY_FLOOR,
         "authority_full_credit": cs.AUTHORITY_FULL_CREDIT,
@@ -1910,6 +1911,12 @@ def effective_confidence(warn: bool = False) -> dict:
     """
     values = _confidence_defaults()
     supplied = get_settings().get("confidence") or {}
+    if warn and "disagreement_penalty_factor" in supplied:
+        logger.warning(
+            "Ignoring confidence.disagreement_penalty_factor: a claim most "
+            "ensemble candidates did not assert is sent to Pass 6a/6b to be "
+            "checked now, and nothing is subtracted for it (ROADMAP_v3 §90). "
+            "Remove the key from settings.json.")
     _apply_scalar_knobs(values, supplied, _CONFIDENCE_KNOBS, "confidence", warn)
     _apply_grounding_weights(values, supplied.get("grounding_weights"), warn)
     _apply_tier_thresholds(values, supplied.get("tier_thresholds"), warn)

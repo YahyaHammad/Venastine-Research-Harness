@@ -101,6 +101,10 @@ OMITTED = {
         "vestigial -- the roster's length decides the count now, and the "
         "loader warns when this is set, so a template carrying it would "
         "ship that warning to everyone who ran the command",
+    "confidence.disagreement_penalty_factor":
+        "retired by ROADMAP_v3 §90 for the same reason as ensemble_n: "
+        "disagreement routes a claim to be checked and subtracts nothing, "
+        "and the loader warns when this is set",
     "ensemble_mode":
         "resolved as `config.ENSEMBLE_MODE if value is None`, so writing "
         "`false` is not a restatement of the default but a decision to "

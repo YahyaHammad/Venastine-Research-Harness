@@ -867,8 +867,10 @@ Implemented against `google-genai==1.0.0` with all SDK shapes verified by inspec
 > ensemble mode made grounding — the pipeline's strongest evidence — count for less, and
 > because the maximum stayed `0.85` the term could only ever *cost* a well-grounded claim:
 > a claim Pass 3a grounded and Pass 3b found nothing wrong with dropped HIGH → MEDIUM at
-> 2-of-3 agreement. It is now a **disagreement penalty** (E8), subtracted like
-> `ASSUMPTION_FLAG_PENALTY`.
+> 2-of-3 agreement. It became a **disagreement penalty** (E8), subtracted like
+> `ASSUMPTION_FLAG_PENALTY`, and ROADMAP_v3 §90 (A85, batch 232) retired that for
+> issue #12: a factual claim at most half the candidates asserted is routed to the
+> 6a/6b loop to be checked, and nothing is subtracted.
 >
 > **Decisions record: E1–E14.** Defined in `ROADMAP_v2.md`'s Design Decisions Record;
 > this section's build notes are in DEVLOG §10-revisit. The acceptance criteria at the end

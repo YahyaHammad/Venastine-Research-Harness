@@ -288,7 +288,7 @@ code:
 | `confidence.grounding_weight_factor` | `0.5` | Weight of the grounding term |
 | `confidence.critic_weight_factor` | `0.35` | Weight of the critic term |
 | `confidence.assumption_flag_penalty` | `0.15` | Subtracted per assumption flag |
-| `confidence.disagreement_penalty_factor` | `0.15` | Subtracted in proportion to cross-candidate dissent |
+| `confidence.disagreement_penalty_factor` | — | Retired in batch 232: still accepted, warns, and does nothing. A claim the ensemble disagrees about is checked instead of marked down |
 | `confidence.non_factual_score_cap` | `0.65` | Ceiling for claims that were never grounded |
 | `confidence.grounding_weights` | `1.0 / 0.5 / 0.0` | Per grounded / partial / ungrounded |
 | `confidence.tier_thresholds` | `0.8 / 0.55 / 0.3` | HIGH / MEDIUM / LOW; must stay ordered |
@@ -336,7 +336,7 @@ where *nothing* matched is treated as a failure. Every number in `04_confidence.
 
 Set `CRITIC_MODEL` and passes 3a, 3b and 6c run on a *different* provider and model from the one that wrote the answer. A model checking its own output brings its own blind spots to the inspection.
 
-**Ensemble mode** extends the same idea to the answer itself. List `{provider_name, model}` pairs under `ensemble_models` in `config.yaml` (a settings.json key is deliberately absent — choosing providers multiplies spend, so it stays in the harness's own file) and Pass 1 runs once per entry, each candidate on its own provider and model. Fewer than two *distinct* pairs is refused: N copies of one model agree most confidently on that model's systematic errors, which is exactly where agreement has to mean something. Claims extracted from all candidates are pooled, and factual claims take a disagreement penalty of `0.15 × (1 − consistency)` before tiering — unanimity costs nothing, dissent demotes. A candidate that fails mid-run is named and skipped; if only one survives, the run degrades to the ordinary single-response path rather than scoring an "ensemble of one". Artifacts come out as `01_candidate_1.md`, `01_candidate_2.md`, … numbered to match each claim's `asserted_by_candidates` tags.
+**Ensemble mode** extends the same idea to the answer itself. List `{provider_name, model}` pairs under `ensemble_models` in `config.yaml` (a settings.json key is deliberately absent — choosing providers multiplies spend, so it stays in the harness's own file) and Pass 1 runs once per entry, each candidate on its own provider and model. Fewer than two *distinct* pairs is refused: N copies of one model agree most confidently on that model's systematic errors, which is exactly where agreement has to mean something. Claims extracted from all candidates are pooled. A factual claim no more than half the candidates asserted is *contested*: it keeps the score its evidence earns and goes through the revise-and-revalidate passes to be checked, with the count in its feedback. Since batch 232; it used to be marked down instead, which no revision could undo. A candidate that fails mid-run is named and skipped; if only one survives, the run degrades to the ordinary single-response path rather than scoring an "ensemble of one". Artifacts come out as `01_candidate_1.md`, `01_candidate_2.md`, … numbered to match each claim's `asserted_by_candidates` tags.
 
 ### What you get out
 
@@ -1005,7 +1005,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 8846 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
+Run the test suite with `pytest` — 8874 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
 
 ## Documentation
 

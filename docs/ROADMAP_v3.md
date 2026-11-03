@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§90. Disagreement routed to a check, not deducted** - **(BUILT in batch 232)** (on an ensemble run, cross-candidate disagreement was a 0.15 penalty nothing else read, and it could not be worked off: at 1 of 3 it took a partially grounded claim from MEDIUM to LOW, the loop re-scored it under the same penalty every round, and D2 published it UNVERIFIED. D1 now sends a factual claim at most half the candidates asserted to the 6a/6b loop to be checked, 6a is told the count, and the penalty is retired; issue #12, A85)
 - **§89. One command catalog, and the CLI's slash commands** - **(BUILT in batch 231)** (the CLI had no command layer, so `/help` at its prompt was a billed chat turn and every feature that wanted the CLI shipped a launch flag. One catalog in `core/commands.py` now declares every command once and both shells bind handlers to it; the CLI gets 18 commands, among them `/call`, the CLI's route to item 45's call and session views, and a `/` line that names nothing is refused; A84)
 - **§88. Input typed before a question, and the launcher's stdin** - **(BUILT in batch 230)** (`ask()` drained the queue, which holds only what the pump already took, so half a line typed before a question became the front of its answer -- measured "sta" + "fresh" on both platforms -- and on Windows a line typed before the first question answered it. The terminal's own buffer is flushed first now, with an Escape for a Windows read in progress; and the npm launcher pauses and unrefs stdin after its consent question, measured harmless both ways; A83)
 - **§87. Two provider facts about temperature, answered from the providers' own pages** - **(BUILT in batch 229)** (two checks §10's revisit recorded as needing a live key: the default really is 1.0, so the deleted `ENSEMBLE_TEMPERATURE` sent what the provider would have used; and OpenAI's reasoning models refuse a temperature whenever reasoning effort is not `none`, which at the shipped `high` is always, while the guard listed only Anthropic names. It now follows OpenAI's rule on `OPENAI`, and the two Gemini models that silently ignore a temperature are listed; A82)
@@ -2806,6 +2807,98 @@ leaked PID.
   `AGENTS.md` names by name.
 ---
 
+## §90. Disagreement routed to a check, not deducted
+
+**Built in batch 232**, from issue #12, which ROADMAP §10's revisit recorded
+as a future section rather than build into itself.
+
+**Measured.** On an ensemble run Pass 5 subtracted `0.15 * (1 - consistency)`
+from a factual claim (E8), and nothing else read the signal: D2 routes on
+`retry_count`, and no pass consumed `consistency_score`. Swept through
+`score_claim`, the penalty changed a tier in exactly the shapes where at most
+half the candidates asserted the claim (1 of 2, 1 of 3, 1 or 2 of 4). A
+grounded claim fell from HIGH (0.85) to MEDIUM there, which is a judgement.
+A partially grounded one fell from MEDIUM (0.60) to LOW (0.50 at 1 of 3),
+which is a defect: LOW is flagged, so D1 sent the claim to 6a without saying
+why, and 6b re-scored it under the same penalty, because who asserted a
+claim does not change when it is reworded. A claim whose grounding never
+moved rode the loop to D2's cap and was published UNVERIFIED, at the cost of
+every round on the way.
+
+**The owner's choices.** Route instead of deduct: the penalty is retired. A
+claim is contested when at most half the candidates asserted it. 6a is told
+the count, and not the other candidates' answers.
+
+**Contested.** `score_claim` marks a factual claim `contested` when its
+consistency is at most `CONTESTED_SHARE` (0.5), and records the mark in
+`score_breakdown` beside the consistency score and its denominator (E12).
+The score is the non-ensemble formula with no term for agreement, so §10's
+byte-for-byte regression guard now covers the ensemble case too: there is
+one formula. E9 stands, enforced in one place, the branch that records the
+mark: a speculative or synthesis claim is never asked, and its breakdown
+carries no `contested` key (B10). An unreported numerator (B7) is not
+contested, and a duplicated or out-of-range one is deduplicated and clamped
+first (B8), so `[1, 1]` of three is contested and `[1, 2, 3, 4]` of three is
+not.
+
+**D1 routes it.** D1 flags every claim whose tier is flagged, as before, and
+every contested claim whatever it scored. It is still pure code: it reads the
+mark Pass 5 wrote (`is_contested`), and the loop's existing passes do the
+checking, so no gate gains a model call. 6a and 6b are one batched call each
+per round, so a contested claim adds tokens to a round that was running
+anyway, and two calls only on a run where nothing else was flagged. **Entry
+only.** The loop keeps a claim for its tier and never for being contested; a
+loop that did would hold every contested claim to D2's cap, which is the
+penalty's defect again. A contested claim the check clears leaves after one
+round, and one the check fails is flagged on its tier like any other.
+
+**6a is told.** A contested claim's entry in 6a's batch carries
+`disagreement_feedback: {"asserted_by": k, "of": n}`, deduplicated and out of
+the candidates that produced text. `revise.md` says what to do with it: check
+the claim against its grounding, keep the text if the grounding holds it,
+narrow it if not, and do not write the disagreement into the claim.
+`revalidate.md` says a claim 6a only checked may come back unchanged. D1's
+checkpoint says how many claims it took for disagreement.
+
+**The settings key.** `confidence.disagreement_penalty_factor` stays a known
+key, as E4 kept `ensemble_n`: unknown keys raise, so removing it would stop
+every settings.json that sets it from loading. `effective_confidence` warns
+when it is set and applies nothing.
+
+**Tests.** 28 new: 20 in `tests/test_confidence_scoring.py` (the threshold
+over ten shares, no share changing a score, the measured MEDIUM case, E9, B7,
+B8, the reader, and the retired key) and 8 in `tests/test_orchestrator.py`
+(routing end to end, what 6a is sent, the loop's exit both ways, D1's count,
+and `revise.md` read against the keys 6a is sent). Ten scoring tests asserted
+the penalty; they assert the routing now. Twenty mutations, all red, with a
+green control. E9 was first written twice, in the mark's condition and in
+the branch that records it, so deleting either changed nothing; it is
+enforced once.
+
+### What §90 deliberately does not change
+
+**Non-factual claims** (E9). Whether candidates declining to speculate says
+anything about a speculative claim is still a judgment nobody has made.
+
+**The tier of a checked claim.** It comes from 6b's grounding and critique,
+as every flagged claim's does. The consistency stays in the breakdown and
+`/claims` prints `contested` beside it, so a reader can see that a HIGH claim
+was contested and checked. Pass 6c's annotation and the final synthesis are
+unchanged.
+
+**What 6a sees.** The count, not the other candidates' answers (owner's
+choice): each is a whole answer, every round.
+
+**The threshold.** A module constant, not a settings key (owner's choice).
+
+### Design Decisions Record — §90 (A85)
+
+| id | decision |
+|---|---|
+| **A85** | **Cross-candidate disagreement routes a claim to the 6a/6b loop instead of lowering its score.** A factual claim asserted by at most half the candidates that produced text (`CONTESTED_SHARE`, after B8's dedupe and clamp; B7's unreported numerator excluded) is `contested`, recorded in `score_breakdown`. D1 flags a claim that is contested or whose tier is flagged; the loop keeps a claim for its tier only. A contested claim's 6a entry carries `disagreement_feedback` with the count. The score has no agreement term on any run. `confidence.disagreement_penalty_factor` stays a known settings key and warns. Supersedes E8; E9 and E12 stand. Resolves issue #12; the owner chose routing over deduction, at most half as the threshold, and the count as 6a's input |
+
+---
+
 ## §89. One command catalog, and the CLI's slash commands
 
 **Built in batch 231**, from issue #8 and register item 45. Both are D12's
@@ -2901,10 +2994,11 @@ could not see an answer off by one.
 `--secrets` stay, for a scripted run. `--memories`, `--forget` and `--ref`
 now print and attach through the same helpers as their commands.
 
-**The fourteen the CLI still lacks.** Four by design: `/theme`, `/copy`,
+**The fifteen the CLI still lacks.** Four by design: `/theme`, `/copy`,
 `/mentions` and `/kill`, the last because the CLI's prompt waits until
-background sessions finish. The rest are catalogued as not yet built, and
-the CLI's `/help` lists them with where to go instead.
+background sessions finish. The other eleven are catalogued as not yet
+built, and the CLI's `/help` lists them with where to go instead. (This
+said fourteen until batch 232 counted the catalog.)
 
 **`/model` in the CLI is not remembered.** The TUI's choice is stored in its
 preference store beside settings.json, which the CLI does not read; the CLI

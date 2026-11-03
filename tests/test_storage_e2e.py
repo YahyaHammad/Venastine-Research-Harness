@@ -122,7 +122,32 @@ def _schema_cache_is_put_back():
 
 
 @pytest.fixture(scope="module")
-def real_storage(tmp_path_factory, _schema_cache_is_put_back):
+def _replay_is_put_back():
+    """Batch 232. The same last word as `_schema_cache_is_put_back`, for
+    `core.replay`, which binds `archive_history` at import.
+
+    Two tests here used to `importlib.reload(core.replay)` to point it at
+    the real database. Restoring `sys.modules` cannot undo a reload -- the
+    module object is the same one, with a new function in it -- so every
+    later test on the worker replayed threads out of this file's deleted
+    database, through a fake storage that had the rows. MEASURED:
+    `pytest tests/test_storage_e2e.py tests/test_cli_commands.py::TestCall`
+    failed six tests, and a full run failed them whenever xdist happened to
+    schedule the two files on one worker in that order.
+    """
+    import core.replay
+
+    before = core.replay.archive_history
+    yield
+    assert core.replay.archive_history is before, (
+        "core.replay still reads a storage module real_storage has torn "
+        "down. Patch `core.replay.archive_history` with monkeypatch in the "
+        "test that needs the real one; never reload the module.")
+
+
+@pytest.fixture(scope="module")
+def real_storage(tmp_path_factory, _schema_cache_is_put_back,
+                 _replay_is_put_back):
     """`storage` and `database` running on real SQLModel against a
     throwaway database, with core.memory rebound to them.
 
@@ -1294,7 +1319,7 @@ def test_thread_preview_reads_the_archive_not_the_view(
 
 
 def test_replaying_a_compacted_thread_shows_the_original_first_message(
-        real_storage, compactor):
+        real_storage, compactor, monkeypatch):
     """AC5, and T3's reason for existing.
 
     `memory.messages` on a compacted thread BEGINS with the synthesized
@@ -1307,15 +1332,17 @@ def test_replaying_a_compacted_thread_shows_the_original_first_message(
     checkpoint exists, which is exactly how §21a's watermark defect survived
     849 tests.
     """
-    import importlib
-
     import core.replay as replay_module
     from core import compaction
     from core.memory import SUMMARY_PREFIX, ConversationMemory
 
     # core/replay.py bound archive_history at import, against the fake
-    # storage every other module was rebound away from.
-    importlib.reload(replay_module)
+    # storage every other module was rebound away from. PATCHED, NOT
+    # RELOADED (batch 232): a reload outlives the test and leaves
+    # core.replay reading this file's deleted database in every later test
+    # on the worker. See `_replay_is_put_back`.
+    monkeypatch.setattr(replay_module, "archive_history",
+                        real_storage.archive_history)
 
     memory = ConversationMemory()
     memory.add_user_message("THE ORIGINAL FIRST QUESTION " + "x" * 200)
@@ -1344,20 +1371,20 @@ def test_replaying_a_compacted_thread_shows_the_original_first_message(
 # dicts, which is exactly what a test asserting they stay separate must not
 # rely on.
 
-def test_a_thread_summary_does_not_compact_the_thread(real_storage, compactor):
+def test_a_thread_summary_does_not_compact_the_thread(real_storage, compactor,
+                                                      monkeypatch):
     """M18, against real SQL. ThreadSummary and CompactionCheckpoint carry
     almost the same columns and mean opposite things: `latest_checkpoint`
     resolves by timestamp and drives the derived view, so a summary written
     into that table would become the live watermark -- being newest -- and fold
     the thread it was only meant to describe.
     """
-    import importlib
-
     import core.replay as replay_module
     from core import compaction
     from core.memory import ConversationMemory
 
-    importlib.reload(replay_module)
+    monkeypatch.setattr(replay_module, "archive_history",
+                        real_storage.archive_history)
 
     memory = ConversationMemory()
     memory.add_user_message("THE ORIGINAL FIRST QUESTION " + "x" * 200)

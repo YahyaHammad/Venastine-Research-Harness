@@ -1,6 +1,6 @@
 # Pass 6b — Re-validate
 
-You will receive the revised claims from Pass 6a — ONLY the claims that were just rewritten, not the full original claim set.
+You will receive the revised claims from Pass 6a — ONLY the claims it was just given, not the full original claim set. Most were rewritten; a claim it was asked only to check may come back with its text unchanged, and it is re-validated all the same.
 
 Re-run the same checks Pass 3a (source grounding) and Pass 3b (critic) performed, but scoped to just this revised subset:
 

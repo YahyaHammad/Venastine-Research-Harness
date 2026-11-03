@@ -6,8 +6,9 @@ for factual claims) -> 3c -> 4 (all claims) -> Pass 5 (code) -> D1 -> the
 6a/6b/D2 retry loop -> 6c (template) -> merge -> final synthesis.
 
 SCOPE OF THIS VERSION: core sequential pipeline with optional ensemble
-mode (ROADMAP §10: N-candidate Pass 1 generation + cross-candidate
-consistency check feeding Pass 5's scoring). No filesystem output yet
+mode (ROADMAP §10: N-candidate Pass 1 generation + a cross-candidate
+consistency check, whose contested claims D1 routes to the 6a/6b loop,
+ROADMAP_v3 §90). No filesystem output yet
 (returns a PipelineRun object; the /output/<run_id>/ file-writing system
 is a separate, later piece of work).
 
@@ -79,7 +80,7 @@ from core import pipeline_models
 from core.config_loader import effective_confidence, effective_source_scoring
 from core.loop import RunAgentLoop, advertisement_facts
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
-from core.reasoning.confidence_scoring import run_confidence_tiering
+from core.reasoning.confidence_scoring import is_contested, run_confidence_tiering
 from core.reasoning.events import PipelineEvent
 from core.reasoning.json_retry import parse_json_response as _parse_json_response
 from core.reasoning.json_retry import retry_until_json
@@ -1004,6 +1005,28 @@ def _apply_fallback(claim: Claim) -> None:
     claim.final_text = claim.revision_text or claim.text
 
 
+def _revision_request(claim: Claim) -> dict:
+    """One claim's entry in Pass 6a's batch: the claim and the feedback
+    that put it there.
+
+    `disagreement_feedback` only on a contested claim (ROADMAP_v3 §90),
+    because D1 may have flagged it for that alone, and 6a cannot address a
+    reason it is not given. `revise.md` says what to do with one."""
+    entry = {
+        "claim": vars(claim),
+        "critic_feedback": {"fallacies": claim.fallacies, "contradictions": claim.contradictions},
+        "grounding_feedback": claim.grounding_sources,
+        "assumption_flags": claim.assumption_flags,
+    }
+    if is_contested(claim):
+        entry["disagreement_feedback"] = {
+            # Deduplicated, as the consistency score it came from is (B8).
+            "asserted_by": len(set(claim.asserted_by_candidates)),
+            "of": claim.score_breakdown["consistency_denominator"],
+        }
+    return entry
+
+
 # ============================================================================
 # ---- The pipeline ------------------------------------------------------
 # ============================================================================
@@ -1234,8 +1257,9 @@ def stream_deep_research_pipeline(
             else:
                 # DEGRADE TO THE SINGLE-CANDIDATE PATH (E7), rather than
                 # scoring one candidate as an ensemble of one -- which would
-                # give every claim consistency 1.0 and a zero penalty while
-                # reporting that agreement as if it had been corroborated.
+                # give every claim consistency 1.0, so none could ever be
+                # contested, while reporting that agreement as if it had
+                # been corroborated.
                 # ensemble_n=0 is not a degraded formula, it is the correct
                 # one when there is nothing to compare against.
                 effective_n = 0
@@ -1243,8 +1267,8 @@ def stream_deep_research_pipeline(
                     run.raw_response = candidates[0]
                     pass2_input = f"Response to extract claims from:\n{run.raw_response}"
                     run.log("Pass 1: only one ensemble candidate survived — "
-                            "scoring WITHOUT a disagreement penalty, since one "
-                            "candidate cannot disagree with itself.")
+                            "no claim can be contested, since one candidate "
+                            "cannot disagree with itself.")
                 else:
                     raise RuntimeError(
                         "Pass 1: every ensemble candidate failed; there is no "
@@ -1364,21 +1388,26 @@ def stream_deep_research_pipeline(
         yield from progress.checkpoint("Pass 5: confidence tiers assigned (pure code, zero LLM calls).")
 
         # --- D1 + the 6a/6b/D2 retry loop ---
-        flagged = [c for c in run.claims if c.confidence_tier in FLAGGED_TIERS]
+        # ROADMAP_v3 §90 (A85). D1 also takes the claims most ensemble
+        # candidates did not assert, whatever they scored: disagreement is
+        # a reason to check a claim, and the loop is where claims are
+        # checked. ENTRY ONLY -- `still_flagged` below reads the tier alone.
+        # Who asserted a claim does not change when 6a rewrites it, so a
+        # loop that kept a contested claim for being contested would hold
+        # it to D2's cap and publish it UNVERIFIED, which is the defect the
+        # E8 penalty had.
+        flagged = [c for c in run.claims
+                   if c.confidence_tier in FLAGGED_TIERS or is_contested(c)]
+        contested = sum(1 for c in flagged if is_contested(c))
         yield from _stage("D1")
-        yield from progress.checkpoint(f"D1: {len(flagged)} claim(s) flagged for revision, {len(run.claims) - len(flagged)} already clean.")
+        yield from progress.checkpoint(
+            f"D1: {len(flagged)} claim(s) flagged for revision"
+            + (f" ({contested} contested by the ensemble)" if contested else "")
+            + f", {len(run.claims) - len(flagged)} already clean.")
 
         while flagged:
             # --- Pass 6a: ONE batched call across every currently-flagged claim ---
-            pass6a_input = json.dumps([
-                {
-                    "claim": vars(c),
-                    "critic_feedback": {"fallacies": c.fallacies, "contradictions": c.contradictions},
-                    "grounding_feedback": c.grounding_sources,
-                    "assumption_flags": c.assumption_flags,
-                }
-                for c in flagged
-            ])
+            pass6a_input = json.dumps([_revision_request(c) for c in flagged])
             revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged], effort=effort, activity=activity)))
 
             # COUNT THE ROUND, NOT THE REVISION. The increment used to live

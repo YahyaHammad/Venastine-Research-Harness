@@ -29785,3 +29785,53 @@ refusal of a `/` line that names nothing.
   `/call`, `/goal`, `/new`, `/effort` and `/exit`, none reaching the model.
 - **Full suite:** 8769 passed, 77 skipped in 1:45, nothing failed; the CLI and TUI files again with AGENT_WORKSPACE unset, and under WSL (872 passed). ruff clean; bandit 0 outside the baseline, no count grew; gitleaks on an export: no leaks.
 - **Version**, by `scripts/version.py bump`: `0.3.4-b.14.bugfixes.r57e749187eaf`.
+
+## Batch 232 -- disagreement routed to a check, not deducted (2026-11-03)
+
+**Issue #12, ROADMAP_v3 §90, A85.** The owner chose routing over deduction,
+with the penalty retired; "at most half the candidates" as the threshold; and
+the count, not the other candidates' answers, as what 6a is told.
+
+- **Measured.** Swept through `score_claim`, E8's penalty changed a tier only
+  where at most half the candidates asserted a claim. A grounded claim fell
+  from HIGH to MEDIUM there. A partially grounded one fell from MEDIUM (0.60)
+  to LOW (0.50 at 1 of 3), which D1 flags: 6a was not told why, and 6b
+  re-scored it under the same penalty, so a claim whose grounding never moved
+  rode the loop to D2's cap and was published UNVERIFIED. Nothing else read
+  the signal.
+- **Contested.** `score_claim` marks a factual claim `contested` in its
+  breakdown when its consistency is at most `CONTESTED_SHARE` (0.5), after
+  B8's dedupe and clamp. An unreported numerator (B7) is not contested, and a
+  non-factual claim is never asked (E9). The score has no agreement term on
+  any run.
+- **Routed.** D1 flags a claim that is contested or whose tier is flagged.
+  The loop keeps a claim for its tier only, so a contested claim the check
+  clears leaves after one round. 6a's entry for it carries
+  `disagreement_feedback` (`asserted_by`, `of`), `revise.md` says to check it
+  rather than reword it, and D1's checkpoint counts them. No gate gained a
+  model call.
+- **The key.** `confidence.disagreement_penalty_factor` still loads, warns
+  and applies nothing (E4's rule).
+- **Found.** §89 said the CLI still lacks fourteen commands, and so did batch
+  231's closing report. The catalog declares fifteen absent from it, eleven
+  of them not yet built. §89 says fifteen now.
+- **Found by the first full run.** Two tests in `test_storage_e2e.py`
+  reloaded `core.replay` to point it at the real database, and a reload
+  outlives its test: restoring `sys.modules` cannot undo it, so every later
+  fake-storage test on the same xdist worker replayed threads from the
+  deleted database. Six of batch 231's `/call` tests failed when scheduling
+  put them after that file (reproduced in one process with the two files in
+  that order). The tests patch `core.replay.archive_history` with
+  monkeypatch now, and `_replay_is_put_back` asserts the binding is restored
+  when the module's swap tears down; with one reload put back, it fails
+  inside that file.
+
+### Verified
+
+- New tests: 20 in `test_confidence_scoring.py`, 8 in `test_orchestrator.py`;
+  ten scoring tests that asserted the penalty assert the routing now. Twenty
+  mutations, all red, and a green control. E9 was first written twice, in the
+  mark's condition and in the branch that records it, so deleting either
+  changed nothing; it is enforced once.
+- **Full suite:** 8797 passed, 77 skipped in 1:50, nothing failed; the touched files again with AGENT_WORKSPACE unset (804 passed), and under WSL (808 passed, plus register item 102's known failure). ruff clean; bandit 0 outside the baseline, no count grew; pip-audit clean; gitleaks on an export: no leaks. The two pass-prompt digests in `test_untrusted_content.py` moved with the two prompt edits, deliberately, and say so.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.15.bugfixes.r57e749187eaf`.

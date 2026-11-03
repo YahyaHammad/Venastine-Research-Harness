@@ -32,27 +32,32 @@ CRITIC_WEIGHT_FACTOR = 0.35
 ASSUMPTION_FLAG_PENALTY = 0.15  # per flag
 NON_FACTUAL_SCORE_CAP = 0.65    # claims never grounded can't reach HIGH
 
-# ROADMAP §10 (revisit, E8). Cross-candidate disagreement is a PENALTY,
-# subtracted like ASSUMPTION_FLAG_PENALTY above -- not a fourth weighted
-# term with the others scaled down to make room for it.
+# ROADMAP_v3 §90 (A85, issue #12). Cross-candidate disagreement is ROUTED,
+# NOT SCORED. A factual claim asserted by at most this share of the
+# candidates is `contested`, and D1 sends it to the 6a/6b loop to be
+# checked; nothing is subtracted for it.
 #
-# §10 shipped the other shape: 0.5/0.35 redistributed to 0.4/0.3 with a
-# 0.15 consistency term added. Two consequences, neither intended:
+# It was a penalty before (§10's revisit, E8): 0.15 * (1 - consistency),
+# itself the repair of §10's first shape, a fourth weighted term that made
+# grounding count for less whenever ensemble mode was on. Two things were
+# wrong with the penalty, and the second was measured:
 #
-#   1. Turning ensemble mode on made GROUNDING count for less. Grounding is
-#      the pipeline's strongest evidence, and which generation strategy
-#      produced a claim is no reason to weigh its verification differently.
-#   2. Because the maximum stayed 0.85, consistency could only ever cost a
-#      well-grounded claim. A claim Pass 3a grounded and Pass 3b found
-#      nothing wrong with dropped from HIGH to MEDIUM at 2-of-3 agreement.
+#   1. It answered the wrong question. Disagreement is the one signal in
+#      the pipeline that points at a specific claim and says "the models do
+#      not concur here", which is what a verification pass wants as input,
+#      and a deduction spends it on a number instead.
+#   2. It could send a claim into the loop that no revision could get out
+#      of. A partially grounded claim scores 0.60 (MEDIUM); at 1 of 3 the
+#      penalty took it to 0.50 (LOW), so D1 flagged it, 6a was never told
+#      why, and 6b re-scored it under the same penalty -- who asserted a
+#      claim does not change when it is reworded -- until D2 published it
+#      UNVERIFIED.
 #
-# As a penalty, unanimity changes nothing and dissent subtracts, which is
-# also the honest reading of the signal: agreement is the null hypothesis
-# (candidates asked the same question usually answer alike), so disagreement
-# is the part that carries information. It makes the non-ensemble formula
-# literally unchanged rather than coincidentally equal, so §10's
-# byte-for-byte regression guard holds by construction.
-DISAGREEMENT_PENALTY_FACTOR = 0.15
+# AT MOST HALF, so 1 of 2, 1 of 3 and 2 of 4 are contested and 2 of 3 is
+# not: exactly the shapes where the penalty used to change a tier. The
+# non-ensemble formula is untouched, and the ensemble one is now the same
+# formula, so §10's byte-for-byte regression guard holds for both.
+CONTESTED_SHARE = 0.5
 
 # ROADMAP_v2 §45 (SQ3). What a grounding is WORTH.
 #
@@ -117,7 +122,6 @@ def default_weights() -> dict:
         "grounding_weight_factor": GROUNDING_WEIGHT_FACTOR,
         "critic_weight_factor": CRITIC_WEIGHT_FACTOR,
         "assumption_flag_penalty": ASSUMPTION_FLAG_PENALTY,
-        "disagreement_penalty_factor": DISAGREEMENT_PENALTY_FACTOR,
         "non_factual_score_cap": NON_FACTUAL_SCORE_CAP,
         "source_quality_floor": SOURCE_QUALITY_FLOOR,
         "authority_full_credit": AUTHORITY_FULL_CREDIT,
@@ -198,9 +202,10 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
     """Returns (tier, score_breakdown). Pure function -- no side effects,
     easy to unit test claim-by-claim without running any pass.
 
-    When ensemble_n > 0 (ROADMAP §10), cross-candidate DISAGREEMENT -- the
-    fraction of candidates that did NOT independently assert this claim --
-    is subtracted from a factual claim's score. ensemble_n is the number of
+    When ensemble_n > 0 (ROADMAP §10), the share of candidates that
+    asserted this claim is recorded, and a factual claim asserted by at
+    most CONTESTED_SHARE of them is marked `contested` for D1 to route
+    (ROADMAP_v3 §90). It changes no score. ensemble_n is the number of
     candidates that actually produced text, which on a run where a
     candidate's provider failed is fewer than the configured roster.
 
@@ -255,29 +260,25 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
     critic_component = 1.0 - claim.critic_severity
     assumption_penalty = w["assumption_flag_penalty"] * len(claim.assumption_flags)
 
-    # None when ensemble mode is off, which is what makes the formula below
-    # ONE formula rather than a pair that can drift -- and (B7) also when
-    # ensemble mode is ON and Pass 2 reported nothing for this claim, which
-    # is a different fact from "no candidate asserted it".
+    # None when ensemble mode is off -- and (B7) also when ensemble mode is
+    # ON and Pass 2 reported nothing for this claim, which is a different
+    # fact from "no candidate asserted it". An unreported claim is never
+    # contested.
     consistency_score = None
     consistency_reported = None
-    disagreement_penalty = 0.0
     if ensemble_n > 0 and claim.asserted_by_candidates:
-        # B8. Deduplicated and clamped. `[1, 2, 3, 3]` made
-        # consistency 1.3333, so the PENALTY went NEGATIVE and a MEDIUM
-        # claim scored HIGH -- the exact property E8's comment says holds
-        # "by construction". `consistency_reported` keeps the unclamped
-        # value when it fired, because a numerator above the denominator is
-        # itself evidence that Pass 2 misread the candidate labelling, and
+        # B8. Deduplicated and clamped. `[1, 2, 3, 3]` made consistency
+        # 1.3333, which under E8 made the penalty NEGATIVE and scored a
+        # MEDIUM claim HIGH; here a duplicate would make one candidate's
+        # claim read as two agreeing, and `[1, 1]` of 3 would escape
+        # routing. `consistency_reported` keeps the unclamped value when
+        # it fired, because a numerator above the denominator is itself
+        # evidence that Pass 2 misread the candidate labelling, and
         # clamping silently would hide the evidence along with the bug.
         reported = len(set(claim.asserted_by_candidates)) / ensemble_n
         consistency_score = min(1.0, reported)
         if reported > 1.0:
             consistency_reported = round(reported, 4)
-        # E9: computed only where it is applied, so the breakdown records
-        # what was subtracted rather than what was available (B10).
-        if claim_type == "factual":
-            disagreement_penalty = w["disagreement_penalty_factor"] * (1.0 - consistency_score)
 
     if claim_type != "factual":
         # Cap applies to the critic component BEFORE subtracting the
@@ -287,11 +288,6 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
         # claim that was already clean under critique. Found this via a
         # direct test case (two speculative claims, one flagged one not,
         # both landing at the same tier) before it shipped.
-        #
-        # E9: no disagreement penalty here. §10 decided consistency does not
-        # RESCUE a non-factual claim from the cap; whether dissent should
-        # penalise a speculative claim is a separate judgment about what
-        # candidates declining to speculate means, and it was not made.
         capped_critic = min(critic_component, w["non_factual_score_cap"])
         raw_score = capped_critic - assumption_penalty
         formula = "non_factual"
@@ -302,7 +298,6 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
             (w["grounding_weight_factor"] * grounding_component)
             + (w["critic_weight_factor"] * critic_component)
             - assumption_penalty
-            - disagreement_penalty
         )
 
     # ROUND ONCE, then use that one value for BOTH the tier comparison and
@@ -313,8 +308,9 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
     # auditing a run artifact read a number that contradicted the published
     # thresholds, and the tier was the one that mattered.
     #
-    # Binary floating point makes this reachable from ordinary weights, not
-    # from an exotic input: 0.5 + 0.35 - 0.15 * (1/3) is exactly that value.
+    # Binary floating point made this reachable from ordinary weights, not
+    # from an exotic input: 0.5 + 0.35 - 0.15 * (1/3), E8's 2-of-3 penalty,
+    # was exactly that value.
     # Sweeping the whole non-ensemble input space, exactly ONE shape changes
     # tier under this fix -- a speculative claim at severity 0.55 with one
     # assumption flag, which records 0.3 and now tiers LOW instead of
@@ -340,7 +336,7 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
     # extra key: "anyone auditing a run artifact read a number that
     # contradicted the published thresholds."
     #
-    #   factual      0.5*grounding + 0.35*critic - assumption - disagreement
+    #   factual      0.5*grounding + 0.35*critic - assumption
     #   non_factual  capped_critic - assumption
     breakdown = {
         "formula": formula,
@@ -375,11 +371,18 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
         # B7. None means PASS 2 REPORTED NOTHING, which is not 0.0 -- and
         # the two were indistinguishable, so a claim one candidate raised
         # uncontested took the maximum 0.15 penalty rather than the 0.05 it
-        # earned. #12 reads this field; it needs to be able to tell them
-        # apart too.
+        # earned under E8. `contested` needs them apart for the same reason.
         breakdown["consistency_score"] = (
             None if consistency_score is None else round(consistency_score, 4))
-        breakdown["disagreement_penalty"] = round(disagreement_penalty, 4)
+        # §90: what D1 routes on, and the record of why a claim that scored
+        # HIGH went through 6a/6b anyway. E9 LIVES HERE, and only here:
+        # whether candidates declining to speculate says anything about a
+        # speculative claim is a judgment §10 never made, so the non-factual
+        # branch is never asked and carries no key (B10: a field that did
+        # nothing is never present).
+        if formula == "factual":
+            breakdown["contested"] = (consistency_score is not None
+                                      and consistency_score <= CONTESTED_SHARE)
         if consistency_reported is not None:
             breakdown["consistency_reported"] = consistency_reported
     if unrecognised_status is not None:
@@ -387,6 +390,14 @@ def score_claim(claim: Claim, ensemble_n: int = 0,
     if unrecognised_type is not None:
         breakdown["unrecognised_type"] = unrecognised_type
     return tier, breakdown
+
+
+def is_contested(claim: Claim) -> bool:
+    """Whether Pass 5 marked this claim contested (ROADMAP_v3 §90).
+
+    Read off the breakdown rather than recomputed, so D1 routes on exactly
+    what the stored claim says and the type coercion above happens once."""
+    return claim.score_breakdown.get("contested") is True
 
 
 def build_coverage_gap_entries(completeness: dict) -> list[dict]:
@@ -402,8 +413,9 @@ def run_confidence_tiering(
     weights: dict | None = None,
 ) -> None:
     """The actual Pass 5 entry point the orchestrator calls. Mutates
-    the claims in place; zero LLM calls. Pass ensemble_n > 0 to use
-    the ensemble formula variant (ROADMAP §10).
+    the claims in place; zero LLM calls. Pass ensemble_n > 0 to record
+    each claim's consistency and mark the contested ones (ROADMAP §10,
+    ROADMAP_v3 §90); the formula is the same either way.
 
     `claims` narrows WHICH claims are re-tiered, and defaults to all of
     them -- which is Pass 5 itself, where every claim is in play. The
@@ -453,8 +465,8 @@ def _report_coercions(run: PipelineRun, claim: Claim, breakdown: dict,
     if ensemble_n > 0 and breakdown.get("consistency_score") is None:
         run.log(
             f"Pass 5: claim {claim.id} carries no asserted_by_candidates on "
-            f"an ensemble run -- scored WITHOUT a disagreement penalty, "
-            f"since an unreported numerator is not a numerator of zero."
+            f"an ensemble run -- not treated as contested, since an "
+            f"unreported numerator is not a numerator of zero."
         )
     if "unrecognised_grounding_status" in breakdown:
         run.log(

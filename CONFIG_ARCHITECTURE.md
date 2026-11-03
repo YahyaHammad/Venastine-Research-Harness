@@ -326,7 +326,8 @@ Deferred for now (core sequential pipeline only, per current scope):
 ### `ensemble_mode`
 
 Run Pass 1 once per entry below, then extract the union of claims across
-candidates and subtract a disagreement penalty in Pass 5. Off by default.
+candidates, and send a factual claim at most half of them asserted to Pass
+6a/6b to be checked (ROADMAP_v3 §90). Off by default.
 
 DIVERSITY COMES FROM DIFFERENT MODELS, NOT DIFFERENT SAMPLING (E1). §10
 originally raised `temperature` on N runs of one model. That could not work

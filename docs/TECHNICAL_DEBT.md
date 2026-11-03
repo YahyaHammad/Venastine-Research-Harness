@@ -6445,6 +6445,10 @@ re-verification as a comment since batch 159, made against `main` at
   disagreement, and no verification pass consumes `consistency_score`. Nothing
   to add beyond the issue's own rearchitecture analysis (pure-code gates versus
   a new model call).
+  **Fixed in batch 232 (ROADMAP_v3 §90, A85)**, without a new model call in any
+  gate: D1 reads a `contested` mark Pass 5 writes, sends the claim to the 6a/6b
+  loop that already existed, and the penalty is retired, so a checked claim
+  carries no deduction for the doubt its check resolved.
 - **Issue #8** `[S3][ux]` *the CLI has no slash-command layer*, from the
   headless-shell scope. Verified still true: `main.py` dispatches no
   `/command` at all -- `run_chat` treats every non-empty line as a message,
