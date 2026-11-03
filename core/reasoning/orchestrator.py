@@ -6,8 +6,9 @@ for factual claims) -> 3c -> 4 (all claims) -> Pass 5 (code) -> D1 -> the
 6a/6b/D2 retry loop -> 6c (template) -> merge -> final synthesis.
 
 SCOPE OF THIS VERSION: core sequential pipeline with optional ensemble
-mode (ROADMAP §10: N-candidate Pass 1 generation + cross-candidate
-consistency check feeding Pass 5's scoring). No filesystem output yet
+mode (ROADMAP §10: N-candidate Pass 1 generation + a cross-candidate
+consistency check, whose contested claims D1 routes to the 6a/6b loop,
+ROADMAP_v3 §90). No filesystem output yet
 (returns a PipelineRun object; the /output/<run_id>/ file-writing system
 is a separate, later piece of work).
 
@@ -79,7 +80,7 @@ from core import pipeline_models
 from core.config_loader import effective_confidence, effective_source_scoring
 from core.loop import RunAgentLoop, advertisement_facts
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
-from core.reasoning.confidence_scoring import run_confidence_tiering
+from core.reasoning.confidence_scoring import is_contested, run_confidence_tiering
 from core.reasoning.events import PipelineEvent
 from core.reasoning.json_retry import parse_json_response as _parse_json_response
 from core.reasoning.json_retry import retry_until_json
@@ -556,8 +557,9 @@ def _run_pass_with_json_retry(
     reviewer shares retry_until_json's contract; re-parsing a short string
     is cheaper than moving twenty seams in the batch that adds the check.
 
-    `claim_ids` is the set the APPLY step will resolve against -- every
-    claim for 3a/3b/5/6c, the currently-flagged batch for 6a -- because
+    `claim_ids` is the set the APPLY step will resolve against -- the
+    factual claims for 3a/3b (batch 220), every claim for 4, the
+    currently-flagged batch for 6a/6b -- because
     validating against a wider set would accept an entry that then lands
     on nothing.
 
@@ -705,9 +707,10 @@ def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
     had already gathered -- the failure path being where an unattended
     run's record matters most.
 
-    `claims` NARROWS BOTH HALVES, and defaults to the whole run, which is
-    Pass 3a -- the first grounding, where every claim is in play.
-    §66 (A26) passes the 6a/6b loop's current batch instead, and it has to
+    `claims` NARROWS BOTH HALVES, and defaults to the whole run. Pass 3a
+    passes the factual claims since batch 220 (#247), the only ones it is
+    shown: the default let an entry naming a speculative claim mark it
+    grounded. §66 (A26) passes the 6a/6b loop's current batch, and it has to
     reach the SCORING as well as the apply: `score_grounding_sources`
     "rewrite[s] EVERY claim's grounding_sources with computed scores" by
     default, so a 6b round recomputed the sources of claims D1 had already
@@ -766,8 +769,9 @@ def _apply_critic(claims: list[Claim], critic_entries: list[dict]) -> int:
 
 
 def _note_entries_outside_the_batch(run: PipelineRun, batch: list[Claim],
-                                   *entry_lists) -> int:
-    """Say that Pass 6b answered about a claim it was not asked about.
+                                   *entry_lists, pass_id: str, scope: str,
+                                   asked: str, why: str) -> int:
+    """Say that a pass answered about a claim it was not asked about.
 
     §66 (A26). The apply is scoped to the batch, so such an entry lands on
     nothing -- and `review.py` settled the policy for exactly this shape:
@@ -775,6 +779,15 @@ def _note_entries_outside_the_batch(run: PipelineRun, batch: list[Claim],
     silence is indistinguishable from applying. 6b's own checkpoint line
     reports how many claims came out clean, which is an effect and
     therefore cannot report this.
+
+    FOUR PASSES SINCE BATCH 220. 6a made the same
+    drop twenty lines above 6b and said nothing (#248), and 3a and 3b,
+    shown only the factual claims, applied to every claim (#247): a 3a
+    entry could mark a speculative claim grounded, which gate D0 says cannot
+    happen, and a 3b severity on one moved its tier -- measured, MEDIUM to
+    LOW at 0.5 and to UNVERIFIED at 0.8, which then cost it 6a/6b rounds.
+    Each caller says its own `scope`, what it `asked` about and `why` an
+    answer outside it must not land.
 
     The id cross-check does not cover it and is not meant to: B5 makes a
     TOTAL mismatch the error and a partial one deliberately not, since a
@@ -790,12 +803,11 @@ def _note_entries_outside_the_batch(run: PipelineRun, batch: list[Claim],
                      - known - {None})
     if outside:
         run.log(
-            f"Pass 6b: {len(outside)} claim id(s) in the response name a "
-            f"claim outside this round's batch "
-            f"({', '.join(repr(i) for i in outside[:3])}) -- dropped. 6b was "
-            f"asked about {len(known)} flagged claim(s); applying an answer "
-            f"to a claim D1 had already finished with would change its "
-            f"grounding without recomputing its tier."
+            f"{pass_id}: {len(outside)} claim id(s) in the response name a "
+            f"claim outside {scope} "
+            f"({', '.join(repr(i) for i in outside[:3])}) -- dropped. "
+            f"{pass_id.removeprefix('Pass ')} was asked about {len(known)} "
+            f"{asked}; {why}"
         )
     return len(outside)
 
@@ -991,6 +1003,28 @@ def _apply_fallback(claim: Claim) -> None:
         f"revision attempt(s). Treat with caution."
     )
     claim.final_text = claim.revision_text or claim.text
+
+
+def _revision_request(claim: Claim) -> dict:
+    """One claim's entry in Pass 6a's batch: the claim and the feedback
+    that put it there.
+
+    `disagreement_feedback` only on a contested claim (ROADMAP_v3 §90),
+    because D1 may have flagged it for that alone, and 6a cannot address a
+    reason it is not given. `revise.md` says what to do with one."""
+    entry = {
+        "claim": vars(claim),
+        "critic_feedback": {"fallacies": claim.fallacies, "contradictions": claim.contradictions},
+        "grounding_feedback": claim.grounding_sources,
+        "assumption_flags": claim.assumption_flags,
+    }
+    if is_contested(claim):
+        entry["disagreement_feedback"] = {
+            # Deduplicated, as the consistency score it came from is (B8).
+            "asserted_by": len(set(claim.asserted_by_candidates)),
+            "of": claim.score_breakdown["consistency_denominator"],
+        }
+    return entry
 
 
 # ============================================================================
@@ -1223,8 +1257,9 @@ def stream_deep_research_pipeline(
             else:
                 # DEGRADE TO THE SINGLE-CANDIDATE PATH (E7), rather than
                 # scoring one candidate as an ensemble of one -- which would
-                # give every claim consistency 1.0 and a zero penalty while
-                # reporting that agreement as if it had been corroborated.
+                # give every claim consistency 1.0, so none could ever be
+                # contested, while reporting that agreement as if it had
+                # been corroborated.
                 # ensemble_n=0 is not a degraded formula, it is the correct
                 # one when there is nothing to compare against.
                 effective_n = 0
@@ -1232,8 +1267,8 @@ def stream_deep_research_pipeline(
                     run.raw_response = candidates[0]
                     pass2_input = f"Response to extract claims from:\n{run.raw_response}"
                     run.log("Pass 1: only one ensemble candidate survived — "
-                            "scoring WITHOUT a disagreement penalty, since one "
-                            "candidate cannot disagree with itself.")
+                            "no claim can be contested, since one candidate "
+                            "cannot disagree with itself.")
                 else:
                     raise RuntimeError(
                         "Pass 1: every ensemble candidate failed; there is no "
@@ -1271,10 +1306,20 @@ def stream_deep_research_pipeline(
                 f"Deduplicated entities to research (search each ONCE, map results back "
                 f"to every claim referencing it):\n{json.dumps(unique_entities)}"
             )
-            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort, activity=activity)))
+            # SCOPED TO `factual_claims`, like 6b to its batch (batch 220,
+            # #247): 3a is shown the factual claims and nothing else, so an
+            # entry naming another claim is dropped and traced rather than
+            # marking a claim grounded that gate D0 routed past grounding.
+            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in factual_claims], effort=effort, activity=activity)))
             grounded = _ground_and_score(run, grounding_json, corpus, scorer,
-                                         scoring_knobs, scholar)
+                                         scoring_knobs, scholar,
+                                         claims=factual_claims)
             yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
+            _note_entries_outside_the_batch(
+                run, factual_claims, grounding_json, pass_id="Pass 3a",
+                scope="the factual claims", asked="factual claim(s)",
+                why="Gate D0 routes every other claim past 3a/3b, so grounding "
+                    "one would record a check gate D0 says never ran.")
 
             # E13/#77. Two or more survivors: the claims were extracted
             # from the UNION of the candidates, so the critic sees every
@@ -1296,9 +1341,18 @@ def stream_deep_research_pipeline(
                     f"Raw response:\n{run.raw_response}\n\n"
                     f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
                 )
-            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort, activity=activity)))
-            critiqued = _apply_critic(run.claims, critic_json)
+            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in factual_claims], effort=effort, activity=activity)))
+            # The same scope as 3a, for a stronger reason: a non-factual
+            # claim's score IS its capped critic component, so a severity
+            # landing on one moved its tier (measured, batch 220).
+            critiqued = _apply_critic(factual_claims, critic_json)
             yield from progress.checkpoint(f"Pass 3b: critique applied to {critiqued} of {len(factual_claims)} factual claim(s).")
+            _note_entries_outside_the_batch(
+                run, factual_claims, critic_json, pass_id="Pass 3b",
+                scope="the factual claims", asked="factual claim(s)",
+                why="Gate D0 routes every other claim past 3a/3b, and a "
+                    "severity on one would lower the score Pass 5 gives "
+                    "it.")
         else:
             # A stage, not a silence. "3a/3b did not run" is a fact about
             # the run's shape -- it means nothing was factual -- and a
@@ -1334,21 +1388,26 @@ def stream_deep_research_pipeline(
         yield from progress.checkpoint("Pass 5: confidence tiers assigned (pure code, zero LLM calls).")
 
         # --- D1 + the 6a/6b/D2 retry loop ---
-        flagged = [c for c in run.claims if c.confidence_tier in FLAGGED_TIERS]
+        # ROADMAP_v3 §90 (A85). D1 also takes the claims most ensemble
+        # candidates did not assert, whatever they scored: disagreement is
+        # a reason to check a claim, and the loop is where claims are
+        # checked. ENTRY ONLY -- `still_flagged` below reads the tier alone.
+        # Who asserted a claim does not change when 6a rewrites it, so a
+        # loop that kept a contested claim for being contested would hold
+        # it to D2's cap and publish it UNVERIFIED, which is the defect the
+        # E8 penalty had.
+        flagged = [c for c in run.claims
+                   if c.confidence_tier in FLAGGED_TIERS or is_contested(c)]
+        contested = sum(1 for c in flagged if is_contested(c))
         yield from _stage("D1")
-        yield from progress.checkpoint(f"D1: {len(flagged)} claim(s) flagged for revision, {len(run.claims) - len(flagged)} already clean.")
+        yield from progress.checkpoint(
+            f"D1: {len(flagged)} claim(s) flagged for revision"
+            + (f" ({contested} contested by the ensemble)" if contested else "")
+            + f", {len(run.claims) - len(flagged)} already clean.")
 
         while flagged:
             # --- Pass 6a: ONE batched call across every currently-flagged claim ---
-            pass6a_input = json.dumps([
-                {
-                    "claim": vars(c),
-                    "critic_feedback": {"fallacies": c.fallacies, "contradictions": c.contradictions},
-                    "grounding_feedback": c.grounding_sources,
-                    "assumption_flags": c.assumption_flags,
-                }
-                for c in flagged
-            ])
+            pass6a_input = json.dumps([_revision_request(c) for c in flagged])
             revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged], effort=effort, activity=activity)))
 
             # COUNT THE ROUND, NOT THE REVISION. The increment used to live
@@ -1387,6 +1446,15 @@ def stream_deep_research_pipeline(
                     yield PipelineEvent(kind="retry", claim_id=claim.id,
                                         attempt=claim.retry_count)
             yield from progress.checkpoint(f"Pass 6a: revised {revised} of {len(flagged)} claim(s) in this retry round.")
+            # The count above shows that something was dropped, not why
+            # (#248). The comment on the loop bound is about the BOUND,
+            # which the round counter settled; a reader of the trace still
+            # needs to tell an omission from a misdirected revision.
+            _note_entries_outside_the_batch(
+                run, flagged, revisions, pass_id="Pass 6a",
+                scope="this round's batch", asked="flagged claim(s)",
+                why="a revision to a claim D1 had already finished with "
+                    "would replace its text without re-validating it.")
 
             # --- Pass 6b: re-validate the revised subset only (batched, reuses Pass 5's code) ---
             pass6b_input = json.dumps([vars(c) for c in flagged])
@@ -1409,8 +1477,13 @@ def stream_deep_research_pipeline(
             _ground_and_score(run, grounding_entries, corpus,
                               scorer, scoring_knobs, scholar, claims=flagged)
             _apply_critic(flagged, critic_entries)
-            _note_entries_outside_the_batch(run, flagged, grounding_entries,
-                                            critic_entries)
+            _note_entries_outside_the_batch(
+                run, flagged, grounding_entries, critic_entries,
+                pass_id="Pass 6b", scope="this round's batch",
+                asked="flagged claim(s)",
+                why="applying an answer to a claim D1 had already finished "
+                    "with would change its grounding without recomputing "
+                    "its tier.")
             # 6b's own checkpoint below already reports an EFFECT -- how
             # many claims came out clean -- rather than what it was asked
             # about, so it needs no count from these two.

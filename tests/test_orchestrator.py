@@ -1248,6 +1248,26 @@ def _ensemble_payloads(candidates):
     }
 
 
+def _one_check_of(claim_id, text, status="grounded", rounds=1):
+    """6a/6b answers for `rounds` rounds over one claim: 6a keeps its text,
+    which is what revise.md asks of a contested claim the evidence holds,
+    and 6b grounds it with `status` and finds nothing wrong.
+
+    BOUNDED BY THE MOCK, as #74's tests are: a round more than `rounds`
+    raises in `_build_pass_mock`, which is how a loop that kept a claim for
+    being contested would show up -- red, not hung."""
+    return {
+        "Pass 6a": [json.dumps([{"claim_id": claim_id, "revised_text": text}])
+                    for _ in range(rounds)],
+        "Pass 6b": [json.dumps({
+            "grounding": [{"claim_id": claim_id, "sources": [_source()],
+                           "status": status}],
+            "critic": [{"claim_id": claim_id, "fallacies": [],
+                        "contradictions": [], "severity": 0.0}],
+        }) for _ in range(rounds)],
+    }
+
+
 def test_each_candidate_runs_on_its_own_provider_and_model(monkeypatch, mocker):
     """E1. Pass 1 runs once per roster entry, each on THAT entry's
     provider/model -- and every other pass stays on the run's own model.
@@ -1339,6 +1359,8 @@ def test_candidate_labels_follow_survivors_not_roster_positions(monkeypatch, moc
         {"id": "C2", "text": "Claim B.", "type": "factual", "entities": ["B"],
          "source_span": "", "asserted_by_candidates": [1]},
     ])
+    # 1 of 2 is contested (§90), so C2 gets one 6a/6b round.
+    payloads.update(_one_check_of("C2", "Claim B."))
     inner = _build_pass_mock([], payloads)
     pass2_input_seen = []
 
@@ -1710,6 +1732,176 @@ def test_pipeline_non_ensemble_mode_single_pass_1(mocker):
 
 
 # ---------------------------------------------------------------------------
+# ---- ROADMAP_v3 §90 (A85, #12): a contested claim is checked, not docked ----
+# ---------------------------------------------------------------------------
+# D1 also takes a factual claim at most half the candidates asserted, and the
+# 6a/6b loop checks it like any flagged claim. ENTRY ONLY: the loop keeps a
+# claim for its tier, never for being contested, because who asserted a
+# claim does not change when 6a rewrites it.
+
+def _contested_run(mocker, c2_status="grounded", checks=None, extra_claims=()):
+    """Three candidates; C1 unanimous and grounded, C2 asserted by
+    candidate 1 alone and grounded with `c2_status`. Returns the run, the
+    pass log and every Pass 6a input, parsed."""
+    payloads = _ensemble_payloads(["One.", "Two.", "Three."])
+    claims = [
+        {"id": "C1", "text": "Claim A.", "type": "factual", "entities": ["A"],
+         "source_span": "", "asserted_by_candidates": [1, 2, 3]},
+        {"id": "C2", "text": "Claim B.", "type": "factual", "entities": ["B"],
+         "source_span": "", "asserted_by_candidates": [1]},
+        *extra_claims,
+    ]
+    payloads["Pass 2"] = json.dumps(claims)
+    payloads["Pass 3a"] = json.dumps([
+        {"claim_id": "C1", "sources": [_source()], "status": "grounded"},
+        {"claim_id": "C2", "sources": [_source()], "status": c2_status},
+    ])
+    payloads.update(checks if checks is not None
+                    else _one_check_of("C2", "Claim B.", status=c2_status))
+    call_log, six_a_inputs = [], []
+    inner = _build_pass_mock(call_log, payloads)
+
+    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
+        if pass_id == "Pass 6a":
+            six_a_inputs.append(json.loads(pass_input))
+        return inner(pass_input=pass_input, model=model, pass_id=pass_id,
+                     provider_name=provider_name, **kwargs)
+
+    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
+                        side_effect=pass_stream(side_effect))
+    return run_pipeline(user_query="test", model="m", provider_name="ANTHROPIC",
+                        ensemble_mode=True), call_log, six_a_inputs
+
+
+class TestAContestedClaimIsRouted:
+
+    @pytest.fixture(autouse=True)
+    def _roster(self, monkeypatch):
+        monkeypatch.setattr(config, "ENSEMBLE_MODELS", THREE_MODELS)
+
+    def test_a_contested_high_claim_is_checked_once_and_keeps_its_tier(self, mocker):
+        """It scored HIGH, so before §90 it skipped the loop with 0.10 off;
+        now it is checked, and a check that holds leaves it HIGH."""
+        run, call_log, six_a_inputs = _contested_run(mocker)
+
+        c2 = run.claim_by_id("C2")
+        assert c2.score_breakdown["contested"] is True
+        assert c2.confidence_tier == "HIGH"
+        assert c2.retry_count == 1
+        assert call_log.count("Pass 6a") == call_log.count("Pass 6b") == 1
+        assert [e["claim"]["id"] for e in six_a_inputs[0]] == ["C2"], (
+            "C1 is unanimous and HIGH, so D1 has no reason to take it")
+        assert run.claim_by_id("C1").retry_count == 0
+
+    def test_6a_is_told_why_the_claim_is_there(self, mocker):
+        """The count, deduplicated, out of the candidates that produced
+        text -- and only on the contested claim. A claim flagged for its
+        tier alone carries no disagreement_feedback."""
+        speculative = {"id": "C3", "text": "Claim C.", "type": "speculative",
+                       "entities": ["C"], "source_span": "",
+                       "asserted_by_candidates": [1, 2, 3]}
+        checks = _one_check_of("C2", "Claim B.")
+        checks["Pass 4"] = json.dumps({"per_claim_flags": {
+            "C3": ["unsupported claim", "circular reasoning"]}})
+        # C3 is LOW (0.65 cap - 0.30) and stays LOW: no critic entry moves
+        # it, so it rides every round to D2's cap.
+        rounds = config.MAX_PIPELINE_RETRIES
+        checks["Pass 6a"] = checks["Pass 6a"] + [json.dumps([])] * (rounds - 1)
+        checks["Pass 6b"] = checks["Pass 6b"] + [json.dumps(
+            {"grounding": [], "critic": []})] * (rounds - 1)
+        run, _, six_a_inputs = _contested_run(mocker, checks=checks,
+                                              extra_claims=[speculative])
+
+        first = {e["claim"]["id"]: e for e in six_a_inputs[0]}
+        assert set(first) == {"C2", "C3"}
+        assert first["C2"]["disagreement_feedback"] == {"asserted_by": 1, "of": 3}
+        assert "disagreement_feedback" not in first["C3"]
+
+    def test_the_claim_e8_sent_to_d2_is_checked_once_and_stays_medium(self, mocker):
+        """The measured defect, end to end. Partially grounded at 1 of 3,
+        E8 scored it 0.50 (LOW); every re-scoring applied the same penalty,
+        so it rode the loop to D2's cap and was published UNVERIFIED. It
+        scores MEDIUM now, is checked once, and leaves."""
+        run, call_log, _ = _contested_run(mocker, c2_status="partial")
+
+        c2 = run.claim_by_id("C2")
+        assert c2.confidence_tier == "MEDIUM"
+        assert c2.retry_count == 1
+        assert c2.annotation == "[MEDIUM]"
+        assert call_log.count("Pass 6a") == 1
+
+    def test_a_contested_claim_the_check_fails_is_any_flagged_claim(self, mocker):
+        """Contested gets a claim INTO the loop and says nothing about
+        leaving it: one 6b grounds as ungrounded is UNVERIFIED, flagged on
+        its tier, and runs to D2's cap like anything else."""
+        rounds = config.MAX_PIPELINE_RETRIES
+        run, call_log, _ = _contested_run(
+            mocker, checks=_one_check_of("C2", "Claim B.", status="ungrounded",
+                                         rounds=rounds))
+
+        c2 = run.claim_by_id("C2")
+        assert c2.retry_count == rounds
+        assert c2.confidence_tier == "UNVERIFIED"
+        assert "Could not be adequately verified" in c2.annotation
+        assert call_log.count("Pass 6a") == rounds
+
+    def test_d1_says_how_many_it_took_for_disagreement(self, mocker):
+        run, _, _ = _contested_run(mocker)
+        assert _trace_line(run, "D1:") == (
+            "D1: 1 claim(s) flagged for revision (1 contested by the "
+            "ensemble), 1 already clean.")
+
+    def test_two_of_three_is_not_routed(self, monkeypatch, mocker):
+        """THE CONTROL. `_ensemble_payloads` has C2 at [1, 3] of 3 and no
+        6a/6b answers, so routing it would raise in the mock."""
+        call_log = []
+        mocker.patch.object(
+            RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(_build_pass_mock(call_log, _ensemble_payloads(
+                ["One.", "Two.", "Three."]))))
+        run = run_pipeline(user_query="test", model="m",
+                           provider_name="ANTHROPIC", ensemble_mode=True)
+
+        assert "Pass 6a" not in call_log
+        assert run.claim_by_id("C2").score_breakdown["contested"] is False
+        assert "contested" not in _trace_line(run, "D1:")
+
+
+def test_the_revision_request_counts_a_candidate_once():
+    """B8 for 6a's input: [1, 1] is one candidate, as the consistency score
+    that made the claim contested counted it."""
+    from core.reasoning.base import Claim
+    from core.reasoning.orchestrator import _revision_request
+
+    claim = Claim(id="C1", text="t", type="factual",
+                  asserted_by_candidates=[1, 1],
+                  score_breakdown={"contested": True,
+                                   "consistency_denominator": 3})
+    assert _revision_request(claim)["disagreement_feedback"] == \
+        {"asserted_by": 1, "of": 3}
+
+
+def test_revise_md_explains_every_key_a_contested_claim_carries():
+    """The prompt is the only place 6a learns what the feedback means, and
+    nothing else holds the two together (§30's stated limit). Read off the
+    entry the orchestrator actually builds, so a renamed key fails here
+    rather than reaching a model as an unexplained field."""
+    from pathlib import Path
+
+    from core.reasoning.base import Claim
+    from core.reasoning.orchestrator import _revision_request
+
+    claim = Claim(id="C1", text="t", type="factual", asserted_by_candidates=[1],
+                  score_breakdown={"contested": True,
+                                   "consistency_denominator": 3})
+    feedback = _revision_request(claim)["disagreement_feedback"]
+    prompt = (Path(__file__).resolve().parent.parent / "prompts"
+              / "revise.md").read_text(encoding="utf-8")
+    for key in ["disagreement_feedback", *feedback]:
+        assert f"`{key}`" in prompt, f"revise.md never names `{key}`"
+
+
+# ---------------------------------------------------------------------------
 # ---- Issue #123: _claim_from_json's allowlist ------------------------------
 # ---------------------------------------------------------------------------
 
@@ -1908,6 +2100,102 @@ class TestTheCheckpointReportsWhatWasApplied:
         assert _trace_line(run, "Pass 6a:") == (
             "Pass 6a: revised 1 of 1 claim(s) in this retry round."
         )
+
+    def test_and_the_trace_says_which_revision_landed_on_nothing(self, mocker):
+        """#248, batch 220. The count above shows a drop and not its cause;
+        6b has traced its drops since §66, and 6a now does the same."""
+        payloads = _one_claim_stuck_through_retry_payloads()
+        payloads["Pass 6a"] = [
+            json.dumps([{"claim_id": "C2", "revised_text": "better"},
+                        {"claim_id": "C9", "revised_text": "for a claim that ended"}])
+            for _ in range(config.MAX_PIPELINE_RETRIES)
+        ]
+        mocker.patch.object(
+            RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(_build_pass_mock([], payloads)))
+
+        run = run_pipeline(
+            user_query="q", model="claude-test", provider_name="ANTHROPIC")
+
+        dropped = [line for line in run.trace if line.startswith("Pass 6a:")
+                   and "outside this round's batch" in line]
+        assert dropped, run.trace
+        assert "'C9'" in dropped[0] and "1 claim id(s)" in dropped[0]
+
+
+def _with_a_speculative_claim(extra_3a=(), extra_3b=()):
+    """The clean payloads plus C4, a speculative claim D0 routes past 3a and
+    3b, with each of those passes optionally answering about it anyway. A
+    bounded retry loop is canned in case a stray answer flags it."""
+    payloads = _clean_pipeline_payloads()
+    claims = json.loads(payloads["Pass 2"])
+    claims.append({"id": "C4", "text": "RSA may fall within a decade.",
+                   "type": "speculative", "entities": ["RSA"],
+                   "source_span": "32:50"})
+    payloads["Pass 2"] = json.dumps(claims)
+    payloads["Pass 3a"] = json.dumps(json.loads(payloads["Pass 3a"]) + list(extra_3a))
+    payloads["Pass 3b"] = json.dumps(json.loads(payloads["Pass 3b"]) + list(extra_3b))
+    payloads["Pass 6a"] = [json.dumps([]) for _ in range(config.MAX_PIPELINE_RETRIES)]
+    payloads["Pass 6b"] = [json.dumps({"grounding": [], "critic": []})
+                           for _ in range(config.MAX_PIPELINE_RETRIES)]
+    return payloads
+
+
+def _run_with(mocker, payloads):
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_stream(_build_pass_mock([], payloads)))
+    return run_pipeline(user_query="q", model="claude-test",
+                        provider_name="ANTHROPIC")
+
+
+class TestPass3TouchesOnlyTheClaimsD0RoutedToIt:
+    """#247, batch 220, and the 3b half found beside it. Both passes are
+    shown the factual claims and nothing else, and both applied to every
+    claim. A 3a entry marked a speculative claim grounded, which D0 says
+    cannot happen; a 3b severity moved its tier, because a non-factual
+    claim's score IS its capped critic component -- measured, MEDIUM to
+    UNVERIFIED at 0.8. The owner chose drop-and-trace over a corrective
+    retry."""
+
+    def test_the_premise_an_untouched_speculative_claim_is_medium(self, mocker):
+        """And the control: an answer only about the factual claims leaves
+        nothing to trace."""
+        run = _run_with(mocker, _with_a_speculative_claim())
+
+        assert run.claim_by_id("C4").confidence_tier == "MEDIUM"
+        assert not [line for line in run.trace
+                    if "outside the factual claims" in line], run.trace
+
+    def test_a_grounding_entry_for_it_does_not_land(self, mocker):
+        run = _run_with(mocker, _with_a_speculative_claim(extra_3a=[
+            {"claim_id": "C4", "sources": [_source()], "status": "grounded"}]))
+
+        c4 = run.claim_by_id("C4")
+        assert c4.grounding_status is None and c4.grounding_sources == []
+        dropped = [line for line in run.trace if line.startswith("Pass 3a:")
+                   and "outside the factual claims" in line]
+        assert dropped and "'C4'" in dropped[0], run.trace
+
+    def test_a_critic_severity_for_it_does_not_move_its_tier(self, mocker):
+        run = _run_with(mocker, _with_a_speculative_claim(extra_3b=[
+            {"claim_id": "C4", "fallacies": ["a fallacy"], "contradictions": [],
+             "severity": 0.8}]))
+
+        c4 = run.claim_by_id("C4")
+        assert c4.critic_severity == 0.0 and c4.fallacies == []
+        assert c4.confidence_tier == "MEDIUM", c4.confidence_tier
+        dropped = [line for line in run.trace if line.startswith("Pass 3b:")
+                   and "outside the factual claims" in line]
+        assert dropped and "'C4'" in dropped[0], run.trace
+
+    def test_the_checkpoint_line_still_comes_first(self, mocker):
+        """`_trace_line` reads the FIRST line with a pass's prefix, and the
+        checkpoint tests above rely on it being the count."""
+        run = _run_with(mocker, _with_a_speculative_claim(extra_3a=[
+            {"claim_id": "C4", "sources": [_source()], "status": "grounded"}]))
+
+        assert _trace_line(run, "Pass 3a:").startswith("Pass 3a: grounded 3 of 3")
 
 
 # ===========================================================================

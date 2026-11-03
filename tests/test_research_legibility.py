@@ -636,7 +636,7 @@ class TestTheClaimsView:
         """A reader opening this is looking for what NOT to trust.
         Burying the unverified claims under the confident ones makes them
         the hardest thing to find."""
-        from tui.screens import _render_claims
+        from core.claims_view import render_claims as _render_claims
 
         body = _render_claims([
             {"id": "c1", "text": "solid", "confidence_tier": "HIGH"},
@@ -650,7 +650,7 @@ class TestTheClaimsView:
         """The point of the view. All of this already existed on every
         Claim and reached /output/<run_id>/, and none of it was reachable
         from either shell."""
-        from tui.screens import _render_claims
+        from core.claims_view import render_claims as _render_claims
 
         body = _render_claims([{
             "id": "c1", "text": "draft", "final_text": "revised",
@@ -669,7 +669,7 @@ class TestTheClaimsView:
         """final_text is what the claim carries into the report; text is
         what Pass 2 extracted. Showing the draft would make the view
         disagree with the report beside it."""
-        from tui.screens import _render_claims
+        from core.claims_view import render_claims as _render_claims
 
         body = _render_claims([
             {"id": "c1", "text": "the draft", "final_text": "the revision"},
@@ -680,7 +680,7 @@ class TestTheClaimsView:
 
     def test_an_empty_run_says_so(self):
         """A blank modal reads as a broken modal."""
-        from tui.screens import _render_claims
+        from core.claims_view import render_claims as _render_claims
 
         assert "No claims" in _render_claims([])
 
@@ -688,7 +688,7 @@ class TestTheClaimsView:
         """Mid-run, only id/text/tier have been broadcast as events. The
         renderer must not require the fields that only exist once the run
         finishes."""
-        from tui.screens import _render_claims
+        from core.claims_view import render_claims as _render_claims
 
         body = _render_claims([{"id": "c1", "text": "found so far"}])
 
@@ -733,7 +733,7 @@ class TestTheClaimsViewSurvivesAFailedRunsRecord:
     @pytest.mark.parametrize("field, value, expected", PERSISTED)
     def test_a_non_list_value_renders_instead_of_raising(self, field, value,
                                                          expected):
-        from tui.screens import _render_claims
+        from core.claims_view import render_claims as _render_claims
 
         body = _render_claims([{"id": "c1", "text": "a claim",
                                 "confidence_tier": "LOW", field: value}])
@@ -747,7 +747,7 @@ class TestTheClaimsViewSurvivesAFailedRunsRecord:
     def test_the_lists_still_render_as_lists(self):
         """The control. A guard that stringified the whole container would
         pass every test above and turn every ordinary claim into a repr."""
-        from tui.screens import _render_claims
+        from core.claims_view import render_claims as _render_claims
 
         body = _render_claims([{
             "id": "c1", "text": "a claim", "confidence_tier": "HIGH",
@@ -762,7 +762,7 @@ class TestTheClaimsViewSurvivesAFailedRunsRecord:
     def test_a_non_list_source_collection_does_not_break_the_count(self):
         """`len(sources or ())` was the fifth site, and the only one whose
         failure would be a wrong NUMBER rather than a crash."""
-        from tui.screens import _render_claims
+        from core.claims_view import render_claims as _render_claims
 
         body = _render_claims([{"id": "c1", "text": "a claim",
                                 "grounding_status": "grounded",
@@ -771,7 +771,7 @@ class TestTheClaimsViewSurvivesAFailedRunsRecord:
         assert "grounding: grounded" in body
 
     def test_and_a_real_source_list_is_still_counted(self):
-        from tui.screens import _render_claims
+        from core.claims_view import render_claims as _render_claims
 
         body = _render_claims([{"id": "c1", "text": "a claim",
                                 "grounding_status": "partial",
@@ -785,7 +785,7 @@ class TestTheClaimsViewSurvivesAFailedRunsRecord:
         leaves, which carries the flags Pass 4 stored and the grounding
         Pass 3a stored and NO tier at all, because Pass 5 is where it
         died."""
-        from tui.screens import _render_claims
+        from core.claims_view import render_claims as _render_claims
 
         body = _render_claims([{
             "id": "c1", "text": "a claim", "type": "factual",

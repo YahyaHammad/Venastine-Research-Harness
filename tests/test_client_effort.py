@@ -60,7 +60,41 @@ def test_sampling_dropped_for_models_that_reject_it(caplog):
 
 
 def test_sampling_passed_through_for_models_that_accept_it():
+    """gpt-5.1 accepts a temperature when it is not reasoning -- here no
+    effort is sent. The case where it is: the §87 tests below."""
     assert _sampling_kwargs("OPENAI", "gpt-5.1", 0.7) == {"temperature": 0.7}
+
+
+def test_openai_drops_temperature_while_a_model_reasons(caplog):
+    """ROADMAP_v3 §87 (#6). OpenAI's own rule: "When reasoning effort is
+    not `none`, remove `temperature`, `top_p`, and `top_logprobs`." The
+    harness ships `default_effort: high`, so this is the ordinary case, and
+    the set listed only Anthropic names: the guard never fired for it."""
+    with caplog.at_level(logging.WARNING, logger="core.client"):
+        assert _sampling_kwargs("OPENAI", "gpt-5.1", 0.7, "high") == {}
+    assert any("reasoning effort 'high'" in r.message for r in caplog.records)
+
+
+def test_openai_keeps_it_at_effort_none():
+    """`none` is the one effort at which OpenAI's rule keeps it."""
+    assert _sampling_kwargs("OPENAI", "gpt-5.1", 0.7, "none") == \
+        {"temperature": 0.7}
+
+
+def test_the_effort_rule_is_openais_alone():
+    """Another OpenAI-compatible endpoint is not OpenAI, and its rules are
+    its own; it keeps the set's posture, and a refusal stays a loud 400."""
+    assert _sampling_kwargs("OPENROUTER", "vendor/model", 0.7, "high") == \
+        {"temperature": 0.7}
+
+
+def test_the_geminis_that_ignore_it_are_in_the_set():
+    """§87. Google's Gemini 3.6 Flash and 3.5 Flash-Lite ignore a
+    temperature -- no error, no effect -- so listing them is what makes a
+    temperature sent to one say so."""
+    for model in ("gemini-3.6-flash", "gemini-3.5-flash-lite"):
+        assert model in config.MODELS_REJECTING_SAMPLING_PARAMS
+        assert _sampling_kwargs("GOOGLE", model, 0.7) == {}
 
 
 def test_no_temperature_means_no_key_at_all():

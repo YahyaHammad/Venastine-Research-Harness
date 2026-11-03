@@ -559,3 +559,49 @@ class TestTheIsolatorRoundTrip:
             result = registry.dispatch(tool, params)
             assert "error" not in result, f"{tool}: {result}"
             assert json.loads(json.dumps(result)) == result
+
+
+class TestTheTransportIsBoundedToo:
+    """#204, batch 221. The 4 MB bound is the child's, on the result; the
+    pipes that carried it were held whole in the parent until the wall
+    clock fired. The child writes to temporary files now and the parent
+    reads the bound from one and a tail from the other."""
+
+    def test_a_flooding_child_is_not_held_in_the_parents_memory(self):
+        """Measured with tracemalloc, which sees every byte `communicate`
+        would have read into the parent. 6 MB of stderr stays under the
+        POSIX file cap (8 MB), so the call still answers on every
+        platform, and the peak is a tail's worth rather than a flood's."""
+        import tracemalloc
+
+        from tests import _isolation_probe
+
+        tracemalloc.start()
+        try:
+            result = isolation.run_isolated(
+                _isolation_probe.flood_stderr, {"megabytes": 6}, 60,
+                tool_name="probe")
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert result == {"flooded": True}, result
+        assert peak < 3 * 1024 * 1024, (
+            f"the parent held {peak:,} bytes for a call that wrote 6 MB of "
+            f"stderr; the transport is not bounded")
+
+    @pytest.mark.skipif(sys.platform == "win32",
+                        reason="RLIMIT_FSIZE is POSIX's; on Windows the "
+                               "wall clock is the only bound, as H3 states")
+    def test_past_the_file_cap_the_child_is_stopped(self):
+        """A child writing more than twice the result bound to either file
+        is refused by its own rlimit and the call says it has no usable
+        result -- an error, not a parent holding 16 MB."""
+        from tests import _isolation_probe
+
+        result = isolation.run_isolated(
+            _isolation_probe.flood_stderr, {"megabytes": 16}, 60,
+            tool_name="probe")
+
+        assert "error" in result, result
+        assert "did not return a usable result" in result["error"]

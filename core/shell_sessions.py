@@ -59,7 +59,12 @@ import config
 from core import agent_activity
 from core.ansi import PtyStream
 from core.line_pattern import compile_pattern, validate
-from safety.policy_enforcement import redact_output_text
+from safety.policy_enforcement import (
+    TOKEN_CHARS,
+    fragment_end,
+    fragment_start,
+    redact_output_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -219,31 +224,6 @@ def has_consumer() -> bool:
 # ---------------------------------------------------------------------------
 
 
-#: What a credential is spelled with: base64 and base64url, hex, and the
-#: separators vendor tokens use. A run of these that a cut splits is the
-#: fragment `OutputBuffer._cut_parts` moves into the gap. Punctuation that
-#: no token contains -- quotes, `:`, `@`, braces, commas -- ends a run, so
-#: a cut through minified JSON costs one value and not the whole line.
-_TOKEN_CHARS = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-+/=.~")
-
-
-def _fragment_end(head: str) -> int:
-    """Where the token-character run that ends *head* begins."""
-    i = len(head)
-    while i and head[i - 1] in _TOKEN_CHARS:
-        i -= 1
-    return i
-
-
-def _fragment_start(tail: str) -> int:
-    """Where the token-character run that starts *tail* ends."""
-    i = 0
-    while i < len(tail) and tail[i] in _TOKEN_CHARS:
-        i += 1
-    return i
-
-
 class OutputBuffer:
     """A session's output: the first `head_chars` and the most recent
     `tail_chars`, in memory only (SS12). Offsets are ABSOLUTE character
@@ -331,9 +311,9 @@ class OutputBuffer:
                                     self._before_tail)
         if total - len(tail) <= len(head):
             return head, tail, total
-        return (head[:_fragment_end(head) if after in _TOKEN_CHARS
+        return (head[:fragment_end(head) if after in TOKEN_CHARS
                      else len(head)],
-                tail[_fragment_start(tail) if before in _TOKEN_CHARS
+                tail[fragment_start(tail) if before in TOKEN_CHARS
                      else 0:],
                 total)
 

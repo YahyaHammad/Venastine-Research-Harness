@@ -21,6 +21,7 @@ has no h-index -- because folding a missing term in as zero would score
 "we could not measure this" and "this measured badly" identically.
 """
 
+import copy
 from datetime import date
 
 import pytest
@@ -356,6 +357,58 @@ class TestAuthorityFor:
         author_calls = [r for r in api.requests if r[0] == "authors"]
         assert len(author_calls) == 1
         assert author_calls[0][1]["filter"].count("|") == 1
+
+
+#: Every key of a work record the lookup reads, as a path into GPT3.
+_READ_PATHS = [
+    ("authorships",), ("authorships", 0), ("authorships", 0, "author"),
+    ("authorships", 0, "author", "id"),
+    ("primary_location",), ("primary_location", "source"),
+    ("primary_location", "source", "type"), ("type",),
+    ("primary_topic",), ("primary_topic", "field"),
+    ("primary_topic", "field", "id"), ("primary_topic", "domain"),
+]
+
+
+def _with(work: dict, path: tuple, value) -> dict:
+    work = copy.deepcopy(work)
+    target = work
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+    return work
+
+
+class TestAMalformedRecordIsAnAbsentSignal:
+    """#218, batch 219. Every read trusted the record's shape, so one
+    non-object where OpenAlex sends an object raised AttributeError out of
+    an optional stage and failed a run that had already scored. Driven, 104
+    shapes raised across these paths and the authors payload. A shape the
+    lookup cannot read is an absent signal, which every term already drops.
+    """
+
+    @pytest.mark.parametrize("path", _READ_PATHS,
+                             ids=lambda p: ".".join(map(str, p)))
+    @pytest.mark.parametrize("bad", ["BAD", 7, ["x"]],
+                             ids=["string", "int", "list"])
+    def test_no_shape_raises_out_of_the_lookup(self, path, bad):
+        lookup, _ = _lookup(work=_with(GPT3, path, bad),
+                            counts={"field": 10000, "below": 5000})
+        authority, signals = lookup.authority_for(
+            "https://arxiv.org/abs/2005.14165", today=date(2025, 1, 1))
+        assert authority is not None and signals["openalex_id"]
+
+    def test_an_unreadable_authorship_drops_the_author_term(self):
+        lookup, api = _lookup(work=GPT3)
+        assert lookup.author_standing(
+            dict(GPT3, authorships=["BAD", {"author": "x"}])) is None
+        assert not [r for r in api.requests if r[0] == "authors"], (
+            "no usable author id, so nothing should have been asked")
+
+    def test_a_malformed_authors_payload_is_no_standing(self):
+        lookup = ScholarLookup(enabled=True, fetch=lambda path, params: {
+            "results": ["BAD", 5, {"summary_stats": "x"}]})
+        assert lookup.author_standing(GPT3) is None
 
 
 class TestTheLookupIsOffAndDegradesWell:

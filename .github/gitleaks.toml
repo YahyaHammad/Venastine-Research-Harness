@@ -7,9 +7,10 @@
 #     CI scans the empty example-derived copy instead, which is clean).
 #   * __pycache__/*.pyc are bytecode copies of redaction-test fixtures
 #     (gitignored via *.pyc); fingerprints would churn per interpreter.
-# Intentional fake secrets in TRACKED test fixtures are allowlisted by
-# fingerprint in .gitleaksignore instead -- a moved fixture re-fires,
-# which is the tripwire behaviour we want there.
+# Intentional fake secrets in TRACKED test fixtures are not allowlisted at
+# all since #238: each is assembled from pieces at runtime, so no rule
+# matches the source and .gitleaksignore is empty. A fingerprint pinned a
+# line, and every edit above a fake re-fired the scan.
 [extend]
 useDefault = true
 

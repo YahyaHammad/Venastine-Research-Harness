@@ -2721,7 +2721,7 @@ class TestThreadStateAndInputHandling:
             mem_calls.append(1)
             return real_with_memories(prompt, *args, **kwargs)
 
-        mocker.patch("tui.app.with_memories", side_effect=_spy)
+        mocker.patch("core.loop.with_memories", side_effect=_spy)
 
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
@@ -2892,6 +2892,9 @@ class TestQuittingWhileAResearchRunIsGoing:
 class TestAnActiveAgentStillGetsItsTiers:
     """#110. An active agent is given the thread-state tiers, and is
     given its memories once rather than twice.
+
+    The spies sit on core.loop since batch 227: core.loop.session_tiers
+    appends every tier, for this turn and the one-shot alike (A80).
     """
 
     @pytest.mark.asyncio
@@ -2915,8 +2918,8 @@ class TestAnActiveAgentStillGetsItsTiers:
 
             return wrapper
 
-        mocker.patch("tui.app.with_refs", side_effect=_spy("with_refs"))
-        mocker.patch("tui.app.with_todos", side_effect=_spy("with_todos"))
+        mocker.patch("core.loop.with_refs", side_effect=_spy("with_refs"))
+        mocker.patch("core.loop.with_todos", side_effect=_spy("with_todos"))
 
         agent = AgentDef(
             name="sec", description="d", model="agent-model", provider="OPENAI",
@@ -2962,7 +2965,7 @@ class TestAnActiveAgentStillGetsItsTiers:
             mem_calls.append(1)
             return real_with_memories(prompt, *a, **kw)
 
-        mocker.patch("tui.app.with_memories", side_effect=_spy)
+        mocker.patch("core.loop.with_memories", side_effect=_spy)
 
         agent = AgentDef(
             name="sec", description="d", model=None, provider=None,
@@ -5020,7 +5023,7 @@ class TestNothingPaintsAColourThePaletteDidNotChoose:
         KeyError in a test-only construction."""
         from datetime import datetime
 
-        from tui.screens import _thread_row
+        from core.replay import thread_row as _thread_row
 
         full = _thread_row({"id": "t-1",
                             "created_at": datetime(2026, 8, 24, 9, 30),
@@ -6168,11 +6171,17 @@ class TestThePanelOpensOnWhatIsTyped:
                 app.query_one("#transcript").as_text())
 
     @pytest.mark.asyncio
-    async def test_a_command_registered_anywhere_reaches_the_panel(self):
+    async def test_a_command_registered_anywhere_reaches_the_panel(
+            self, monkeypatch):
         """§18/§19/§21b/§24 register into the same registry, and the panel
-        must see theirs without knowing they exist."""
+        must see theirs without knowing they exist. Declared in the
+        catalog first, which is what registering anywhere means since
+        ROADMAP_v3 §89."""
+        from core.commands import CATALOG, CommandSpec
         from tui.commands import SlashCommand
 
+        monkeypatch.setitem(CATALOG, "zzz-registered-late", CommandSpec(
+            "zzz-registered-late", "a command added at runtime"))
         commands.register(SlashCommand(
             "zzz-registered-late", "a command added at runtime",
             lambda app, args: None))
@@ -7671,12 +7680,21 @@ class TestTheCommandAliases:
                 f"the quit row is {rows[0].strip()!r}; an alias that is "
                 f"named nowhere is one nobody finds")
 
-    def test_an_alias_that_would_shadow_something_is_refused(self):
+    def test_an_alias_that_would_shadow_something_is_refused(
+            self, monkeypatch):
         """Both directions, because both resolve SILENTLY otherwise:
         `get` prefers real names, so the alias would simply stop working
-        and nothing would say why."""
+        and nothing would say why.
+
+        The two are declared in the catalog first, past its own refusal of
+        the same collisions (ROADMAP_v3 §89), so this is still the
+        registry's check being tested."""
+        from core.commands import CATALOG, CommandSpec
         from tui.commands import SlashCommand
 
+        monkeypatch.setitem(CATALOG, "zzz-shadowing-alias", CommandSpec(
+            "zzz-shadowing-alias", "x", aliases=("help",)))
+        monkeypatch.setitem(CATALOG, "exit", CommandSpec("exit", "x"))
         with pytest.raises(ValueError, match="already a command"):
             commands.register(SlashCommand(
                 "zzz-shadowing-alias", "x", lambda app, args: None,
@@ -8415,7 +8433,7 @@ class TestAConfigEditedUnderTheSessionIsSaidNotLogged:
         edited the file in another window."""
         self._file_without(tmp_path, monkeypatch, "max_tokens")
 
-        with caplog.at_level(logging.ERROR, logger="tui.commands"):
+        with caplog.at_level(logging.ERROR, logger="core.commands"):
             rows = commands.matching("/config max_")
 
         assert rows == []
@@ -9015,10 +9033,14 @@ class TestARaisingCommandDoesNotKillTheApp:
     """
 
     @pytest.fixture
-    def raising_command(self):
+    def raising_command(self, monkeypatch):
         """Register `/probeboom`, whose handler raises S08's AttributeError,
         and take it back out again whatever the test does."""
+        from core.commands import CATALOG, CommandSpec
         from tui.commands import SlashCommand
+
+        monkeypatch.setitem(CATALOG, "probeboom", CommandSpec(
+            "probeboom", "raises, for the containment test"))
 
         def _handler(app, args):
             # Exactly what a non-string `additional_tools` element produces.
@@ -9760,6 +9782,44 @@ class TestTheStrippedSequencesAreRecordedOnce:
 
         assert not [r for r in caplog.records
                     if "control sequence" in r.getMessage()]
+
+    @pytest.mark.asyncio
+    async def test_the_session_is_told_once_on_screen(self):
+        """#239, the owner's choice: the first turn that strips anything
+        puts ONE system line on screen, and a later one does not repeat it.
+        A system line rather than a mark in the text, so the answer's own
+        entry is exactly what it was."""
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            for text in ("a \x1b[2J b", "plain", "c \x1b[31m d"):
+                app._transcript.write_answer(text)
+                app.on_turn_finished(TurnFinished(None))
+            entries = list(app._transcript._entries)
+
+        said = [text for role, text in entries
+                if role == "system" and "control sequences" in text]
+        assert len(said) == 1, said
+        assert "logs/app.log" in said[0]
+        answers = [text for role, text in entries if role == "assistant"]
+        assert answers[0] == "a  b", answers
+
+    @pytest.mark.asyncio
+    async def test_a_session_that_strips_nothing_is_told_nothing(self):
+        """The control: a line on every session would say nothing."""
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._transcript.write_answer("nothing unusual here")
+            app.on_turn_finished(TurnFinished(None))
+            entries = list(app._transcript._entries)
+
+        assert not [text for role, text in entries
+                    if "control sequences" in text]
 
 
 class TestThePermissionModalShowsWhatDrawsTextOutOfOrder:

@@ -12,6 +12,13 @@ a hardlinked document name landing on the file the link shares. A sixth copy
 of a temp-and-rename would have been the obvious way to get that, and this
 module exists because four copies of it had already drifted.
 
+AND THE PROJECT LOADER'S READS SINCE BATCH 219. `read_regular_text` is the
+read half of the same kind of argument: a cloned project's `.venastine/`
+files and root `AGENTS.md` are read by the trust prompt before anyone has
+consented to them, and a skill symlinked to `/dev/zero` was read until
+memory ran out. Six read sites in two packages needed the one guard, which
+is the shape this module was made for.
+
 WHAT THIS IS AND IS NOT. It owns *how* a small JSON file is read and
 written -- the temp-file-plus-replace dance, the version guard, the
 fail-soft read -- and nothing about what any of them MEAN. Each store keeps
@@ -53,12 +60,28 @@ Each caller keeps the policy it already had.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
+import stat
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+class DestinationInUse(PermissionError):
+    """Windows refused the rename because another program has the file open.
+
+    Batch 219 (#242). This and a destination that is genuinely not writable
+    both arrive from `os.replace` as `PermissionError` WinError 5, and the
+    remedies are opposite: close it in the other program, or you may not
+    write here. Measured on Windows: a destination another process holds
+    open for reading still opens for `r+b` from here, and a read-only one
+    does not -- so `_held_open_elsewhere` tells them apart without writing a
+    byte. A subclass, so every `except OSError` that already reports a
+    failed write reports this one too, now saying what to do.
+    """
 
 
 def write_json_atomic(path: str, payload, *, mode: Optional[int] = None,
@@ -203,7 +226,10 @@ def _replace_through_temp(path: str, write_body, *,
     # unchanged, because "errors belong to the caller" above is the rule
     # and a cleanup that swallowed one would be the opposite of it. The
     # unlink is itself guarded, so a failure to tidy up cannot replace the
-    # failure worth reporting.
+    # failure worth reporting. The one rewording (batch 219) keeps that
+    # rule: a held-open destination is still a PermissionError, chained to
+    # the original, and only its message changes -- from one that reads as
+    # a permissions problem to the remedy, which is closing the file.
     #
     # ONE `os.open` rather than two branches, and `0o666` is not a new
     # policy: it is the mode `open(path, "w")` passes, so the umask
@@ -219,12 +245,72 @@ def _replace_through_temp(path: str, write_body, *,
         with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as f:
             write_body(f)
         os.replace(tmp, path)
-    except BaseException:
+    except BaseException as exc:
         try:
             os.unlink(tmp)
         except OSError:
             pass  # the temp file may not exist; the original error is what is raised
+        if _held_open_elsewhere(path, exc):
+            # No path in the message: every caller prefixes its own ("Could
+            # not write <path>: ..."), and a path here printed it twice.
+            raise DestinationInUse(
+                "it is open in another program (an editor, a sync client, a "
+                "backup or a virus scanner), so Windows will not replace it. "
+                "Close it there and try again.") from exc
         raise
+
+
+def _held_open_elsewhere(path: str, exc: BaseException) -> bool:
+    """Whether a failed rename onto `path` was another process's open handle.
+
+    Windows only: a POSIX rename ignores open handles. WinError 32 is a
+    sharing violation and says so itself; WinError 5 is ambiguous, and the
+    `r+b` open settles it (see `DestinationInUse`). The probe writes
+    nothing, and a destination that has gone or is a directory fails it.
+    """
+    if os.name != "nt" or not isinstance(exc, PermissionError):
+        return False
+    if getattr(exc, "winerror", None) == 32:
+        return True
+    try:
+        with open(path, "r+b"):
+            return True
+    except OSError as probe:
+        return getattr(probe, "winerror", None) == 32
+
+
+def read_regular_text(path: str, encoding: str = "utf-8-sig") -> str:
+    """The whole text of `path`, which must be a regular file. Raises OSError.
+
+    For content a cloned project brought with it (batch 219, #214), which
+    the trust prompt reads BEFORE anyone has consented to it. Git stores a
+    symlink, `open()` follows one, and `/dev/zero`, `/dev/urandom` and
+    `/dev/tty` exist on every POSIX machine: measured, the listing read a
+    skill linked to `/dev/zero` until a 1 GiB cap raised MemoryError,
+    while the trust hash -- which skips non-regular files for exactly this
+    reason -- stepped over it. A FIFO is the other half: `open()` on one
+    blocks until a writer appears.
+
+    So the file is opened NON-BLOCKING and checked on the open descriptor.
+    A FIFO's open then returns at once, and `fstat` rather than a `stat` of
+    the name leaves no window for the name to be swapped between the check
+    and the read. A non-regular file raises OSError, which is what every
+    reader of project content already reports or skips. `O_BINARY` stops
+    Windows' C runtime translating the bytes under the decoder, which
+    `open()` would have done for itself.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except BaseException:
+        os.close(fd)
+        raise
+    if not regular:
+        os.close(fd)
+        raise OSError(errno.EINVAL, "not a regular file", path)
+    with open(fd, encoding=encoding) as f:
+        return f.read()
 
 
 def read_versioned(path: str, version: int, fallback_note: str = "") -> dict:

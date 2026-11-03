@@ -34,6 +34,7 @@ import yaml
 
 import config_schema
 from core import workspace_trust
+from json_store import read_regular_text
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,9 @@ _KNOWN_CONFIDENCE = {
     "grounding_weight_factor": float,
     "critic_weight_factor": float,
     "assumption_flag_penalty": float,
+    # Retired by ROADMAP_v3 §90 and still KNOWN, as `ensemble_n` is (E4):
+    # unknown keys raise, so dropping it would stop every settings.json
+    # that sets it from loading. effective_confidence warns instead.
     "disagreement_penalty_factor": float,
     "non_factual_score_cap": float,
     "source_quality_floor": float,
@@ -377,8 +381,11 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         # ^--- no longer sits at position 0 and the file is skipped with
         # the false diagnosis "does not begin with a YAML frontmatter
         # block". utf-8-sig strips a BOM and is a no-op without one.
-        with open(path, encoding="utf-8-sig") as f:
-            text = f.read()
+        # Regular files only (batch 219, #214): this runs for the trust
+        # prompt's listing, before any grant, and a cloned skill linked to
+        # /dev/zero was read until memory ran out. The refusal is an
+        # OSError, so it warns and skips below like any broken definition.
+        text = read_regular_text(path)
         fm, body = _parse_frontmatter(text)
     except (OSError, ValueError, yaml.YAMLError) as e:
         logger.warning("Skipping %s file %s: %s", kind, path, e)
@@ -825,6 +832,16 @@ def _validate_settings(data, source: str) -> None:
             raise ValueError(
                 f"settings.json at {source}: key {key!r} must be {expected_name}, "
                 f"got {type(value).__name__}")
+        if key == "max_token_budget" and value is not None and value <= 0:
+            # #213. The type gate passes 0 and -5 -- they are ints -- and
+            # the loop's check is `used >= cap`, so a cap of zero or less
+            # let every turn spend ONE model call and then die reporting a
+            # budget problem for what is a typo in this file.
+            raise ValueError(
+                f"settings.json at {source}: max_token_budget must be a "
+                f"positive number of tokens, or null for no cap -- got "
+                f"{value}, which would stop every turn after its first "
+                f"model call.")
     for section, known_keys in _NESTED_SETTINGS.items():
         block = data.get(section)
         if block is None:
@@ -1082,9 +1099,9 @@ def _read_settings_file(path: str) -> dict:
     if not os.path.exists(path):
         return {}
     # utf-8-sig for the same reason as _parse_md_file: a BOM'd
-    # settings.json makes json.load raise at the first character.
-    with open(path, encoding="utf-8-sig") as f:
-        data = json.load(f)  # json.JSONError propagates as ValueError
+    # settings.json makes json.load raise at the first character. And
+    # regular files only, for the same reason too (batch 219).
+    data = json.loads(read_regular_text(path))  # a JSONDecodeError is a ValueError
     _validate_settings(data, path)
     return data
 
@@ -1203,8 +1220,7 @@ def initialize(project_path: str) -> None:
             # -- including plain chat, which never reads the file. Every
             # other malformed content file in this module warns and skips.
             try:
-                with open(context_path, encoding="utf-8-sig") as f:
-                    context = f.read()
+                context = read_regular_text(context_path)
             except (OSError, UnicodeDecodeError) as e:
                 logger.warning(
                     "Could not read %s; continuing without project "
@@ -1591,7 +1607,8 @@ def _bounded(source: list, prefix: str, what: str) -> list:
 def describe_project_content(project_path: str) -> str:
     """Human-readable summary shown in the trust prompt, so approving
     trust is an informed decision -- a project's settings can choose the
-    provider and multiply pipeline cost via ensemble_n, and an agent's
+    provider and multiply pipeline cost by turning on ensemble_mode over
+    config.yaml's roster (#213: ensemble_n is ignored), and an agent's
     or a skill's description can reach the system prompt (#131) --
     where, each entry says (#259, #260).
 
@@ -1621,9 +1638,11 @@ def describe_project_content(project_path: str) -> str:
     hub = os.path.join(os.path.realpath(project_path),
                        workspace_trust.PROJECT_CONTEXT_FILENAME)
     if os.path.exists(hub):
+        # Every read in this function is of content nobody has consented
+        # to yet, so each is regular-files-only (batch 219, #214): a hub
+        # linked to /dev/zero would otherwise be read until memory ran out.
         try:
-            with open(hub, encoding="utf-8-sig") as f:
-                body = f.read()
+            body = read_regular_text(hub)
         except (OSError, UnicodeDecodeError) as e:
             lines.append(
                 f"{workspace_trust.PROJECT_CONTEXT_FILENAME}: could not be "
@@ -1638,7 +1657,8 @@ def describe_project_content(project_path: str) -> str:
 
     # settings.json and mcp.json are shown VERBATIM, the rest by name.
     # These two are the ones whose contents change what runs: settings can
-    # pick the provider and multiply pipeline cost via ensemble_n, and
+    # pick the provider and multiply pipeline cost by turning on
+    # ensemble_mode (ensemble_n is ignored; the roster is config.yaml's), and
     # mcp.json names a local command to execute. Approving trust without
     # seeing that command is not an informed decision, which is the whole
     # reason §17 moved project MCP config under .venastine/ instead of
@@ -1649,8 +1669,7 @@ def describe_project_content(project_path: str) -> str:
         if not os.path.exists(path):
             continue
         try:
-            with open(path, encoding="utf-8-sig") as f:
-                body = f.read()
+            body = read_regular_text(path)
         except (OSError, UnicodeDecodeError) as e:
             # This function runs ONLY for untrusted projects, i.e. content
             # that is adversarial by definition. UnicodeDecodeError is a
@@ -1724,7 +1743,6 @@ _CONFIDENCE_KNOBS = {
     "grounding_weight_factor": _UNIT,
     "critic_weight_factor": _UNIT,
     "assumption_flag_penalty": _UNIT,
-    "disagreement_penalty_factor": _UNIT,
     "non_factual_score_cap": _UNIT,
     "source_quality_floor": _UNIT,
     "authority_full_credit": _UNIT,
@@ -1754,7 +1772,6 @@ def _confidence_defaults() -> dict:
         "grounding_weight_factor": cs.GROUNDING_WEIGHT_FACTOR,
         "critic_weight_factor": cs.CRITIC_WEIGHT_FACTOR,
         "assumption_flag_penalty": cs.ASSUMPTION_FLAG_PENALTY,
-        "disagreement_penalty_factor": cs.DISAGREEMENT_PENALTY_FACTOR,
         "non_factual_score_cap": cs.NON_FACTUAL_SCORE_CAP,
         "source_quality_floor": cs.SOURCE_QUALITY_FLOOR,
         "authority_full_credit": cs.AUTHORITY_FULL_CREDIT,
@@ -1894,6 +1911,12 @@ def effective_confidence(warn: bool = False) -> dict:
     """
     values = _confidence_defaults()
     supplied = get_settings().get("confidence") or {}
+    if warn and "disagreement_penalty_factor" in supplied:
+        logger.warning(
+            "Ignoring confidence.disagreement_penalty_factor: a claim most "
+            "ensemble candidates did not assert is sent to Pass 6a/6b to be "
+            "checked now, and nothing is subtracted for it (ROADMAP_v3 §90). "
+            "Remove the key from settings.json.")
     _apply_scalar_knobs(values, supplied, _CONFIDENCE_KNOBS, "confidence", warn)
     _apply_grounding_weights(values, supplied.get("grounding_weights"), warn)
     _apply_tier_thresholds(values, supplied.get("tier_thresholds"), warn)

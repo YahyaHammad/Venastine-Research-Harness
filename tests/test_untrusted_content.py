@@ -49,12 +49,18 @@ PASS_DIGESTS = {
     "Pass 3b": "bb6fb3a830b52583",
     "Pass 3c": "8f2bc9b1231ea65f",
     "Pass 4": "744f6b116d0a352b",
-    "Pass 6a": "6cd6acf94d4c898f",
+    # Batch 232 (ROADMAP_v3 §90) added a paragraph deliberately: a claim
+    # D1 routed for cross-candidate disagreement carries
+    # `disagreement_feedback`, and 6a is told to check it against its
+    # grounding and keep the text when it holds, not to reword or hedge it.
+    "Pass 6a": "1525101eb7c37114",
     # Batch 46 (§45): the same source shape, because 6b re-runs 3a and
     # _apply_grounding is literally the same function. It also now says
     # that a source supporting the ORIGINAL wording may not support the
     # revision, which is the thing re-validation exists to catch.
-    "Pass 6b": "315a49518702ae59",
+    # Batch 232 (§90): a claim 6a only checked may come back unchanged and
+    # is re-validated all the same.
+    "Pass 6b": "81f0e861f9f099af",
     "Final synthesis": "80ef84e07a41a225",
 }
 

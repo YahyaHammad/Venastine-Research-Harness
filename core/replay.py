@@ -148,22 +148,44 @@ def replay_entries(thread_id: UUID) -> list[ReplayEntry]:
             if failure:
                 entries.append(("error", f"This run failed: {failure}", (), ()))
         elif role == "assistant":
-            # BEFORE the answer, because that is the order it happened in
-            # and the order the live transcript drew it in (§43 RM1 puts
-            # one `venastine ›` above whichever came first). A replay that
-            # reordered the turn would be the same defect as one that
-            # reflowed it.
-            reasoning = _reasoning_text(message.get("thinking"))
-            if reasoning:
-                entries.append(("thinking", reasoning, (), ()))
-            text = _as_text(message.get("text"))
-            if text:
-                entries.append(("assistant", text, (), ()))
-            for call in message.get("tool_calls") or []:
-                entries.append(("tool", *_tool_marker(call)))
+            entries.extend(step_entries(
+                _reasoning_text(message.get("thinking")),
+                _as_text(message.get("text")),
+                message.get("tool_calls") or []))
         # role == "tool": skipped by T4. Not a gap -- see the module
         # docstring. The CALL above is the record that it happened.
     return entries
+
+
+def step_entries(reasoning: str, text: str, tool_calls) -> list[ReplayEntry]:
+    """One model step as display entries: its reasoning, its text, then a
+    line per tool call.
+
+    BEFORE the answer, because that is the order it happened in and the
+    order the live transcript drew it in (§43 RM1 puts one `venastine ›`
+    above whichever came first). A replay that reordered the turn would be
+    the same defect as one that reflowed it.
+
+    PUBLIC SINCE ROADMAP_v3 §86 (A81), because the CLI's live turn prints
+    each step through this as it finishes. A replay and the turn it
+    replays are then one function's output over the same three things,
+    which is what keeps the CLI from showing a turn one way while it runs
+    and another way when its thread is resumed (#225).
+    """
+    entries: list[ReplayEntry] = []
+    if reasoning:
+        entries.append(("thinking", reasoning, (), ()))
+    if text:
+        entries.append(("assistant", text, (), ()))
+    for call in tool_calls:
+        entries.append(("tool", *_tool_marker(call)))
+    return entries
+
+
+def reasoning_text(record) -> str:
+    """`_reasoning_text`, for a caller outside this module (§86, A81): the
+    CLI reads a live response's reasoning with the replay's own reader."""
+    return _reasoning_text(record)
 
 
 def _reasoning_text(record) -> str:
@@ -255,3 +277,39 @@ def _as_text(value: Optional[object]) -> str:
     if value is None:
         return ""
     return value.strip() if isinstance(value, str) else str(value)
+
+
+def tool_lines(thread_id: UUID) -> list[tuple[str, tuple]]:
+    """Every tool-call line a replay of `thread_id` draws, in order, with
+    what each one opens: `(line, (kind, call_id))`, the second slot empty
+    for a call with no id (ROADMAP_v3 §89, register item 45).
+
+    THE CLI'S ROUTE TO A CALL, and read off `replay_entries` rather than
+    walked separately: `/call` numbers these lines, and a second walk that
+    drew one line differently, or skipped one, would number a call the
+    reader cannot match to the line they are looking at.
+    """
+    return [(entry[1], entry[3]) for entry in replay_entries(thread_id)
+            if entry[0] == "tool"]
+
+
+def thread_row(thread: dict) -> str:
+    """One row of a thread list: timestamp, first message, id (§27).
+
+    The TUI's picker draws it and the CLI's `/threads` prints it, so a
+    conversation reads the same in either list (moved from tui/screens.py
+    by §89).
+
+    `created_at` and `id` are INDEXED deliberately, not .get: a row
+    without either has nothing honest to render -- storage.list_threads()
+    always supplies both, and the id is the row's whole payload on
+    selection. Only `preview` is optional (.get): §27 added it, so
+    hand-built test rows predate it, and a missing preview degrades to an
+    id-only row rather than a KeyError in a test-only construction.
+    """
+    created = thread["created_at"]
+    stamp = (f"{created:%Y-%m-%d %H:%M}"
+             if hasattr(created, "strftime") else str(created))
+    preview = (thread.get("preview") or "").strip()
+    return f"{stamp}  {preview}  ({thread['id']})" if preview \
+        else f"{stamp}  {thread['id']}"

@@ -6,6 +6,8 @@ For each flagged claim, rewrite it to actually address the specific issue(s) rai
 
 Do not revise every claim identically with generic hedge language ("some evidence suggests," "it is possible that") — that would defeat the purpose of this pass. Each rewrite should reflect what the SPECIFIC feedback for that claim actually said was wrong.
 
+Some claims also carry `disagreement_feedback`: several models answered the same query independently, and only `asserted_by` of the `of` answers made this claim. That is a reason to check the claim, not evidence that it is wrong, and it may be the only reason the claim is here. Check it against its grounding results. If they support the claim as written, return its text unchanged. If they do not, narrow it to what they do support. Do not mention the disagreement in the claim itself ("not all sources agree that…"): the run already records it, and hedging is not checking.
+
 Respond with ONLY this JSON structure — one entry per flagged claim you were given:
 
 ```json

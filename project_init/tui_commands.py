@@ -14,7 +14,7 @@ run the work off the UI thread, render a diff into the transcript, and put
 a modal in front of a human.
 """
 
-from tui.commands import SlashCommand
+from tui.commands import bind
 from tui.commands import registry as commands
 
 
@@ -144,6 +144,4 @@ def _cmd_init(app, args: str) -> None:
 def register_init_commands() -> None:
     """Idempotent -- registering by name overwrites, matching §16's
     register_builtin_commands() and every section registrar since."""
-    commands.register(SlashCommand(
-        "init", "generate this project's documentation set", _cmd_init,
-        "[--software|--research] [--config]"))
+    commands.register(bind("init", _cmd_init))

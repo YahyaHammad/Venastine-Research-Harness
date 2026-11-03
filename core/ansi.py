@@ -34,15 +34,15 @@ Measured, all seven introducers survived (CSI, OSC, DCS, SOS, PM, APC, and
 ST as a terminator), so `x\x9b2Jy` came through whole while `x\x1b[2Jy`
 became `xy`. The asymmetry is the argument on its own: this module exists
 because a control must not reach a terminal, and which of two spellings
-the sender chose was never part of that decision. The whole C1 range
+the sender chose was never part of that decision. The whole Unicode C1 range
 0x80-0x9F goes, not only the introducers, for the same symmetry -- `ESC D`
 and `ESC E` already went through the two-character fallback below, and
 U+0084 and U+0085 are those same two controls.
 
   The cost, stated because it is real: text that was decoded as latin-1
-  where it was written as cp1252 carries C1 characters where its curly
+  where it was written as cp1252 carries Unicode C1 characters where its curly
   quotes belong, and those characters are now DELETED rather than drawn
-  as something odd. A C1 character cannot be drawn meaningfully either
+  as something odd. A Unicode C1 character cannot be drawn meaningfully either
   way -- the alternative is handing it to the terminal as a control --
   so the choice is between losing it and acting on it.
 
@@ -123,7 +123,7 @@ _C1_CSI = "\x9b"                     # ESC [
 _C1_ST = "\x9c"                      # ESC \ , a terminator rather than an opener
 # DCS, SOS, OSC, PM, APC: ESC P, ESC X, ESC ], ESC ^, ESC _
 _C1_STRING_OPENERS = frozenset("\x90\x98\x9d\x9e\x9f")
-# Every C1 control. The ones that are not introducers are single-character
+# Every Unicode C1 control. The ones that are not introducers are single-character
 # controls a terminal still ACTS on (U+0084 is IND, U+0085 is NEL), and
 # their ESC spellings were already removed by the fallback at the end of
 # `_sequence_end`, so removing these is the symmetry and not a widening.
@@ -294,11 +294,11 @@ def reveal_invisible_counted(text) -> tuple[str, int]:
 
 def _sequence_end(s: str, i: int) -> int | None:
     """Index just past the escape sequence at *i*, or None if it is not all
-    here yet. *s[i]* is ESC or a C1 control (batch 145).
+    here yet. *s[i]* is ESC or a Unicode C1 control (batch 145).
 
     The two spellings reach the SAME two scanners -- a CSI ends at its final
     byte, a string sequence ends at its terminator -- and differ only in
-    where the body starts, one character in for a C1 introducer and two for
+    where the body starts, one character in for a Unicode C1 introducer and two for
     ESC. That is the whole of the difference, which is why it is expressed
     as an offset rather than as a second branch per shape.
     """
@@ -309,7 +309,7 @@ def _sequence_end(s: str, i: int) -> int | None:
             return _csi_end(s, i + 1)
         if ch in _C1_STRING_OPENERS:
             return _string_end(s, i + 1)
-        # Every other C1 is a single-character control, ST included: it
+        # Every other Unicode C1 is a single-character control, ST included: it
         # terminates a string sequence, and a bare one outside any
         # sequence is still a control the terminal would act on.
         return i + 1

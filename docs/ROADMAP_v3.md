@@ -43,6 +43,13 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§90. Disagreement routed to a check, not deducted** - **(BUILT in batch 232)** (on an ensemble run, cross-candidate disagreement was a 0.15 penalty nothing else read, and it could not be worked off: at 1 of 3 it took a partially grounded claim from MEDIUM to LOW, the loop re-scored it under the same penalty every round, and D2 published it UNVERIFIED. D1 now sends a factual claim at most half the candidates asserted to the 6a/6b loop to be checked, 6a is told the count, and the penalty is retired; issue #12, A85)
+- **§89. One command catalog, and the CLI's slash commands** - **(BUILT in batch 231)** (the CLI had no command layer, so `/help` at its prompt was a billed chat turn and every feature that wanted the CLI shipped a launch flag. One catalog in `core/commands.py` now declares every command once and both shells bind handlers to it; the CLI gets 18 commands, among them `/call`, the CLI's route to item 45's call and session views, and a `/` line that names nothing is refused; A84)
+- **§88. Input typed before a question, and the launcher's stdin** - **(BUILT in batch 230)** (`ask()` drained the queue, which holds only what the pump already took, so half a line typed before a question became the front of its answer -- measured "sta" + "fresh" on both platforms -- and on Windows a line typed before the first question answered it. The terminal's own buffer is flushed first now, with an Escape for a Windows read in progress; and the npm launcher pauses and unrefs stdin after its consent question, measured harmless both ways; A83)
+- **§87. Two provider facts about temperature, answered from the providers' own pages** - **(BUILT in batch 229)** (two checks §10's revisit recorded as needing a live key: the default really is 1.0, so the deleted `ENSEMBLE_TEMPERATURE` sent what the provider would have used; and OpenAI's reasoning models refuse a temperature whenever reasoning effort is not `none`, which at the shipped `high` is always, while the guard listed only Anthropic names. It now follows OpenAI's rule on `OPENAI`, and the two Gemini models that silently ignore a temperature are listed; A82)
+- **§86. A CLI turn printed as it runs, and a second press to stop it** - **(BUILT in batch 228)** (a CLI chat turn printed its notices and its final answer, while a replay of the same thread showed its reasoning and a line per tool call, and the first Ctrl+C during a turn stopped it. Each step now prints when it finishes, through the replay's own function, and a turn stops on a second press inside two seconds, during a wake turn too; A81)
+- **§85. Six prompt tiers, one assembly** - **(BUILT in batch 227)** (three call sites appended the same thread and session tiers by hand, with the memories guard spelled three ways and the boundary test's canaries two members short. `core.loop.session_tiers` appends all six, the guard is one argument, and the pin follows `SESSION_TIERS`; A80)
+- **§84. An MCP result with no size bound** - **(BUILT in batch 225)** (whatever an MCP tool returned reached the thread and the model whole: 10 MB of text, structured content or an error message went through, behind a redaction pass that took 1.2-2.5 s over it. The whole result is now cut at `max_read_chars` with a note, a structured payload is kept whole or dropped, and a word the cut splits goes too; A79)
 - **§83. A ChatGPT plan, spent in a local install** — **(COMPLETE: measurement in batches 181–183 and 187; sign-in BUILT in batch 184; Responses BUILT in batch 188 and checked live in batch 189; final owner checks and the signed-out header fixed in batch 203)** (a local install can sign in, refresh, use the plan and disconnect; the header distinguishes a selected CHATGPT provider from signed-in plan access)
 - **§82. Gemini 3's thought signatures, and a pin that could not carry them** - **(BUILT in batch 172)** (every model a new Google account can call is Gemini 3, which refuses a function call replayed without the signature it came with, and google-genai 1.0.0 had no field to hold one, so every GOOGLE tool loop failed on its second request. The pin moves to 2.29.0, each call's signature rides in §44's reasoning record, a turn another model wrote gets Google's placeholder, and the Schema keys sent are a verified list since 2.29.0's Vertex-only `additional_properties` was refused. Google effort is on as a consequence)
 - **§81. An image a tool reads, delivered to a model that can see it** - **(BUILT in batch 171; Google added in batch 173)** (nothing a model could read from the workspace reached it as anything but text: a tool result was `str(result)`, `read` decoded bytes with `errors="replace"`, and MCP dropped image blocks by decision. `view_image` attaches an image to its own result through the memory, into a new column, never through the redactor; Anthropic carries it inside the `tool_result`, the OpenAI-compatible wire in a harness message after the tool batch because its tool messages take text only, and since batch 173 Google in a harness turn after the batch too, because its function responses take no image on the models a new account can call (a GIF stays a note there); opt-in per provider with `accepts_images`, never in a research pass, and counted at a fixed weight by the compactor)
@@ -1707,7 +1714,7 @@ partial output kept -- but nothing here is shaped by it.
 | **CN7** | **A child inherits the switch.** `cancel` joins `_INJECTABLE_PARAMS`, so `spawn_subagent` receives the parent's token and a stop reaches a run that happens INSIDE a tool call -- the one place a LoopEvent cannot. That list is `activity`'s own argument, one line up |
 | **CN8** | **TUI: `escape`, app level, no `priority=True`.** The SECOND app-level binding on the key, working the way the `ctrl+c` pair does: whichever `check_action` refuses with **`False`** gives up the slot. `False` and never `None` is measured rather than stylistic -- `active_bindings` is keyed by KEY and skips a binding only on `is False`. Precedence falls out of machinery that already exists: suggestion panel, then thread view, then cancel. The one-sentence rule survives -- escape means back to the conversation, and stopping a turn is that |
 | **CN9** | **The predicate is the live token, not `_busy`.** `_busy` is also true through the post-turn session wait, where SS2 keeps `ctrl+b` reachable precisely so the user can stop what is running there. Two keys meaning adjacent things would make neither clear, so escape stops the CONVERSATION and `ctrl+b` stops the SESSIONS, and neither quietly does the other's job |
-| **CN10** | **CLI: Ctrl+C stops the turn; at the prompt it still exits.** A signal HANDLER rather than an `except KeyboardInterrupt`, and the difference is what the thread looks like afterwards: an interrupt unwinds from wherever it lands, which can be between a `tool_use` D20 has persisted and the `tool_result` that pairs with it. Installed per turn and restored in a `finally`, so `_await_sessions` keeps catching its own interrupt and Ctrl+C there still stops the SESSIONS -- the aim of that key in that place was already right |
+| **CN10** | **CLI: Ctrl+C stops the turn; at the prompt it still exits.** A signal HANDLER rather than an `except KeyboardInterrupt`, and the difference is what the thread looks like afterwards: an interrupt unwinds from wherever it lands, which can be between a `tool_use` D20 has persisted and the `tool_result` that pairs with it. Installed per turn and restored in a `finally`, so `_await_sessions` keeps catching its own interrupt and Ctrl+C there still stops the SESSIONS -- the aim of that key in that place was already right **Amended by §86 (A81, batch 228):** the turn now stops on the SECOND press inside `TURN_STOP_CONFIRM_S`; the first only says what a second would do |
 | **CN11** | **Cancelling under an open approval modal needs no new path.** `core/interaction.decode()` already substitutes the declining default for *"a modal torn down by shutdown"*, so the call is denied and the token is seen at the next boundary |
 | **CN12** | **The research pipeline is DEFERRED, not out of scope** (owner), and so are compaction and the `/grill-me` one-shot. See the next section for what the pipeline has to learn first |
 
@@ -2027,7 +2034,7 @@ arriving at the CLI.
 | id | decision |
 |---|---|
 | **A20** | **Under `supports_stream_usage`, a token count that is not a number RAISES, and the coercion happens in one place for all three branches.** D21 says a stream must not silently degrade token accounting; what it compared was `input == 0 and output == 0`, which a PARTIAL report defeats without reporting anything usable. The flag is the per-provider statement that this provider DOES report usage, so a missing number is that promise broken, and the widened rule is what D21 already said rather than a new policy. Chosen over coercing to zero and leaving the comparison alone -- the report's shape -- because the reachable case the report itself names is `usageMetadata` omitting `candidatesTokenCount`, which that shape accepts silently with the output count as zero. **It cannot break a case that works today**: every input it raises on currently dies with a `TypeError` in `core/loop.py`, so the change is in the diagnosis, not in the outcome. Two messages are kept distinct, and the nothing-at-all wording is kept verbatim so the guards matching on it keep their meaning. With the flag FALSE only the coercion happens and both counts are zero, which is the opt-out's whole purpose -- `providers.json.example` ships GOOGLE false, so the blocked-completion shape still runs. `_stream_usage` returns two ints always, which is what makes a belt in `core/loop.py` unnecessary rather than merely unfashionable: fix at the producer |
-| **A21** | **Ctrl+C in the session wait stops the SESSIONS and never the turn, and it stops them once the running turn has finished.** The key keeps the one meaning `_await_sessions` has always advertised; what changes is that it no longer delivers it by unwinding a turn. For the duration of each wake turn that function installs a handler of its own which DEFERS the interrupt -- CN10's own "the current step finishes first", pointed at the sessions instead of the turn -- and restores it in a `finally`, so a press while merely waiting still takes the `except KeyboardInterrupt` that was always there. **Ruled against binding the key to the turn**, which was this batch's recommendation, and the owner's reason is the TUI's own measurement: a user copying or pasting around a running turn can press ctrl+c by accident, which is why batch 57 settled on "ctrl+c copies when there is something to copy, and starts a quit when there is not" and why a quit there takes two presses. Also ruled against one key doing both jobs, which CN9 refused for the TUI (*"escape stops the CONVERSATION and `ctrl+b` stops the SESSIONS, and neither quietly does the other's job"*). A stopped wait returns to the prompt with the sessions killed and anything that arrives afterwards held for the next message, which is SS19 unchanged |
+| **A21** | **Ctrl+C in the session wait stops the SESSIONS and never the turn, and it stops them once the running turn has finished.** The key keeps the one meaning `_await_sessions` has always advertised; what changes is that it no longer delivers it by unwinding a turn. For the duration of each wake turn that function installs a handler of its own which DEFERS the interrupt -- CN10's own "the current step finishes first", pointed at the sessions instead of the turn -- and restores it in a `finally`, so a press while merely waiting still takes the `except KeyboardInterrupt` that was always there. **Ruled against binding the key to the turn**, which was this batch's recommendation, and the owner's reason is the TUI's own measurement: a user copying or pasting around a running turn can press ctrl+c by accident, which is why batch 57 settled on "ctrl+c copies when there is something to copy, and starts a quit when there is not" and why a quit there takes two presses. Also ruled against one key doing both jobs, which CN9 refused for the TUI (*"escape stops the CONVERSATION and `ctrl+b` stops the SESSIONS, and neither quietly does the other's job"*). A stopped wait returns to the prompt with the sessions killed and anything that arrives afterwards held for the next message, which is SS19 unchanged **Amended by §86 (A81, batch 228):** during a wake turn the handler acts on the SECOND press inside the window, as the user's own turn does |
 
 ### What §64 deliberately does not change
 
@@ -2206,7 +2213,7 @@ consumer that never passed through the wake's redaction at all.
 |---|---|
 | **A22** | **#89's pin cap is `PIN_MAX_TRIGGER_FRACTION` of the trigger that FIRES for this model, resolved the way `thresholds()` resolves it.** `pin_measurements` takes an optional `(model, provider_name)` and `tools/builtin/pin.py` declares `parent_run` to pass it; with no pair the binding-free read is the fallback, so a call from outside a run is unmoved. Chosen over adding the derived trigger to the existing `min()`, which closes only the unsafe direction and leaves the cap at 20,000 above a 53,000-token trigger -- 2% where the policy says 50% -- and over keeping an absolute 20,000 and correcting the two documents that call it a fraction. #89's own argument is about the trigger, and the property it bought is intact at every window: the cap is never more than half of what the thread folds at. **One behaviour changes direction**: with the pair, a RAISED session `/trigger` now raises the cap, because a raised override IS the trigger that fires; the old `min()` erred strict because it could not tell whether the number applied to the model in front of it |
 | **A23** | **A session's output is redacted before every cut it goes through, at all four sites, and the layer that cuts is the layer that redacts.** The producer redacts what it stores (`_finish`), the wake redacts the whole tail before the per-session budget slices it, the view redacts before the display budget, and the paging route redacts the parts before a page is cut out of them -- `OutputBuffer.page` takes an optional `clean`, so the monitor's own search still matches on RAW output, which is the rule the design already recorded. **The head/tail seam is a cut too** and is redacted across: the parts are joined when nothing has been evicted, because that seam sits at 10,000 characters on every session, inside the first page of every read. **The offsets then describe the redacted document**, which is RB3's rule rather than a compromise -- 210 characters of drift on a measured 120,000-character buffer, and every offset a surface speaks is a position in the text the reader was given. Chosen over fixing only the two sites the report names, which leaves the boundary that produced them intact one layer down, and over a second redaction pass at each consumer, which is what RB4 declined for `source_corpus` and declined correctly. Cost measured: 6.5ms for a full 200,000-character buffer against 4.7ms for one ordinary tool result |
-| **A24** | **The floor says so when it leaves no usable headroom, once per (provider, model), and only where the FLOOR is what bound the trigger.** Two wordings for one condition, because the remedy differs: at or above the window compaction can never fire, and just below it the thread folds with almost nothing to grow into. Both name `warning_margin_tokens` and `keep_recent_tokens`, since lowering them is the one remedy that works. **Narrowed from what the report suggested**, which was to warn whenever `window - trigger` is below one bounded read: measured, that also fires at 16,384 and 32,768, where the headroom CAP bound it, the cap is deliberate (see `headroom_for`) and the only remedy is a bigger model -- so a line naming two settings would name the wrong thing, on every stock small-window install. The floor binds at or below a 10,666-token window and nowhere above it, which is where this warning fires and stops. The excluded case is register item 96 rather than a silence. The dedup is a set of its own, keyed on the PAIR: the same model name behind a gateway and behind its own vendor can report different windows |
+| **A24** | **The floor says so when it leaves no usable headroom, once per (provider, model), and only where the FLOOR is what bound the trigger.** Two wordings for one condition, because the remedy differs: at or above the window compaction can never fire, and just below it the thread folds with almost nothing to grow into. Both name `warning_margin_tokens` and `keep_recent_tokens`, since lowering them is the one remedy that works. **Narrowed from what the report suggested**, which was to warn whenever `window - trigger` is below one bounded read: measured, that also fires at 16,384 and 32,768, where the headroom CAP bound it, the cap is deliberate (see `headroom_for`) and the only remedy is a bigger model -- so a line naming two settings would name the wrong thing, on every stock small-window install. The floor binds at or below a 10,666-token window and nowhere above it, which is where this warning fires and stops. The excluded case is register item 96 rather than a silence. The dedup is a set of its own, keyed on the PAIR: the same model name behind a gateway and behind its own vendor can report different windows. **Amended in batch 220**, on the owner's choice (#246, item 96): the excluded case gets a line of its own, `_warn_if_one_read_cannot_fit`, rather than staying silent. It names the READ, not the two margins, because `max_read_chars` is the setting that helps there, and says the value that fits the headroom and that the setting applies to every model. It fires where the cap binds and one bounded read exceeds the headroom (16,384 and 32,768 under the shipped settings, and not at 64,000), once per pair in a set of its own. A24's ruling stands for the margin-naming line, which still fires only where the floor binds |
 
 ### What §65 deliberately does not change
 
@@ -2389,7 +2396,14 @@ tree.
   rule to keep in step with gate D0 for no gain. Only the 6b caller
   narrows. A 3a entry naming a non-factual claim still lands; measured, it
   moves no tier, and that is `docs/TECHNICAL_DEBT.md` 98 rather than a
-  silence.
+  silence. **Amended in batch 220** (#247, the owner's choice of
+  drop-and-trace over a corrective retry): 3a now validates against, applies
+  to and scores only `factual_claims` -- D0's own list, so there is no second
+  rule to keep in step -- and traces an entry naming any other claim. Pass
+  3b got the same scope in the same batch for a stronger reason found
+  beside it: a non-factual claim's score IS its capped critic component, so
+  a stray 3b severity moved its tier (measured, MEDIUM to UNVERIFIED at 0.8).
+  `score_grounding_sources`' own default is unchanged.
 - **`source_span` gets no type.** S12-01's suggested shape asks for `str`;
   grepped, nothing in production reads the field except `vars(c)`
   serialisation, which is JSON-native whatever it holds. A check with no
@@ -2399,7 +2413,9 @@ tree.
 - **Pass 6a's silent drop stays silent.** Its `if claim:` skip is
   documented and bounded by the round counter rather than by data the model
   supplies. Now that 6b says what it dropped, the asymmetry is worth
-  recording, and it is item 99.
+  recording, and it is item 99. **Amended in batch 220** (#248): 6a traces
+  its drops through the same helper as 6b, after its own checkpoint line.
+  The round counter still bounds the loop; only the silence went.
 - **No element-type language for flag strings, and no re-validation of
   assumption flags in 6b.** Both are the report's own "Not doing", and both
   are still right: `len()` is the only reader of a flag list, and 6b not
@@ -2783,11 +2799,623 @@ leaked PID.
 - **The strings inside `input_schema`** (A31). The tool is refused whole
   instead; a truncated schema is a tool that fails at call time.
 - **The success path's unbounded `result`** (A32), which is
-  `TECHNICAL_DEBT 48` and ruled DEFER.
+  `TECHNICAL_DEBT 48` and ruled DEFER. (Bounded since batch 225:
+  §84, A79.)
 - **`tools/registry.register` itself.** The gate lives in `register_all`
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §90. Disagreement routed to a check, not deducted
+
+**Built in batch 232**, from issue #12, which ROADMAP §10's revisit recorded
+as a future section rather than build into itself.
+
+**Measured.** On an ensemble run Pass 5 subtracted `0.15 * (1 - consistency)`
+from a factual claim (E8), and nothing else read the signal: D2 routes on
+`retry_count`, and no pass consumed `consistency_score`. Swept through
+`score_claim`, the penalty changed a tier in exactly the shapes where at most
+half the candidates asserted the claim (1 of 2, 1 of 3, 1 or 2 of 4). A
+grounded claim fell from HIGH (0.85) to MEDIUM there, which is a judgement.
+A partially grounded one fell from MEDIUM (0.60) to LOW (0.50 at 1 of 3),
+which is a defect: LOW is flagged, so D1 sent the claim to 6a without saying
+why, and 6b re-scored it under the same penalty, because who asserted a
+claim does not change when it is reworded. A claim whose grounding never
+moved rode the loop to D2's cap and was published UNVERIFIED, at the cost of
+every round on the way.
+
+**The owner's choices.** Route instead of deduct: the penalty is retired. A
+claim is contested when at most half the candidates asserted it. 6a is told
+the count, and not the other candidates' answers.
+
+**Contested.** `score_claim` marks a factual claim `contested` when its
+consistency is at most `CONTESTED_SHARE` (0.5), and records the mark in
+`score_breakdown` beside the consistency score and its denominator (E12).
+The score is the non-ensemble formula with no term for agreement, so §10's
+byte-for-byte regression guard now covers the ensemble case too: there is
+one formula. E9 stands, enforced in one place, the branch that records the
+mark: a speculative or synthesis claim is never asked, and its breakdown
+carries no `contested` key (B10). An unreported numerator (B7) is not
+contested, and a duplicated or out-of-range one is deduplicated and clamped
+first (B8), so `[1, 1]` of three is contested and `[1, 2, 3, 4]` of three is
+not.
+
+**D1 routes it.** D1 flags every claim whose tier is flagged, as before, and
+every contested claim whatever it scored. It is still pure code: it reads the
+mark Pass 5 wrote (`is_contested`), and the loop's existing passes do the
+checking, so no gate gains a model call. 6a and 6b are one batched call each
+per round, so a contested claim adds tokens to a round that was running
+anyway, and two calls only on a run where nothing else was flagged. **Entry
+only.** The loop keeps a claim for its tier and never for being contested; a
+loop that did would hold every contested claim to D2's cap, which is the
+penalty's defect again. A contested claim the check clears leaves after one
+round, and one the check fails is flagged on its tier like any other.
+
+**6a is told.** A contested claim's entry in 6a's batch carries
+`disagreement_feedback: {"asserted_by": k, "of": n}`, deduplicated and out of
+the candidates that produced text. `revise.md` says what to do with it: check
+the claim against its grounding, keep the text if the grounding holds it,
+narrow it if not, and do not write the disagreement into the claim.
+`revalidate.md` says a claim 6a only checked may come back unchanged. D1's
+checkpoint says how many claims it took for disagreement.
+
+**The settings key.** `confidence.disagreement_penalty_factor` stays a known
+key, as E4 kept `ensemble_n`: unknown keys raise, so removing it would stop
+every settings.json that sets it from loading. `effective_confidence` warns
+when it is set and applies nothing.
+
+**Tests.** 28 new: 20 in `tests/test_confidence_scoring.py` (the threshold
+over ten shares, no share changing a score, the measured MEDIUM case, E9, B7,
+B8, the reader, and the retired key) and 8 in `tests/test_orchestrator.py`
+(routing end to end, what 6a is sent, the loop's exit both ways, D1's count,
+and `revise.md` read against the keys 6a is sent). Ten scoring tests asserted
+the penalty; they assert the routing now. Twenty mutations, all red, with a
+green control. E9 was first written twice, in the mark's condition and in
+the branch that records it, so deleting either changed nothing; it is
+enforced once.
+
+### What §90 deliberately does not change
+
+**Non-factual claims** (E9). Whether candidates declining to speculate says
+anything about a speculative claim is still a judgment nobody has made.
+
+**The tier of a checked claim.** It comes from 6b's grounding and critique,
+as every flagged claim's does. The consistency stays in the breakdown and
+`/claims` prints `contested` beside it, so a reader can see that a HIGH claim
+was contested and checked. Pass 6c's annotation and the final synthesis are
+unchanged.
+
+**What 6a sees.** The count, not the other candidates' answers (owner's
+choice): each is a whole answer, every round.
+
+**The threshold.** A module constant, not a settings key (owner's choice).
+
+### Design Decisions Record — §90 (A85)
+
+| id | decision |
+|---|---|
+| **A85** | **Cross-candidate disagreement routes a claim to the 6a/6b loop instead of lowering its score.** A factual claim asserted by at most half the candidates that produced text (`CONTESTED_SHARE`, after B8's dedupe and clamp; B7's unreported numerator excluded) is `contested`, recorded in `score_breakdown`. D1 flags a claim that is contested or whose tier is flagged; the loop keeps a claim for its tier only. A contested claim's 6a entry carries `disagreement_feedback` with the count. The score has no agreement term on any run. `confidence.disagreement_penalty_factor` stays a known settings key and warns. Supersedes E8; E9 and E12 stand. Resolves issue #12; the owner chose routing over deduction, at most half as the threshold, and the count as 6a's input |
+
+---
+
+## §89. One command catalog, and the CLI's slash commands
+
+**Built in batch 231**, from issue #8 and register item 45. Both are D12's
+debt: the CLI is a permanent fallback, and it had no command layer at all.
+
+**Measured.** The TUI registers 32 slash commands. The CLI had none: every
+line typed at its prompt went to the model, so `/help` there was a chat
+turn, billed. Each feature that wanted the CLI shipped a launch flag instead
+(`--summary`, `--ref`, `--memories`, `--forget`, `--init`, `--secrets`),
+none usable mid-conversation, and three of the parser's own comments gave
+the missing layer as the reason. Register item 45 is the same gap from the
+other end: `core/session_view.py` and `core/call_view.py` sit in `core/` so
+both shells can read them, and `main.py` imported neither. README said "every
+feature is reachable from it" of the CLI.
+
+**The owner's choices.** One catalog, each shell its own handlers. The CLI
+gets the commands #8 names as real gaps plus item 45's view (18 of them).
+`/call` lists a thread's tool calls and `/call N` opens one. A `/` line that
+names nothing is refused, as the TUI has refused one since §16.
+
+**One catalog.** `core/commands.py` declares every command once: name,
+summary, usage, aliases, and, for a shell that lacks it, the sentence that
+says why. The registry mechanism moved there from `tui/commands.py`
+unchanged, because the CLI needs it and must not import from `tui/` to get
+it; `tui/commands.py` is the TUI's instance. A shell does not describe a
+command, it binds a handler with `bind(name, handler)`, and a shell's
+registry refuses at registration a name the catalog lacks, a name declared
+absent from that shell, and a description that differs. The catalog refuses
+its own collisions when it is built. A command one shell lacks is answered
+with the catalog's reason rather than "unknown": `/theme` in the CLI, `/call`
+in the TUI. The census test (`tests/test_command_catalog.py`) holds each
+shell to exactly what the catalog gives it.
+
+**Thin handlers, shared functions.** A handler is where the shells really
+differ (the TUI pushes a modal and runs a worker, the CLI prints and reads a
+line), so each keeps its own. What a command decides was moved out of the
+TUI's handler into one function both call: `core.connect.model_switch` (and
+`configured_providers`, `agent_pin_note`, `MODEL_USAGE`,
+`CHATGPT_SIGNED_OUT`), `core.client.effort_choice`,
+`core.compaction.parse_compact_args`, `core/claims_view.py` (the renderer
+`tui/screens.py` had), `core.replay.thread_row` (the picker's row) and
+`tool_lines`, and `core.loop.agent_turn`, which says what an active agent
+makes of a turn and replaces the TUI turn's inline copy.
+
+**The CLI's commands.** `cli_commands.py`: `/help`, `/quit` (with `/exit` and
+`/bye`), `/threads`, `/resume`, `/new`, `/goal`, `/agent`, `/skill`,
+`/grill-me`, `/effort`, `/model`, `/compact`, `/summary`, `/ref`,
+`/memories`, `/forget`, `/claims` and `/call`. The TUI's two pickers
+(`/threads`, `/ref`) are a numbered list and a question here, and the
+question also takes a thread id the list did not show. `run_chat` holds the
+session on a `ChatSession` (thread, model, effort, agent, skills), which
+every turn reads. The module must not import `main`, which runs as
+`__main__`: a second copy would mean a second stdin reader, so `run_chat`
+hands it `ask`, `replay` and `show` instead. A handler that raises is
+contained and logged, as the TUI's dispatch site contains one (batch 135);
+Ctrl+C during a command returns to the prompt.
+
+**What reaches the turn.** `/agent` makes the turn `agent_turn`'s: the
+agent's prompt, ToolContext, model and step budget. `/skill`'s activations
+reach the prompt through `run_agent_conversation(active_skills=...)` and
+`wake_conversation`, into `_conversation_prompt`, where the catalog marks
+them and `session_tiers` pins their bodies last (§19 K1). Before this,
+`session_tiers` said "The CLI has none to pass". A wake turn runs under the
+turn's agent and skills, because it is that turn continuing. `/grill-me` is
+`agent_turn(one_shot=True)`: the agent's prompt in the session's run, which
+is the TUI's `run_one_shot` assembly, now shared, and the TUI's one-shot
+calls it too.
+
+**`/call`, item 45.** The TUI opens a call by ctrl+clicking its `▸` line.
+The CLI's lines carry nothing to click, so `/call` numbers them, off
+`tool_lines`: the lines a replay prints, so a number names the line the
+reader sees. `/call N` routes as `on_call_selected` does: a session's call
+shows the session, from the manager while this process holds it and
+rebuilt from the archive otherwise (SS18); a spawn prints the run it
+started; anything else, or either of those whose target cannot be found,
+shows the call (TR12).
+
+**Found on the way.** The TUI's `/model` note for an agent that pins a model
+said to switch back with "/agent clear", which `/agent` answers with
+"Unknown agent 'clear'". The shared `agent_pin_note` names `/agent default`.
+
+**Tests.** 91 in `tests/test_cli_commands.py`, 24 in
+`tests/test_command_catalog.py`, and a wake test in `test_session_cli.py`.
+Thirty mutations: 29 red, one equivalent (`/effort` applying a refused
+level, which `effort_choice` returns unchanged). Two survived the first pass
+and have tests now: a `/grill-me` request not cleared after its turn fires
+again only on the next `/` line, and a picker test that chose the last row
+could not see an answer off by one.
+
+### What §89 deliberately does not change
+
+**The flags.** `--summary`, `--ref`, `--memories`, `--forget`, `--init` and
+`--secrets` stay, for a scripted run. `--memories`, `--forget` and `--ref`
+now print and attach through the same helpers as their commands.
+
+**The fifteen the CLI still lacks.** Four by design: `/theme`, `/copy`,
+`/mentions` and `/kill`, the last because the CLI's prompt waits until
+background sessions finish. The other eleven are catalogued as not yet
+built, and the CLI's `/help` lists them with where to go instead. (This
+said fourteen until batch 232 counted the catalog.)
+
+**`/model` in the CLI is not remembered.** The TUI's choice is stored in its
+preference store beside settings.json, which the CLI does not read; the CLI
+starts from `--model` or settings.json, and its `/model` says "for this
+session".
+
+### Design Decisions Record — §89 (A84)
+
+| id | decision |
+|---|---|
+| **A84** | **One slash-command catalog, `core/commands.py`, that both shells bind handlers to; the CLI dispatches `/` lines.** Each command's name, summary, usage, aliases and per-shell absence reason are declared once. A shell binds with `bind()`; a shell's `CommandRegistry` refuses an undeclared name, a name declared absent for it, and a description that differs from the catalog's. A name one shell lacks is answered with the catalog's reason. The CLI's handlers are in `cli_commands.py`, which never imports `main`; what a command decides is a shared core function both shells' handlers call. A CLI line starting with `/` is never sent to the model. Amends ROADMAP_v2 §16's registry, which described the TUI only, and M21, whose accepted limit (references attached at launch only) `/ref` lifts. Resolves issue #8's design note; the owner chose one catalog with per-shell handlers, the gaps #8 names, `/call` for item 45, and refusal of an unknown `/` line |
+
+---
+
+## §88. Input typed before a question, and the launcher's stdin
+
+**Built in batch 230**, from register items 44 and 43, neither filed as an
+issue. Both are about who reads the terminal, which ROADMAP_v2 §29 (N1) and
+batch 121 made a rule: one reader at a time.
+
+**Item 44, measured.** `ask()` drops stale input before a gated question:
+"a line typed after a question timed out was an answer to THAT question".
+It did that by draining the pump's queue, which holds only what the pump
+has already read. Measured with the real `_StdinReader`, in a Windows
+console of its own with keys injected by `WriteConsoleInputW`, and on a
+real pty under WSL:
+
+| typed | Windows, before | POSIX, before | both, after |
+|---|---|---|---|
+| a whole line before the first question | answered it (`stale`, 3/3) | dropped (the pump won the race to the drain) | dropped |
+| half a line before the first question, the answer after | `stafresh` (2/2) | `stafresh` | `fresh` |
+| half a line between two questions, the answer after | `stafresh` (2/2) | `stafresh` | `fresh` |
+| the answer after the prompt (control) | `fresh` | `fresh` | `fresh` |
+
+The approvals compare the whole answer with `y`/`yes`, so `yn` denies. But a
+stray `y` with no Enter before a prompt, and then Enter to decline, reads as
+`y`.
+
+**The owner's choice: an OS-level flush, and on Windows an Escape too.**
+`_StdinReader._flush_terminal()` runs at the top of every `ask()`, before
+the pump can start and before the queue drain. On POSIX it is
+`tcflush(TCIFLUSH)`, which also discards a half line held by the line
+discipline. On Windows `FlushConsoleInputBuffer` cleared the first two rows
+and not the third: a cooked read already in progress keeps its half line in
+its own edit buffer, out of the input buffer's reach. So
+`_flush_console_input` then writes one Escape key, which conhost's cooked
+read takes as "clear this line", echo included; with no read in progress,
+the pump's next read clears an empty line. The owner chose to add it after
+the measurement showed the gap. Only a real terminal is flushed: piped stdin
+is a script's answers. Best effort, like the drain: a failure is logged and
+the question is still asked.
+
+**Item 43, measured.** The npm launcher asks its first-run consent through
+Node's `readline`, then runs the harness under itself with the console
+inherited. `rl.close()` only asks libuv to stop reading. Reproduced in a
+console of its own (the same three calls, and a child reading the console
+the way Textual's EventMonitor does), five keys typed at the child reached
+it in every run, three as shipped and three with the fix. **The owner's
+choice: fix it and measure.** `ask()` now calls `process.stdin.pause()` and
+`unref()` after `rl.close()`, so the release is made in so many words; the
+measurement shows the old shape lost nothing and the new one loses nothing.
+
+**Tests.** Two pty tests (POSIX; CI's Linux job runs them) for the two half
+lines, an ordering test for flush-before-pump, a pipe that is never flushed,
+the Windows Escape pinned by shape against a fake `kernel32`, the platform
+dispatch, and a source pin on the launcher's `ask()`. Six mutations, every
+one red under WSL and the five that Windows can see red there. One test was
+rewritten when its mutation survived: a `StringIO` has no descriptor, so the
+first "never flushed" test passed with the `isatty` check removed.
+
+### What §88 deliberately does not change
+
+**`readline()`.** The chat prompt keeps type-ahead (N1's mirror image): a line
+typed while the model streams is the next message.
+
+**The pump.** It still starts at the first `ask()`, and a deadline still
+needs it.
+
+### Design Decisions Record — §88 (A83)
+
+| id | decision |
+|---|---|
+| **A83** | **`ask()` flushes a real terminal's own input before every gated question, and the npm launcher releases stdin after its one.** `_StdinReader._flush_terminal()` runs before the pump can start and before the queue drain: `tcflush(TCIFLUSH)` on POSIX, and on Windows `FlushConsoleInputBuffer` followed by one Escape key, which clears the edit line of a cooked read in progress. Piped stdin is never flushed. `bin/venastine.mjs`'s consent `ask()` calls `process.stdin.pause()` and `unref()` after `rl.close()`. Amends ROADMAP_v2 §29's `ask()` rule, which drained the queue only. Measured on a Windows console and a WSL pty; the owner chose the flush, then the Escape once the measurement showed a Windows read in progress was out of the flush's reach, and the launcher fix with measurement |
+
+---
+
+## §87. Two provider facts about temperature, answered from the providers' own pages
+
+**Built in batch 229**, from #6 (register item 11). §10's revisit deleted
+`ENSEMBLE_TEMPERATURE` and recorded two facts it could not check without a
+live key. No key is set on this machine, so both were checked against the
+providers' own documentation on 2026-11-03, and the answers are written down
+here so the check is not run a third time.
+
+**(a) The default is 1.0.** Google's Gemini 3 guide recommends leaving
+`temperature` at its default of 1.0. OpenAI's API reference refused the fetch
+(403), and posts quoting it give "defaults to 1"; the installed SDKs (openai
+2.45.0, google-genai 2.29.0) describe the parameter and state no default. So
+the "raised temperature" that was §10's diversity mechanism sent, on both
+providers, the value they would have used anyway, as the register suspected.
+Nothing depends on it now.
+
+**(b) OpenAI's reasoning models refuse one.** OpenAI's current model guide:
+"When reasoning effort is not `none`, remove `temperature`, `top_p`, and
+`top_logprobs`." Forum reports of the error read "Only the default (1) value
+is supported". This harness ships `default_effort: high`, and the set
+`_sampling_kwargs` consulted listed six Anthropic names, so the backstop
+would have let a 400 through on every OpenAI reasoning model.
+
+**(c), found while measuring: two Gemini models ignore one.** Google's page
+for Gemini 3.6 Flash and Gemini 3.5 Flash-Lite: "`temperature`, `top_p`, and
+`top_k` are deprecated and ignored", "in future model generations, supplying
+these parameters returns an HTTP 400 error", and the change applies to
+"these models and all future Gemini model releases". Ignored is the one
+outcome worse than a 400: no error, and no effect.
+
+**The owner's choices.** For OpenAI, follow OpenAI's rule rather than list
+names: on `OPENAI`, `_sampling_kwargs` drops a temperature with its WARNING
+whenever a reasoning effort other than `none` is being sent. `call_model_stream`
+now passes it the `effort` that `_thinking_for_provider` is about to send, so
+the two cannot disagree about the request. There is no model list to go
+stale; the current guide already names a GPT-6 family the register never
+mentioned. A reasoning model sent no effort at all still reasons at its own
+default and still refuses, and that stays the loud 400 an unlisted model has
+always been. Another OpenAI-compatible endpoint keeps the set's posture: its
+rules are its own. For Google, list the two named models in
+`models_rejecting_sampling_params`, so a temperature sent to one is dropped
+with the WARNING rather than having no effect, and record that a later Gemini
+belongs there when it ships.
+
+Not chosen: listing the GPT-5, GPT-6 and o-series names (drops a temperature
+those models accept at effort `none`, and goes stale every release), and
+recording without a code change.
+
+Four unit tests and two at the wire, where the OpenAI request that carries
+`reasoning_effort: high` carries no `temperature` and one at `none` does.
+Seven mutations, each red on its assertion, including the call site passing
+no effort, which only the wire test can see.
+
+### What §87 deliberately does not change
+
+**Whether anything passes a temperature.** Nothing does; the function is
+still the backstop §10's revisit kept, and the threading through
+`core/loop.py` stays for the same reason.
+
+**OpenAI's other sampling parameters.** The harness sends no `top_p` or
+`top_logprobs` anywhere, so there is nothing to drop.
+
+### Design Decisions Record — §87 (A82)
+
+| id | decision |
+|---|---|
+| **A82** | **On OPENAI a temperature is dropped whenever a reasoning effort other than `none` is sent, and the Gemini models that ignore one are listed.** `_sampling_kwargs(provider, model, temperature, effort)` follows OpenAI's documented rule using the effort `call_model_stream` is about to send, with the WARNING the set's drop already logs; a reasoning model sent no effort still fails as a loud 400, and other OpenAI-compatible providers are not covered by the rule. `gemini-3.6-flash` and `gemini-3.5-flash-lite` join `models_rejecting_sampling_params` because they ignore the parameters silently, and Google says later Geminis will too. The default really is 1.0 on OpenAI and Gemini 3, so §10's deleted temperature was a no-op there. Checked from documentation on 2026-11-03, no live key. The owner chose OpenAI's rule over a name list, and listing the two Geminis over recording only |
+
+---
+
+## §86. A CLI turn printed as it runs, and a second press to stop it
+
+**Built in batch 228**, from #225 (register item 71) and #244 (register item
+94). Both live in `main.run_chat`, and they meet there: what a live turn
+prints decides what a first press's message has to compete with.
+
+**#225, as measured.** `run_chat` drained the turn through
+`run_to_completion()` and printed the notices and the final answer. Resuming
+the same thread with `--thread` replayed a `Thinking:` block and a `▸` line
+per tool call; `--mode research` narrated its tool calls live. One run,
+three renderings, and `core/events.py` gave a draining consumer permission to
+ignore `retract` and no permission to ignore anything else. The measurement
+found a second casualty: `todo_write`'s one-line summary says it is "for the
+CLI, which has no panel", and it rides only the `notice` event the CLI
+drained, so the CLI had never printed one.
+
+**What the loop's events allow.** `thinking_delta` and `token_delta` arrive
+while a model call streams; `retract` arrives only then, when a transient
+failure is about to be retried; and `tool_call_start` arrives only after
+the call has finished and D20 has saved the step. So a printer that prints
+a step when it FINISHES never has anything to take back.
+
+**The owner's choice for #225: each step as the replay draws it.**
+`core.replay.step_entries(reasoning, text, tool_calls)` is the replay's own
+rule for one assistant message: reasoning, then text, then a line per call,
+through `_tool_marker` and the registry's redacted digest. It is public now,
+and `replay_entries` calls it. `main._LiveTurn` is an observer that
+`run_to_completion(gen, observe)` hands every event:
+
+- **A step prints at its first `▸`**, from what streamed: the event that
+  ends it carries no response.
+- **The last step prints at `finish(response)`**, called by the shell with
+  the response the turn returned, and read from that response:
+  `reasoning_text(response.thinking)` and `response.text`. The answer never
+  depends on a provider having streamed it, and a turn whose events were
+  never observed still prints its answer.
+- **A step that already printed is not printed again.** `max_steps_reached`
+  and a stop between tool groups both return a step whose first call was
+  announced; `finish` prints only the calls never announced.
+- **`retract` drops what the printer held.** Nothing was drawn.
+- **A notice prints when it arrives**, and `finish` prints from
+  `response.notices` only the ones that never arrived. Held by object, not
+  by `id()`: a tool's notice is popped out of its result and referenced by
+  nothing else, so its id could be reused.
+- **A display failure is logged, never raised.** The observer runs inside
+  the loop's consumer, and an exception there would abandon the turn.
+
+A wake turn hands `wake_conversation` the same printer, because a wake is the
+run continuing. The `[thread: ...]` line moved below the answer, since above
+it would have split a turn's printed steps from its last one. Not chosen:
+tool lines with a thinking count (the issue's own suggestion, which leaves
+live and replay disagreeing about reasoning), token streaming (a retried
+call cannot take back what it printed, and #244's message would land
+mid-sentence), and recording the silence as deliberate.
+
+**#244: CN10's first press.** CN10 made the first Ctrl+C during a CLI turn
+stop it. A21 had refused exactly that binding for the session wait, on the
+owner's measurement that a press aimed at copying can end a turn, and left
+CN10 alone because reversing a locked decision is its own batch. This is
+that batch. **The owner's choice: two presses inside the window, during the
+user's turn and during a wake turn alike.** `main._SecondPress` is the
+handler for both:
+
+- the first press changes nothing and prints `[Ctrl+C again within 2s stops
+  this turn]`, or for a wake `... stops the background sessions once this
+  turn finishes`;
+- a second inside `TURN_STOP_CONFIRM_S` acts, once: the turn's token is
+  cancelled, or the wake's sessions are marked to stop after it;
+- every press after that is ignored, and a press after the window closes
+  arms it again, measured from the press that armed it.
+
+`TURN_STOP_CONFIRM_S` is 2.0, the TUI's `QUIT_CONFIRM_S`, and a test holds
+them equal. It is not imported from `tui.app`, which would load Textual into
+every CLI run. The TUI's copy check does not come with it: the selection
+belongs to the terminal, and whether a press over one even reaches the
+process depends on which terminal it is. **At the prompt one press still
+exits** (the owner left it): nothing is running there, and the thread is
+saved and resumable. While merely waiting on sessions one press still stops
+them, for the same reason.
+
+**The tests, and what they found.** CN10's CLI handler had no test at all;
+`tests/test_cancel.py`'s presses are the TUI's. `tests/test_cli_live_turn.py`
+runs a real two-step turn through the real loop, then replays the thread it
+wrote, and asserts the same five lines in the same order. Eighteen
+mutations went red, each on its assertion. The one that first survived
+removed the guard that ignores presses after the handler has acted: the
+chat turn's action is idempotent, because `cancel()` is, so its test could
+not see a second one, while the wake's action is not. A unit test of the
+handler's count now catches it.
+
+### What §86 deliberately does not change
+
+**What is persisted or replayed.** T3, T4 and the replay's policy are as
+they were; the live printer calls the replay's function rather than
+changing it.
+
+**The research CLI.** It already printed its passes and tool calls live, by
+its own volume rule (§22, §26), and still does.
+
+**What a press does once it acts.** CN10's boundary stop and A21's deferred
+session stop are unchanged; only the first press is new.
+
+### Design Decisions Record — §86 (A81)
+
+| id | decision |
+|---|---|
+| **A81** | **A CLI turn prints each model step when it finishes, through the replay's own function, and stops on a second Ctrl+C.** `main._LiveTurn` observes `run_to_completion` and prints a step at its first tool call, from what streamed, and the last step from the returned response, through `core.replay.step_entries`; a wake turn is printed the same way, and a step is never printed while it streams. Ctrl+C during the user's turn or a wake turn acts only on a second press inside `TURN_STOP_CONFIRM_S`, which equals the TUI's `QUIT_CONFIRM_S`; the first press only says what a second would do. Amends §61's CN10 and §64's A21. At the prompt and while merely waiting on sessions one press still acts. The owner chose replay's rendering over a thinking count, token streaming or recorded silence, and two presses for both turns over keeping one |
+
+---
+
+## §85. Six prompt tiers, one assembly
+
+**Built in batch 227**, from #9 (ROADMAP_v2 §23's deferral J11) and register
+item 19. A conversation prompt is a base -- the persona and the catalogs, and
+for an agent its body and the project hub -- followed by tiers of thread and
+session state, each appended outside `with_catalogs()` because that function
+feeds `pass_prompt()` (§19's K6). The hazard of one landing in all ten
+research passes was hit or narrowly avoided four times, and each instance was
+numbered: K6, M13, M19, J11.
+
+**What #9 described, and what was true when it was taken.** The issue named
+four tiers in the wrong file. The marathon counted seven, then persona (§58)
+and file mentions (§54) were built. #146 had already pinned the rule once,
+over a canary table, and §49 had made `RunAgentLoop._conversation_prompt` one
+copy for a user's turn and a wake turn. What was left:
+
+- **Three hand-written assemblies**: a loop turn, a TUI turn and the TUI's
+  `/grill-me` one-shot. All three appended the same tiers in the same order:
+  goal, memories, refs, todos, file mentions, then the active skill bodies,
+  which only the TUI has.
+- **The memories guard was spelled three ways**: `system_prompt is None` in
+  the loop, `self.active_agent is None` in a TUI turn, and simply left out in
+  the one-shot, whose prompt is always an agent's.
+- **The canary table predated two members.** It had no persona and no file
+  mention.
+
+**What a tier is, which register item 19 left to the owner.** The owner chose
+thread and session state: the six above. The persona belongs to the base,
+composed before the catalogs; the agent body and the project hub belong to
+`system_prompt_for()`. "FOURTH instance" in J11 counts the numbered K6
+instances, not the tiers, and stays as written.
+
+**The assembly.** `core.loop.session_tiers(prompt, memory, *, agent_built,
+mentions=True, mention_text=None, active_skills=())` appends the six in
+`SESSION_TIERS`' order, and all three sites call it. `agent_built` is the
+guard as one argument: memories only when no agent built the prompt, because
+an agent's arrive in `system_prompt_for()` (M13). The refs, the checklist and
+the goal are the thread's, so an agent-built prompt still gets them (M19).
+`mentions` is off for an internal compaction or review turn (§54 AT7).
+`mention_text` is the one-shot's message, written to the thread only later.
+The skill bodies stay last (K1). It lives in `core/loop.py` beside the tier
+functions it calls, which the owner chose over moving them all to `prompts/`.
+
+**The pin follows the assembly.** `test_prompt_tier_boundary.py`'s canaries
+gain the persona and a file mention. Its `TIER_CANARY` must name exactly
+`SESSION_TIERS`, so a seventh tier fails the pin until it has a canary. The
+invariance test assembles through `session_tiers` itself and first checks
+that every tier really arrived. An AST scan fails if any production module
+outside `session_tiers` calls a tier function. Mutated: refs made conditional
+like memories, the mention flag ignored, the skill bodies moved before the
+mentions, a tier with no canary, a tier appended by the TUI again, and the
+guard inverted at each of the three sites. All went red, and the last three
+were caught by the shell tests already there.
+
+### What §85 deliberately does not change
+
+**The tier functions themselves.** `with_goal`, `with_memories`, `with_refs`,
+`with_todos`, `with_file_mentions` and `skills.prompt_fragment` keep their
+signatures and their text; only who calls them changed.
+
+**The base.** `with_persona`, `with_catalogs` and `system_prompt_for` compose
+it as before. Folding the base in too was the other answer to what a tier is,
+and the owner did not choose it.
+
+**A spawned subagent.** Its prompt is `system_prompt_for` plus the persona,
+and it runs a thread of its own, so the parent thread's tiers do not apply.
+
+### Design Decisions Record — §85 (A80)
+
+| id | decision |
+|---|---|
+| **A80** | **A conversation prompt's tiers are six, appended by one function.** `core.loop.SESSION_TIERS` is goal, memories, refs, todos, file mentions and active skill bodies, in that order, and `session_tiers()` is the only production code that appends them: a loop turn, a TUI turn and the TUI's one-shot all call it. The memories are appended only when `agent_built` is false; the other five are not conditioned on it. The persona, the catalogs, an agent's body and the project hub are the base, not tiers. `test_prompt_tier_boundary.py` holds a canary for every name in `SESSION_TIERS`. The owner chose this count over folding the base in, and `core/loop.py` over `prompts/` |
+
+---
+
+## §84. An MCP result with no size bound
+
+**Built in batch 225**, from register item 48, the one open item the review
+marathon rated `S2`. An MCP server is third-party code, and whatever its tool
+returned reached the thread and the model whole. Every other producer of
+third-party text bounds what it hands on: `read` and sandboxed output at
+`max_read_chars`, `fetch_url` at `MAX_CONTENT_BYTES`, the math tools at
+`max_read_chars` (batch 143). `_normalize` had no size constant at all.
+
+**Measured, batch 225, through the real `_normalize` and the real
+`check_output_policy`.** 10 MB of text, 10 MB of structured content and a
+10 MB error message each went through whole: `content`, `result` or `error`
+held all 10,485,760 characters. The redaction pass on the dispatch path took
+1.3 s, 2.0 s and 1.2 s over them, and 2.5 s over a result carrying both
+halves. The marathon measured 93 ms for 8 MB in batch 138; redaction has grown
+since, which is the cost the entry predicted. `memory.add_tool_result` stores
+`str(result)`, so nothing below the producer bounded it either. After the fix
+the same four results come back at 126 to 258 characters, the redaction pass
+takes under a millisecond, and `_normalize` itself takes 7 to 88 ms, most of
+it rendering a 10 MB structured payload to measure it.
+
+**The bound is on the whole result, taken before either key is filled.** The
+entry's own amendment asked for that: `structured_content` is the optional
+half, and the text join is the half every result takes. The server's text is
+cut first. A structured payload is then kept whole if its JSON fits in what
+the text left of the bound, and dropped if not. The error path takes the same
+cut; its structured detail was already bounded at 500 characters (A32).
+
+**What the measurement of the SDK turned up.** mcp 2.3.0's own server sends a
+tool that returns a string as that text AND as `{"result": <the text>}`, and a
+typed return as JSON in both places. So the room rule drops the structured
+copy of every string result between about half the bound and the bound, and
+nothing is lost by it. A note that said only "dropped" would read as missing
+data and invite the model to call again, so `_repeats` checks whether the
+payload is the text over again, and the note says so when it is.
+
+**A word the cut splits goes too.** The redactor runs after the cut, on the
+dispatch path, and cannot match half a credential. A72 made the rule for a
+shell session's dropped middle: when the character past the cut is a token
+character, the token-character run the cut ends inside goes as well. The
+helpers moved from `core/shell_sessions.py` to `safety/policy_enforcement.py`,
+beside the redactor, so both cuts read one definition. The rule has no limit
+on how far it backs off, on purpose: a credential can sit at the end of a run
+of any length, so a text that is one unbroken run, a base64 blob, shows
+nothing but the note. The note says the shown text ends at the last word break
+inside the bound, so a count of zero explains itself.
+
+### What §84 deliberately does not change
+
+**Refusing an oversized result.** The math tools refuse, because a math result
+cut short is a wrong answer. An MCP tool has already run when its result
+arrives, so a refusal hides what its side effects produced, and the owner
+chose the cut.
+
+**Cutting the structured payload.** It is kept whole or dropped. A JSON
+document cut short can read as complete, which is PG5's splice, and the text
+usually carries the same data.
+
+**A second setting.** The owner chose `max_read_chars` over a new
+`mcp_max_result_chars`. The compaction headroom check measures one read
+against `max_read_chars`, so an MCP result held to the same number keeps that
+check true with no new wiring.
+
+**`mcp_max_event_bytes`.** It bounds the memory one streamed event can take in
+the transport, which is a different question. It stays at 16 MiB.
+
+**Paging.** MCP has no offset to resume from, so a cut result cannot be read
+further through the harness. The note gives the size the server sent, which
+is what a model needs to call the tool again more narrowly.
+
+### Design Decisions Record — §84 (A79)
+
+| id | decision |
+|---|---|
+| **A79** | **An MCP tool's whole result is bounded at `max_read_chars` in `_normalize`, by cutting and never by refusing.** The server's text is cut at the bound, less any token-character run the cut splits (`fragment_end`, shared with A72), and a note appended after any non-text note gives the size the server sent. The error path takes the same cut. A structured payload is kept whole if its JSON (measured with `ensure_ascii=False`) fits in what the text left of the bound, and is otherwise dropped with a note, never cut; a payload that cannot be rendered is dropped as unmeasurable. The note says when the payload repeated the text (`_repeats`: `{"result": <text>}`, or the text parsed as JSON). Each cut and each drop logs one WARNING naming the tool. The owner chose the cut over refusing and over cutting everything as one text, and `max_read_chars` over a new key |
+
 ---
 
 ## §83. A ChatGPT plan, spent in a local install
@@ -3836,7 +4464,7 @@ nothing in a context window can reach it.
 | **HD8** | **The bridge bounds what it runs**: a maximum number of concurrent sessions (4 shared, 2 single-user), an idle timeout, a hard lifetime, address-space and CPU limits on the child, and the whole process group killed on stop. A websocket must carry a same-origin `Origin` header and a one-time ticket, and session creation is rate-limited per address. **Amended in batch 165**, three measurements: a session now dies with its bridge -- `prctl(PR_SET_PDEATHSIG, SIGTERM)` at startup, after a SIGTERMed bridge left its sessions running under WSL; the bridge's cleanup of a session is shielded from cancellation and forgets the session only once it has stopped, because a cancelled handler (Starlette's TestClient cancels one when its socket closes; any server does at shutdown) left the child running and its directory in place; and the rate limit keys on the LAST `X-Forwarded-For` entry, the one the platform's proxy appends, where it had keyed on the first, which the client writes. A session that never reaches the handshake has its stderr's tail logged, from a file in the session rather than a pipe nobody reads. **Amended in batch 166**: the entry the rate limit keys on is the one EACH platform's proxy writes, read from `BUILD_INFO.json`'s `platform` -- the last on Hugging Face, which appends, and the FIRST on ModelScope, which replaces the header and rebuilds it as `[client, hop, hop]`; keying on the last there put every visitor behind one of ModelScope's own hops. A platform not measured keeps the last. And `websockets` is a declared, exact requirement of the bridge, because uvicorn upgrades nothing without a websocket library and the bridge had relied on the platforms supplying one. **Amended in batch 168**, by measurement: the idle timeout had never fired. The bridge counts a session's output as activity -- rightly, so a long research run the person is watching is not cut off -- and an idle session's raven blinked at five redraws a second, 6.9 KB/s to a silent tab, with the prompt's cursor adding 0.6 KB/s once the tab had focus; so an abandoned tab held its slot for the full two-hour lifetime. A hosted session now draws nothing while idle -- the raven holds its first frame and the cursor does not blink, 0 bytes over a minute -- and a local install keeps both. And before it listens, the bridge deletes the `venastine-session-*` directories a killed predecessor left in its session root: directories only, never a link, never another user's, never the single-user state, and from `app.py` alone, because the suite builds bridges in parallel over one temporary directory. **Amended in batch 191**, from the owner's pre-public security review: every per-address limit -- the session tickets, and the sign-in callbacks (HD13) -- forgets an address once its newest request has left the 60-second window. Each had gained an entry for every address it ever counted and never lost one -- a probe found 5,000 one-off addresses all still held an hour later -- so a sender with many addresses (an IPv6 /64 is one machine) could grow the bridge until its container restarted, and every visitor's session with it. Forgetting costs no limit, since a forgotten address's requests had all left the window. The sweep runs at most once a window, because sweeping on every request would make each one cost as much as the addresses counted; a book holds at most the last two windows' addresses. **Amended in batch 200**, from PR #265's `compat` check: the idle raven did not always hold its first frame. At a turn's end the app resumes the raven's timer and then sets it idle, which pauses it again, with nothing between -- and Textual's timer task waits on an `asyncio.Event` that the resume had already released, so one tick ran after the frame was reset. After any stream longer than the 0.4s interval, the hosted raven sat still with its eye shut, measured. A tick that arrives while the raven holds its timer paused -- idle on a hosted session, or held for a token stream -- is now dropped |
 | **HD9** | **What deploys is a built bundle, only from `main`, only after the tests pass.** The bundle is the npm `files` allowlist -- what an end user runs, already checked against `neverDistribute` -- plus the deploy overlay, a generated per-platform README and requirements, and `BUILD_INFO.json` naming the commit, which the page shows. Never a git mirror: the Space README needs frontmatter the repository's must not carry, and ModelScope forbids the force push a mirror needs. The workflow runs on `workflow_run` of `tests.yml` completing with success, for a `push` event, from this repository, on `main`; a manual run is a dry run unless it is on `main`; a missing secret turns that platform's step into a dry run; gitleaks scans the bundle before anything is uploaded; every action is pinned by commit. Whoever can merge to `main` decides the code that runs beside every live visitor's credential, and this section says so in as many words. **Amended in batch 165**: `scripts/build_demo_bundle.py` builds the bundle. It refuses a `neverDistribute` match more strictly than the npm and pip channels apply the list -- an `exact` pattern at any depth, a `dir` pattern as any directory segment, an unknown match kind loudly -- and generates the root `app.py` shim, the README, the requirements, `.gitattributes` (an upload that deletes everything else keeps a Space's old one) and `session.lock`, recording in `BUILD_INFO.json` whether the build had local changes. The client id is a public value that gitleaks' `generic-api-key` reads as a key, so `.github/gitleaks.toml` allowlists that one line by its shape, and a bundle is scanned from its own root, where its path is `config.yaml`. **Amended in batch 166**: what each bundle carries differs by platform. The Space's has the README frontmatter and a `requirements.txt` the Space installs. The Studio's has a generated `Dockerfile`, `bridge.lock` and a `.dockerignore`, and no `requirements.txt`, which nothing there would install. The `.dockerignore` is an ALLOWLIST generated from the same file list the bundle wrote -- everything left out, then exactly the bundle's files let back in, then caches left out again -- because ModelScope builds from a git clone of the Studio, whose `.git` and anything else in it a denylist would have to anticipate; a path that cannot be named literally in it refuses the build. Measured with `.git`, `providers.json`, a stray file and `__pycache__` planted in the context: the image held exactly the bundle's files, and an integration test repeats that against a real image. The start-up shim turns Gradio's analytics off unless the operator sets the variable, because every start otherwise called huggingface.co and api.gradio.app. **Amended in batch 169**, by the owner's rule: a commit deploys only when EVERY CI check on it passed, not `tests.yml` alone. `scripts/deploy_gate.py` reads GitHub's record of the commit: every check run must be success or skipped -- a job its workflow lets fail and a scheduled run on the same commit included, this workflow's own and GitHub's `dynamic` runs excepted -- every workflow a push to `main` runs must have a successful push run, and the commit must be `main`'s tip. deploy-demo.yml lists exactly those workflows under `workflow_run`, the gate derives them from the files, and a test holds the two together; a push trigger filtered by path is refused, since the gate would wait for it forever. pip-audit runs on a push to `main` for this, and codeql and pip-audit key their concurrency on the event so a schedule cannot cancel a push run. The gate re-checks the trigger itself -- a push, to `main`, in this repository -- because a `workflow_run` job's `github.ref` is always the default branch and the `demo` environment's branch rule therefore cannot; the environment holds `HF_TOKEN`, a fine-grained token for the one Space, and only the deploy job enters it. Before anything is sent, `scripts/deploy_demo.py` scans the bundle from its root, audits the locks it installs -- on Hugging Face the bridge's packages resolved for the platform, since the Space installs Gradio itself -- accepting a finding only by ID while its version is pinned, and asks the gate once more. A Space is deployed when its page names the build. **ModelScope is deployed by the owner** with the same script and gate: its tokens are account-wide and it offers no trusted CI, so no workflow holds one. `--unverified` skips the gate for a private test deploy and the workflow never passes it. **Amended in batch 170**, the owner's choice: an open code scanning alert on `main` of security severity high or critical holds the deploy too. CodeQL on a push uploads its alerts and fails nothing -- the `CodeQL` check is posted on pull requests only -- so batch 169 had recorded that a new alert on a direct push would pass. The gate reads the alerts for `main` with `security-events: read`, and an alert list it cannot read stops the deploy rather than reading as empty; medium and low alerts and quality notes are triaged, not gated. The first triage of all 51 open alerts fixed 19 in code (17 empty `except` blocks given their reason, a dead store, a dead alias) and dismissed 32 with a reason each, and the one high alert, `json_store`'s `0o666` default, led to the consent store that had no mode of its own. **Amended in batch 198**, the owner's request: the Space's README names a cover image as its `thumbnail`, which Hugging Face takes as a URL, for social sharing. `docs/assets/` is not in the bundle, so the address is the file on GitHub's `main` -- the owner's choice over the build's own commit, which an unpushed or rebased commit would break -- and it resolves once the commit adding it has merged there. A Studio's README carries no frontmatter, so nothing here sets a Studio's cover. **Amended in batch 211**, the owner's choice: a release tag's runs no longer strand the deploy. Pushing `vX.Y.Z` re-runs CI on `main`'s tip and the gate counts those runs, as the rule says, but `workflow_run` wakes this workflow for runs on `main` only -- so the last of `main`'s runs found the tag's still going, waited, and nothing woke it again; all seven runs for 4a08b96 (v0.3.3) ended in WAIT, and no release commit had deployed. A wait whose every unfinished run cannot wake the deploy (a tag push's, a schedule's, a manual run's, another app's) is stranded, and the gate asks again every 30 s for up to 20 minutes (`--linger 1200`) instead of ending. Counting the `main` runs alone was the alternative declined: it would have let a failed npm publish or tag run through |
 | **HD10** | **Deferred: a model hosted on ZeroGPU, and keys held in the browser.** A ZeroGPU model would spend the visitor's few daily GPU minutes one agent step at a time, each a separate allocation with queueing and a possible cold start, and charging the visitor rather than the Space would mean forwarding their identity header from a subprocess; the no-op GPU function keeps the Space ready for it. Keys held in the browser would mean relaying every model call through the page, which only some providers permit from a browser at all |
-| **HD11** | **In a shared deployment the math tools run walled in, or not at all.** SymPy's parser ends in `eval`, and a visitor chooses every expression their own model sends, so `_validate_ast` is the lock and `security/confine.py` is what stands behind it. The child each math call already ran in (H2, H3) puts up four walls after importing the tool and before reading its params: no file may grow and the process is non-dumpable; a child started as root becomes `nobody`; Landlock allows reading beneath the interpreter's import roots and nothing else, from ABI 4 no TCP and from ABI 6 no signal or abstract socket outside the child; and a seccomp denylist answers process creation, networking, signals, tracing, privilege changes, mounts and the kernel's control surfaces with `EPERM`. A denylist, because which calls CPython, glibc and SymPy's lazy imports need is a property of their versions, and Landlock carries the filesystem. A wall that will not go up means the call does not run. The bridge proves the walls at every start with a self-test on the session interpreter -- an integral computed, then every escape attempted -- and only a clean pass sets `VENASTINE_CONFINEMENT=verified` for its sessions; without it `security/hosted.py` refuses the six tools as it refuses the container tools. Linux on x86_64 only. A local install and a single-user deployment are unchanged: one has its owner at the keyboard, the other a shell already. Measured on the Space before it was relied on (2026-10-20: uid 65534, Landlock ABI 7, eleven escapes and the way back to root all refused), and the verdict is in the Space's log at every start. **Noted in batch 166**: a ModelScope Studio's kernel (Alibaba's 5.10) has no Landlock, so the self-test fails there and a shared Studio refuses the six tools. That is this decision working, not a gap in it; a weaker set of walls for kernels without Landlock would be a decision of its own |
+| **HD11** | **In a shared deployment the math tools run walled in, or not at all.** SymPy's parser ends in `eval`, and a visitor chooses every expression their own model sends, so `_validate_ast` is the lock and `security/confine.py` is what stands behind it. The child each math call already ran in (H2, H3) puts up four walls after importing the tool and before reading its params: no file may grow past the cap on its two output files (amended in batch 233: zero refused the child's own result once batch 221 made the outputs files) and the process is non-dumpable; a child started as root becomes `nobody`; Landlock allows reading beneath the interpreter's import roots and nothing else, from ABI 4 no TCP and from ABI 6 no signal or abstract socket outside the child; and a seccomp denylist answers process creation, networking, signals, tracing, privilege changes, mounts and the kernel's control surfaces with `EPERM`. A denylist, because which calls CPython, glibc and SymPy's lazy imports need is a property of their versions, and Landlock carries the filesystem. A wall that will not go up means the call does not run. The bridge proves the walls at every start with a self-test on the session interpreter -- an integral computed, then every escape attempted -- and only a clean pass sets `VENASTINE_CONFINEMENT=verified` for its sessions; without it `security/hosted.py` refuses the six tools as it refuses the container tools. Linux on x86_64 only. A local install and a single-user deployment are unchanged: one has its owner at the keyboard, the other a shell already. Measured on the Space before it was relied on (2026-10-20: uid 65534, Landlock ABI 7, eleven escapes and the way back to root all refused), and the verdict is in the Space's log at every start. **Noted in batch 166**: a ModelScope Studio's kernel (Alibaba's 5.10) has no Landlock, so the self-test fails there and a shared Studio refuses the six tools. That is this decision working, not a gap in it; a weaker set of walls for kernels without Landlock would be a decision of its own |
 | **HD12** | **A shared deployment takes no pasted key, by decision, and says where a key can go instead.** Holding one safely is not the obstacle -- it could live exactly as a sign-in's does, in the session's memory, in a non-dumpable process, gone at disconnect. What no code here can fix: (1) whoever controls the deployment -- its operator, its platform, anyone who can merge to `main` (HD9) -- can use whatever a session holds, and a sign-in bounds that through the provider (Hugging Face's token is scoped to inference, expires in 8 hours and is listed under the person's connected apps; OpenRouter's key is made for this app on OpenRouter's own consent page), while a pasted key is usually the account's own, unscoped, with no expiry, held where the provider has no record of it; (2) a public Space can be duplicated by anyone and looks identical, and a look-alike gains little from a sign-in, which happens on the provider's page, but would collect pasted keys with nothing to tell it apart -- the demo would be teaching the exact habit a phishing copy needs; (3) the providers' own key guidance stops short of the bar HD5 set for a sign-in: Anthropic's says that whoever needs access should get their own key and to trust a third-party tool with one only as far as its developer, and OpenAI's key-safety article says sharing a key breaks its Terms of Use (read from a search excerpt; the page refused a direct fetch, 2026-10-22); (4) a typed key crosses the platform's TLS-terminating proxy as websocket keystrokes, where a sign-in sends nothing usable. So the refusal stays, and `/connect`, its listing and the landing page name the two places a key is the person's own business: the installed harness, and a private duplicate of the Space in single-user mode (HD7), which takes keys and the `VENASTINE_PROVIDERS_JSON` secret -- in Hugging Face's own steps, private by default, ZeroGPU on a free account. Browser-held keys (HD10) would answer (4) and part of (1), not (2) or (3), since the page's script comes from the deployment. What would reopen this: a provider whose documentation explicitly invites a hosted third-party app to hold a user's key, or a shipped browser-held design that answers (2) |
 | **HD13** | **ModelScope's sign-in is completed by the bridge, on hosted deployments only, and its code is copied, not delivered.** ModelScope's OAuth app registration offers the scope `api-inference` ("Invoke API Inference") and says "Users can authorize your application through ModelScope OAuth to obtain ModelScope-related permissions associated with the user" -- the explicit invitation HD5 requires (the published `scopes_supported` leaves that scope out; the registration offers it). Its discovery document, read 2026-10-22, lists the authorization-code grant and nothing else, and a token endpoint that authenticates the app only by `client_secret_basic` or `client_secret_post`: no public client, no device code, no PKCE advertised. So the app's secret is mandatory, and only a deployment can keep one. It is a platform secret, `VENASTINE_MODELSCOPE_CLIENT_SECRET` (Hugging Face does not copy a secret to a duplicate), taken out of the environment by the bridge before it starts anything, after which the bridge makes itself non-dumpable (HD6); it never reaches a session, whose environment is an allowlist (HD3). The client id is public and lives in `deploy/hosted/sign_in.py`, overridable by `VENASTINE_MODELSCOPE_CLIENT_ID` for a fork's own app. A local install connects ModelScope with a pasted key, as before. The flow: `/connect modelscope` asks the bridge for a sign-in through a meta packet -- the bridge is the only writer of a session's stdin and everything a browser sends reaches it as screen input, so only the bridge can answer one (`tui/hosted_driver.py`), and the session still accepts an answer only for the request it is waiting on. The bridge issues a 256-bit state bound to that session for ten minutes and returns ModelScope's consent URL, with the scopes `openid api-inference` and the deployment's own `/oauth/modelscope/callback`. The callback spends the state at its first use and shows a one-time handle -- never the code or anything else the request carried, sent `no-store`, `no-referrer` and under a CSP that lets nothing run, rate-limited per address -- which the person pastes into the terminal. The bridge accepts the handle only from the session that started the flow, five tries at most, then trades ModelScope's code for a token with the secret, refuses an `error` even in an HTTP 200 (ModelScope answers failures that way) and a granted scope without `api-inference`, drops the refresh and id tokens, and hands the token to that session, which keeps it in memory (HD5); it can be revoked at https://www.modelscope.ai/my/settings/apps. The owner chose the copy over delivering the token to the session automatically: with delivery, anyone could start a sign-in, send its link to someone else and receive that person's token when they approved it, and a cookie that would bind the approving browser to the session fails in the embedded Space, where Safari and Firefox partition it. What would change this: a public-client or device-code flow from ModelScope, which would also let a local install sign in. **Amended in batch 167's first live run**: the callback page may be framed by the platform's own site and no other -- `https://www.modelscope.ai` on a Studio, `https://huggingface.co` on a Space -- because ModelScope delivers the redirect to a Studio's host inside its own Studio page, and with `frame-ancestors 'none'` the browser showed the person nothing; the page has nothing to click, so a frame can take nothing from it. **Amended in batch 168**: the landing page names `/connect modelscope`, with its revoke page, only where the bridge holds the secret -- a duplicated Space copies variables but not secrets, and there the command could only refuse. **Amended in batch 176**: ModelScope's second site signs in too. modelscope.cn is a separate site, measured 2026-10-26 -- its own issuer (`https://www.modelscope.cn`), token endpoint and accounts (it signs in through `passport.modelscope.cn`; .ai by email, GitHub or Google) and its own app registry, so an app on one is no client of the other -- with the same discovery document (authorization code only, a client secret at the token endpoint), the same `api-inference` scope and the same invitation on its app form (HD5). So `deploy/hosted/sign_in.py` holds one SITE per ModelScope site, each with its own app id, its own platform secret (`VENASTINE_MODELSCOPE_CN_CLIENT_SECRET`, taken out of the environment with the first) and -- the owner's choice over one shared path with the site bound to the state -- its own callback, `/oauth/modelscope-cn/callback`, so a code is only ever traded with the site that issued it. Built before the app exists, also the owner's choice: registering one takes a modelscope.cn account, and until its id is in the code or in `VENASTINE_MODELSCOPE_CN_CLIENT_ID` and its secret is set, no deployment offers it. A session asks for a site by name (`/connect modelscope-cn`, the preset that took only a pasted key before) and waits for one sign-in at a time: starting one drops any flow it had open on the other site, and its code goes to the site it last started. A deployment offers each site whose pieces it has, and the landing page, banner and revoke links name only those; .cn's revoke page is the same route on its own host, `https://www.modelscope.cn/my/settings/apps`. Not yet measured, for want of the app: .cn's token endpoint's answers, held to .ai's reading since it runs the same server, and whether .cn's API-Inference needs the account linked to Alibaba Cloud first, as secondary guides say. **Amended in batch 177**: a Studio signs in through its own app. ModelScope's Studio OAuth (its docs, "Using OAuth in Studios") creates an app for a Studio whose OAuth settings are on, with the scopes and token lifetime chosen there, and injects `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_SCOPES`, `OPENID_PROVIDER_URL` and `STUDIO_HOST`; the owner chose it over the app registered by hand, as the platform's own way, wherever it exists. So where those are present the site whose issuer `OPENID_PROVIDER_URL` names signs in through that app -- only if its settings grant `openid` and `api-inference`, asking for those two alone -- returning to `https://{STUDIO_HOST}/auth/callback`, the path those docs give a server-side app; the hand-registered app's secret, if still set there, is logged as unused. The hand-registered app stays for everywhere else, the owner's choice: a Hugging Face Space, which has no Studio OAuth, and modelscope.cn, which a modelscope.ai Studio's app cannot sign in. The copy-code flow stays, also the owner's choice over the docs' Authlib example, which binds a sign-in to a browser cookie and delivers it to whoever approves -- the two things this record already refused. Every site's endpoints now come from its discovery document, read once at start (the owner's choice over fixed paths): both must be https on the issuer's host, the token endpoint must take `client_secret_post`, and a site whose document cannot be read, or names another issuer, is not offered, with the reason logged. `OAUTH_CLIENT_SECRET` is taken out of the environment with the others. And on a Studio the bridge removes `SYSTEM`, which Studio OAuth sets to `spaces` for Gradio's own sign-in button: Gradio 6.30 then takes the Studio for a Hugging Face Space and starts that platform's reload watcher from the `spaces` package, the bridge uses no Gradio sign-in, and those docs say a non-Gradio app should not depend on these variables; `STUDIO_ID` is how a Studio is told from a Space. Not yet measured, for want of the settings being on: which callback paths the platform's app accepts, and what else the injected variables change. **Amended in batch 178**, after the first live start with the settings on (2026-10-26): the Studio injects `OPENID_PROVIDER_URL` as plain `http://www.modelscope.ai`, and the document was read in the clear. Every discovery document is now read over https whatever scheme its provider names, and a provider that is no http or https address with a host is refused. The same start confirmed `SYSTEM=spaces` removed and the .ai sign-in offered through the Studio's own app. **Amended in batch 196**, the owner's choice from the pre-public review: the code page also says "If you did not type /connect in this demo yourself, close this page and share this code with no one." A forwarded consent link still reaches whoever it is sent to, but the code is what hands over their quota, and the page now says so beside it |
 
@@ -4704,6 +5332,8 @@ a row written before the column existed -- which is what `get_thread`'s
 docstring has said **since batch 75**, where commit `47257f3` ("comments
 that named the wrong mechanism") deleted this exact sentence from
 `get_thread` and `child_threads` and missed the third copy.
+
+*Amended in batch 222 (#257).* For `kind`, the NULL this names is not what a migration leaves: `ensure_columns` adds `kind` with DEFAULT 'chat', so a row older than the column reads 'chat', and only SQL written by hand on a database first migrated between §27 and #26 leaves a NULL. The conclusion stands -- the fallback absorbs a NULL, not a missing column -- and `get_thread`'s docstring now says which one.
 
 ### S09-04: the report named three sentences and the claim was in thirteen
 

@@ -37,7 +37,7 @@ STARTERS = ("shell_background", "shell_monitor", "shell_interactive")
 # below pins that difference rather than letting a widened tuple hide it.
 COMMAND_GATED = ("shell_background", "shell_monitor")
 
-SECRET = "sk-abc123def456ghi789jkl012mno345pqr678"
+SECRET = "sk-" + "abc123def456ghi789jkl012mno345pqr678"
 
 
 class _FakeMemory:

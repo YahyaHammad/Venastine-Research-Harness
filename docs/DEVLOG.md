@@ -29062,3 +29062,808 @@ had not.
   bandit and its count check clean; gitleaks, as CI runs it on an export
   of the tracked files, finds no leaks.
 - **Version**, by `scripts/version.py bump`: `0.2.0-b.12.installer-path.rb0705ebe789b`.
+
+## Batch 218 -- a reaped session is a gone session (2026-11-01)
+
+The first batch on `bugfixes`, a branch for bug fixes in general, cut from
+main at 3afcae1 (release 0.3.4).
+
+0.3.4's release commit failed one test in the `tests` run for its push to
+main (run 41305992126, Python 3.11 on Linux), while the run for the
+`v0.3.4` tag passed on the same commit:
+`test_hosted_mode.py::TestAHostedSessionHardensItself::test_a_session_does_not_outlive_its_bridge`
+raised `ProcessLookupError: [Errno 3] No such process` from inside its
+`alive()` poll. The deploy gate refused the commit for it, so 0.3.4 did
+not reach the Space; re-running the job is the owner's.
+
+- **The product was right; the test's poll raced the reaper.** The session
+  did die with its bridge. `alive()` opens `/proc/<pid>/status` and reads
+  it, and it caught only `FileNotFoundError`, which is what the open raises
+  once the pid is gone. When the orphan is reaped between the open and the
+  read, the open succeeds and the read fails with ESRCH instead. Measured
+  under WSL with the window widened (open, SIGKILL, reap, then read):
+  `ProcessLookupError: [Errno 3] No such process`, the CI error exactly.
+  Before the reap, the same file reads `State: Z (zombie)`, which the poll
+  already counts as gone.
+- `alive()` now counts `ProcessLookupError` as gone too. The tree's two
+  other `/proc/<pid>` reads (`security/confine.py`'s escape list and
+  `tests/_confine_probe.py`) read the parent, which is alive by
+  construction, and both catch every `OSError` anyway.
+
+### Verified
+
+- WSL: the test passed 20 runs of 20; `test_hosted_mode.py` 95 passed,
+  2 skipped.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8545 tests, 8475
+  passed and 70 skipped, in 2:22 (the changed test is Linux-only and
+  skips there). The first run also failed
+  `test_a_crlf_checkout_stays_crlf`, the known local false red once a
+  branch switch leaves `config.yaml` CRLF in the worktree; written back
+  as LF, git saw no change and the rerun was clean.
+- ruff, the bandit count check, and gitleaks on an export of the tracked
+  files: clean.
+- **Version**, by `scripts/version.py branch` and `bump`:
+  `0.3.4-b.1.bugfixes.r57e749187eaf`.
+
+## Batch 219 -- crashes and hangs from the review marathon (2026-11-01)
+
+**#218, #214, #254, #212 and #242, register items 64, 60, 107, 58 and 92**,
+the "crashes and hangs" group the owner picked from the marathon's open
+findings. Three needed the owner first, asked with measurements: #214's
+guard (yes), #212's warn-or-raise (warn and fall back) and #254's posture
+(keep refusing). Two came out wider than filed and one did not reproduce.
+
+- **#214, wider: every reader of a cloned project's content.** The finding
+  was a FIFO, which Windows cannot make. A clone cannot carry a FIFO, but it
+  can carry a symlink, and `/dev/zero`, `/dev/urandom` and `/dev/tty` are on
+  every POSIX machine. Measured under WSL: a skill linked to `/dev/zero`
+  made `describe_project_content` -- the trust prompt's listing, before any
+  grant -- raise MemoryError in 1.5 s at a 1 GiB cap, while the trust hash
+  stepped over it. The same function read the hub, `settings.json` and
+  `mcp.json` the same way. `json_store.read_regular_text` is now the one
+  reader: it opens non-blocking (so a FIFO's open returns) and refuses what
+  `fstat` does not call a regular file, as an OSError. Six read sites go
+  through it: `_parse_md_file`, `initialize`'s hub, `_read_settings_file`,
+  the listing's hub and its two JSON files, and `mcp_client`'s `_read_file`.
+  Each already handled an OSError, so a refusal is the existing "could not
+  be read" line, skip or configuration error. AGENTS.md says new readers use
+  it.
+- **#218, wider: 104 shapes, not one.** The issue named the authorship loop
+  and `l2_normalize`. A fuzz over every key `authority_for` reads, three bad
+  values each, raised at ten keys and the authors payload. A first probe
+  used a DOI `doi_for` rejects and reported zero, because no lookup ran --
+  caught only because zero was not believable. `_obj` and `_text` now guard
+  every read, and the probe finds none that raise. Embeddings: a fourth
+  check in `_check_vectors` refuses a component that is not a finite number.
+  Strings and None used to raise TypeError past every handler; NaN and inf
+  raised nothing and scored NaN. One departure from the register's "Not":
+  this EmbeddingError is retried twice by `_embed` like its three siblings,
+  because retrying by cause would change SQ10's policy.
+- **#254, did not reproduce.** Under WSL with a redirected HOME, a
+  `chmod 000` skill gives `Configuration error: [Errno 13] Permission
+  denied: '<project>/.venastine/skills/x.md'`. The OSError carries the file
+  name and prints it; the issue's quoted message had lost the tail. The
+  owner kept "refuse to start" (A48). One POSIX test pins the line.
+- **#212.** A bad `AGENT_LOG_LEVEL` prints one line naming the variable,
+  value and accepted forms and runs at INFO, as a bad `AGENT_LOG_FILE`
+  already did. A bad `level=` from code still raises. README updated.
+- **#242.** Measured on Windows: a destination held open elsewhere and a
+  read-only one both fail `os.replace` with WinError 5, and an `r+b` open
+  succeeds only on the first. After the sweep, `_replace_through_temp` asks
+  that and raises `DestinationInUse`, a chained `PermissionError` whose
+  message says to close the file. The path is left to each caller's prefix,
+  so it is not printed twice.
+
+### Verified
+
+- New tests: 59. `test_json_store.py` (new, 9), `test_scholar.py` +38,
+  `test_embeddings.py` +6, `test_logging_setup.py` +5, `test_cli.py` +1.
+- WSL, on a Linux-filesystem copy: `test_json_store.py` 7 passed (2 are
+  Windows-only). With `O_NONBLOCK` removed the FIFO test fails at its 20 s
+  timeout; with the `fstat` check removed 3 fail. The reader files (391
+  passed) fail only `test_re_importing_config_re_reads_the_file`, the known
+  HOME-redirect failure on that distro. The #254 test passes there and
+  skips on Windows.
+- Without the scholar fix, 33 of its 38 new tests fail; the five that pass
+  read a key the old code happened to survive.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8604 tests, 8530
+  passed and 74 skipped, in 2:39. ruff clean; gitleaks on an export of the
+  tracked files clean. Bandit, run as CI runs it, found one new issue: B103
+  on the read-only test's `chmod(0o666)` restore. It now restores owner
+  read/write (`S_IREAD | S_IWRITE`), the file reran green, and bandit has
+  nothing outside the baseline.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.2.bugfixes.r57e749187eaf`.
+
+## Batch 220 -- research pipeline accuracy (2026-11-01)
+
+**#247, #248, #250 and #246, register items 98, 99, 101 and 96**, the
+"research pipeline accuracy" group the owner picked. The owner chose #247's
+policy (drop and trace, over a corrective retry) and #246's remedy (warn
+once, naming the read) before anything was written.
+
+- **#247, and 3b beside it.** Pass 3a is shown the factual claims and
+  nothing else, but it validated against, applied to and scored every
+  claim, so an entry naming a speculative claim marked it grounded. All
+  three now use `factual_claims`, D0's own list, and a stray entry is
+  dropped and traced after the checkpoint line. **Pass 3b had the same
+  shape on the next line, with a worse effect**: a non-factual claim's
+  score IS its capped critic component, and measured, a stray severity
+  took a speculative claim from MEDIUM to LOW at 0.5 and to UNVERIFIED at
+  0.8 -- which also sends it through 6a/6b rounds. Scoped the same way.
+  Validating against the factual ids makes a response that names ONLY
+  non-factual claims B5's total mismatch, so it gets the corrective retry
+  6b's equivalent already gets. ROADMAP_v3 §66's "Pass 3a keeps the wide
+  default" is amended, not rewritten.
+- **#248.** `_note_entries_outside_the_batch` takes the pass, its scope,
+  what it was asked and why an outside answer must not land, and Pass 6a
+  calls it after its checkpoint. 6b's line is word for word what it was.
+  §66's "6a's silent drop stays silent" is amended.
+- **#250.** `requires_approval` returns `bool(...)`. Truthiness is
+  unchanged -- a programmatic `"false"` still tightens, which is D14's
+  ratchet -- and no raise was added, per the register's "Not".
+- **#246.** `_warn_if_one_read_cannot_fit`, once per (provider, model):
+  where the headroom CAP (not the floor) leaves less than one bounded read,
+  it names `max_read_chars` and the value that fits -- 16,384 characters
+  at a 16k window, 32,768 at 32k -- and says the setting applies to every
+  model. A24's row in ROADMAP_v3 is amended: its margin-naming line still
+  fires only where the floor binds. The test that pinned silence at 16k
+  and 32k is split into a 64k-and-up control and the new line.
+
+### Verified
+
+- New tests: 8 (orchestrator +5, agents +2, compaction +1 net after the
+  control's split). Without the orchestrator change 4 of the 5 new
+  orchestrator tests fail (the fifth is the control); without the `bool()`
+  both #250 cases fail.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8612 tests, 8538
+  passed and 74 skipped, in 2:30. The first run failed one check,
+  `test_every_decision_id_cited_in_production_code_resolves`: the new
+  orchestrator comments and trace lines said a bare `D0`, which is not a
+  record id; they say `gate D0`, as the rest of the file does. ruff,
+  bandit as CI runs it and gitleaks on an export are clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.3.bugfixes.r57e749187eaf`.
+
+## Batch 221 -- unbounded output (2026-11-01)
+
+**#204, #215, #217 and #226, register items 50, 61, 63 and 72**, the
+"unbounded output" group. The owner chose #204's transport (temporary
+files), #226's policy (refuse past 1 MB) and #215's shape (save what
+finished on close) first.
+
+- **#204.** `run_isolated` hands the child two temporary files in place of
+  pipes and reads at most the result bound from stdout and 1,600 bytes from
+  the end of stderr. On POSIX `RLIMIT_FSIZE` at twice the result bound caps
+  the files themselves; Windows stays on the clock alone. Measured with
+  tracemalloc: a child writing 6 MB of stderr held 12.6 MB in the parent
+  before, and under 3 MB after. The first attempt still peaked at 4 MB,
+  because `read(n)` allocates `n` up front and n was the 4 MB bound; it
+  reads `min(n, size)` now. The files decode as the text-mode pipes did,
+  universal newlines included. ROADMAP_v2's H3 row is amended.
+- **#215, wider than filed.** The window the issue named is the drain:
+  closed at a sibling's narration, the batch recorded nothing.
+  `_dispatch_parallel` now holds the `GeneratorExit`, waits for its
+  workers, records every finished call in the model's order and raises it
+  again. A second window sat one step later: `_settle_one` wrote a row,
+  yielded, then wrote the next, so closing at the first `tool_result` lost
+  the rest. It is a plain function now, and a group records every row
+  before announcing any. NA11 is untouched. ARCHITECTURE 4.8's `_pump`
+  sentence, which named a function that does not exist, is corrected.
+- **#217.** The yield line is INFO once per thread and DEBUG after,
+  through `_yield_logged` beside the three warning sets. A user-facing
+  notice, the issue's other suggestion, would have reported a condition
+  the user has nothing to do about.
+- **#226.** `/init` refuses a hub past `init_max_hub_chars` (1,000,000
+  characters) before any model call, checking the size in bytes before
+  the read when it is far past. Below that, only the printed diff is cut,
+  at `init_diff_shown_lines` (2,000). Two new `config.yaml` keys, with
+  CONFIG_ARCHITECTURE sections; `test_config_edit`'s settable-scalar count
+  and ARCHITECTURE's sentence about it go from 150 to 152. The hub read is
+  regular-files-only too, through batch 219's reader.
+
+### Verified
+
+- New tests: 9 (`test_tool_budgets.py` +2, `test_parallel_calls.py` +2,
+  `test_compaction.py` +1, `test_project_init.py` +4). With each fix
+  stashed: the flood test fails (12.6 MB held), both #215 tests fail, the
+  #217 test errors on the fixture's missing set (the line was INFO five
+  times), and the #226 tests have no refusal to find.
+- WSL, on a Linux-filesystem copy: the tool-budget, parallel-call,
+  `/init`, compaction and math files, 702 passed, including the
+  `RLIMIT_FSIZE` test Windows skips. One `/init` CLI test fails there,
+  and fails identically on a `git archive` of HEAD: the copy has no
+  `providers.json`, which CI creates from the example.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8621 tests, 8546
+  passed and 75 skipped, in 2:39. The first run failed only the
+  decision-id check: `_shown`'s docstring cited a review-marathon scope
+  as a bare `S15`, which no namespace covers; it names the thing now.
+  ruff (one UP028, a `yield` loop made `yield from`), bandit as CI runs
+  it and gitleaks on an export are clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.4.bugfixes.r57e749187eaf`.
+
+## Batch 222 -- untested invariants (2026-11-02)
+
+**#228, #231, #233, #257 and #258, register items 74, 78, 80, 110 and
+111**, the "untested invariants" group. The owner chose #257/#258's
+answer (keep the NULL fallbacks, correct what they say) and #233's scope
+(reset every memo, plus a census) first.
+
+- **#258, and what measuring it found.** `core.reasoning.pipeline_storage`
+  is in `real_storage`'s swap, imported before `create_db_and_tables()` so
+  its table exists, and the create/update/load trio round-trips on real
+  SQLite. The fixture also restores the package attribute that import
+  rebinds: without it, an orchestrator test run after this file failed on
+  a module bound to a deleted database. The finding is the NULL guards.
+  Their comments said a migrated row reads NULL, but `ensure_columns` adds
+  both columns with DEFAULT '[]', so it reads '[]'. `candidates_json`,
+  which arrived the day after #26, is NOT NULL on every database. A NULL
+  in `pass_threads_json` takes SQL written by hand on a database first
+  migrated between 08-06 and 08-22. A test builds that database through
+  the real startup and pins all three facts. The guards stay, with
+  corrected comments, as do the fake-side pins in `test_pipeline_storage.py`.
+- **#257, the same finding for `kind`.** The migration has added it with
+  DEFAULT 'chat' since §27, so an old row reads 'chat' before any reader
+  runs. The three readers' fallbacks stay, explained once in
+  `get_thread` with two pointers, and a test builds the pre-#26 database
+  and asks all three about a migrated row and a hand-written NULL.
+  ROADMAP_v3's S09-03 record gets a dated amendment.
+- **#231's ordering half.** Four e2e tests give `FakeStorage` and real
+  storage one set of ids and stamps and compare thread order, child order,
+  memory visibility and the failed-turn row. The thread-order tie is
+  written in the wrong order on purpose: both sorts are stable, so a tie
+  written in its output order passes without the tiebreaker.
+- **#233, wider than filed.** Re-counted with both of
+  `test_probe_isolation`'s shapes across production, fourteen memos had
+  no general reset, not four, among them two warn-once sets batches 220
+  and 221 added, a notice set nothing reset, and an unlocked secret store
+  no fixture locked. The effort cache joined its siblings in
+  `clear_client_cache`; the rest are in `PROCESS_MEMOS`, reset by a new
+  autouse fixture through each module's own reset where it has one.
+  `tests/test_process_memos.py` holds production to the lists in both
+  directions, with eight exemptions that each state their reason.
+- **#228.** The initializer's and the compactor's prompts are built from
+  their runs' facts through `advertisement_facts`, the reviewer's rule.
+  Tests widen each agent to admit `spawn_subagent`; an attended
+  compaction is the control.
+
+### Verified
+
+- New tests: 18 (`test_storage_e2e.py` +7, `test_catalog_advertisement.py`
+  +3, `test_process_memos.py` 8, new). Mutations, each red: either #228
+  call site reverted, a hard-coded headless answer, each of the three
+  `kind` fallbacks, the `pass_threads_json` guard, each of the fake's four
+  re-derived rules, production's thread order, the package-attribute
+  restore, and three of the new resets.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8639 tests, 8564
+  passed and 75 skipped, in 2:54, green on the first run. WSL, on a
+  Linux-filesystem copy: the seven touched test files, 484 passed; the one
+  failure is `test_an_unrecognised_kind_answer_cancels`, which fails
+  identically on a `git archive` of HEAD because the copy has no
+  `providers.json`. ruff, bandit as CI runs it (0 findings outside the
+  baseline, no pair grew) and gitleaks on an export are clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.5.bugfixes.r57e749187eaf`.
+
+## Batch 223 -- stale claims and loose config (2026-11-02)
+
+**#208, #210, #213, #220, #221, #222, #223, #227, #239 and #261, register
+items 54, 56, 59, 66, 67, 68, 69, 73, 89 and 114.** The owner chose the
+answer for #210 (say `.env` is for a future tool), #227 (screen key
+material), #239 (tell the session once) and #261 (pin the premise) first.
+
+- **#213.** `ssh_port` is a `Port` (a strict whole number from 1 to
+  65535), and `db_path` is `NonEmptyStr`. An empty `db_path` was measured
+  to open SQLite's anonymous temporary database, so every thread would
+  have vanished at exit with nothing said; a refusal of a value a
+  variable set names the variable. `workspace_dir` was made `NonEmptyStr`
+  too and the first full run failed for it: an empty workspace, from
+  either route, is already refused by name at `check_workspace`, so it
+  stays `str` and a comment says why. A
+  `max_token_budget` of zero or less is refused at load by name. The trust
+  rationales name `ensemble_mode`, the live multiplier, instead of
+  `ensemble_n`, which the pipeline ignores. `/config` reads the two new
+  constraint shapes off the schema like every other.
+- **#227.** The `/init` manifest also hides SSH private keys' default names
+  and the suffixes private keys and keystores are saved under; a public key
+  is still listed.
+- **#239.** The first turn in a session that strips a control sequence
+  puts one system line on screen; the per-turn INFO line is unchanged.
+- **#220, measured further than filed.** Under textual 8.2.8 a marshal
+  after the app exits returns at once while its loop runs and raises once
+  it closes, and with `set_blocked` itself marshalled the test the comment
+  cited still passes. "Parks the worker forever" does not reproduce; the
+  comment says what does, and how to re-take it when the pin moves.
+- **#221, #223.** `_cmd_secrets` would raise, not deadlock, and since batch
+  135 the raise is contained to "/secrets failed". `_ask_lock`'s bound is
+  stated as what it is: once the holder is parked.
+- **#210.** AGENTS.md, PRIVACY.md and `.env.example` say no shipped tool
+  reads `.env` yet; PRIVACY's deletion section names it.
+- **#261.** A test requires the loader to be production's only `AgentDef`
+  constructor, and names the `max_steps` belt as the thing to add when it
+  is not.
+- **#208, #222.** The dead distribution builder is deleted, and the
+  stranded half of the `_blocking_modal` bullet is back on it (split in the
+  commit that wrote it, so nothing was lost).
+
+### Verified
+
+- New tests: 26 (`test_config_loader.py` +10, `test_project_init.py` +12,
+  `test_tui.py` +2, `test_config_edit.py` +1, `test_agents.py` +1).
+  Mutations, each red: `ssh_port` and `db_path` back to bare types, the cap
+  check removed, the closed-range phrase removed, the key suffixes
+  unscreened, the session line said every turn and never, and a second
+  `AgentDef` constructor in production.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8665 tests, 8590
+  passed and 75 skipped, in 4:47. The first run failed four: three were
+  load timing on a machine running bandit and gitleaks beside it (each
+  passes alone, and in the re-run), and one was real --
+  `test_an_empty_variable_reaches_the_guard_as_an_empty_path`, which is
+  how `workspace_dir` came back to `str`. WSL, on a Linux-filesystem
+  copy: the six touched test files, 855 passed; three fail identically on a
+  `git archive` of HEAD (two for the copy's missing `providers.json`,
+  one for the HOME redirect). ruff, bandit as CI runs it and gitleaks on
+  an export are clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.6.bugfixes.r57e749187eaf`.
+
+## Batch 224 -- gates that misfire (2026-11-02)
+
+**#229, #237, #238, #241, #251, #253 and #256, register items 75, 86, 87,
+91, 103, 105 and 109.** The owner chose each answer: a Unicode qualifier,
+a raw `.mjs` scan, one range per family, a gate plus a sweep for the guard
+log, no state claims about issues, no label by design on the audit form,
+and fakes built at runtime.
+
+- **#253.** "Unicode control set" joins the citation grammar's namespaces:
+  `C0`/`C1` after `Unicode`. `core/ansi.py` writes `Unicode C1`, and
+  AGENTS.md's table has the row. The scan also found `pipeline_storage.py`
+  calling a mutation control `control C1`, which resolved silently to an
+  unrelated decision; it says `mutation C1`.
+- **#237.** The citation rule runs over the `.mjs` files' text in its own
+  domain. Its first run found `(H3/C2)` in the publish gate -- the copy of
+  the citation batch 128 dropped from AGENTS.md as unresolvable, which
+  survived because nothing read `.mjs`.
+- **#251.** One range per family on the map line, so a per-section range
+  fails naming itself before the range check misreads it.
+- **#241.** No production comment may say an issue is open, tracked or
+  about to close. Of 499 comment lines citing an issue, the 14 beside a
+  state word were all history; the control holds five claims against five
+  of those.
+- **#229.** CONTRIBUTING says the audit form sets no label on purpose and
+  that `[S0]`/`complexity` predate the forms; a test holds the form's
+  severity and area lists to CONTRIBUTING's. Measured, "most open findings
+  sit in enhancement" is true (31 of 43 open): the review counted closed
+  issues too.
+- **#256.** Every test name the guard log cites must exist; a gone one is
+  struck through as history, the convention its header now states. 44
+  names resolved nowhere: eight rows got their current name, the rest are
+  modules, a placeholder, a wrapped name, or history now marked as such.
+- **#238.** The six blessed fakes are built from pieces, and a seventh
+  match that splitting one of them exposed is too; `.gitleaksignore` is
+  empty with a comment saying so. The header comment in
+  `.github/workflows/gitleaks.yml` changed with it -- the branch's first
+  workflow-file change, which only the owner can push.
+
+### Verified
+
+- New tests: 7, all in `test_docs_consistency.py`. Mutations, each red:
+  the Unicode namespace emptied, `(H3/C2)` restored, a second `A` range on
+  the map line, a "tracked in #12" comment, a `complexity` area on the
+  form, and a gone guard un-struck. gitleaks on an export: no leaks with
+  the empty ignore file, and one before line 72 was built from pieces.
+- Full suite on Windows with `AGENT_WORKSPACE` unset: 8672 tests, 8597
+  passed and 75 skipped, in 2:42. The first run took 6:12 and failed
+  `test_eight_concurrent_writers_all_land` once with `database is locked`
+  -- the slow-run flake this file has recorded twice (item 97's rule); it
+  passed three times alone and in the re-run, and this batch changes
+  nothing it reaches. WSL, on a Linux-filesystem copy: the three touched
+  test files, 283 passed; the one failure fails identically on a
+  `git archive` of HEAD, because the copy is not a git checkout. ruff,
+  bandit as CI runs it and gitleaks on an export are clean.
+- **Version**, by `scripts/version.py bump`:
+  `0.3.4-b.7.bugfixes.r57e749187eaf`.
+
+## Batch 225 -- an MCP result bounded (2026-11-02)
+
+**Register item 48, ROADMAP_v3 §84, A79.** The one open item the review
+marathon rated `S2`, and it has no GitHub issue: it predates the marathon's
+filing. The owner chose to cut rather than refuse or cut everything as one
+text, and `max_read_chars` rather than a new key.
+
+- **Measured first.** 10 MB of text, of structured content and of an error
+  message each went through `_normalize` whole, and the redaction pass on
+  the dispatch path took 1.3 s, 2.0 s and 1.2 s over them (2.5 s with both
+  halves); the entry had 93 ms for 8 MB. `add_tool_result` stores
+  `str(result)`, so nothing below the producer bounded it.
+- **The bound.** The server's text is cut at `max_read_chars` with a note
+  giving the size it had; the error path takes the same cut. A structured
+  payload is kept whole if its JSON fits in what the text left of the bound,
+  and dropped with a note otherwise. The same four results now come back at
+  126-258 characters and redact in under a millisecond.
+- **The SDK measurement the entry asked for.** mcp 2.3.0's own server sends a
+  string result as the text and as `{"result": <the text>}`. So every string
+  result between about half the bound and the bound loses its structured
+  copy, and the note says it only repeated the text (`_repeats`), so the
+  model does not call again for it.
+- **The split word goes.** The redactor runs after the cut and cannot match
+  half a credential, so A72's rule applies: `TOKEN_CHARS` and
+  `fragment_end` moved from `core/shell_sessions.py` to
+  `safety/policy_enforcement.py`, and both cuts read them. A text that is one
+  unbroken run, a base64 blob, shows only the note; the note's wording says
+  why a count can be zero.
+- `test_the_success_paths_result_key_is_untouched` was batch 150's scope
+  claim that the result stays unbounded. Its docstring and guard-log row now
+  say batch 225 bounded it on purpose; it stays as the under-the-bound
+  control.
+
+### Verified
+
+- New tests: 9, in `TestAnMcpResultIsBounded`, one through the SDK's own
+  server and the real registry. Mutations, each red: no bound, a hard-coded
+  bound, the split word kept, the shared rule backing off nothing (which
+  also reddens two shell-buffer tests), structured measured against the
+  whole bound, repeats never recognised, the error path uncut, and the cut
+  logged at DEBUG.
+- **Full suite**, alone: 8606 passed, 75 skipped (8681) in 2:21. A first run
+  that shared the machine took 19:32 and failed four timing tests in
+  `test_tool_budgets.py`, `test_tui.py` and `test_file_mentions.py`; their
+  31-test classes pass alone, and the re-run is the one above. ruff clean;
+  bandit 47 findings, none outside the baseline, no pair grew; gitleaks on an
+  export, no leaks. Under WSL the four touched files gave 366 passed and 3
+  failed, and the same 3 fail at HEAD.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.8.bugfixes.r57e749187eaf`.
+
+## Batch 226 -- tests no workflow ran (2026-11-02)
+
+**#230 and #234, register items 77 and 81.** The owner chose a Linux job
+and a Windows step for the integration tests, the Docker image test run in
+CI, and the full live-SSH job, and a Docker dry run of the setup before
+pushing.
+
+- **Measured first.** `pytest -m integration`: Windows 4 passed and 1
+  skipped, WSL 3 passed and 2 skipped; the image test skipped on both for
+  want of a Docker daemon. Against an unprivileged sshd in WSL, with a key
+  and an encrypted key, 14 of the 24 env-gated SSH and sudo tests ran here
+  for the first time and passed (317 passed, 10 skipped, against 303 and
+  24 with no host). The other 10 need root: account password (3), stacked
+  auth (1), sudo (6).
+- **#230.** tests.yml's `integration` job runs `-m integration` on Linux
+  with `uv==0.13.4` for the image test's locks; compat.yml's Windows job
+  runs it too. Each fails on any skip but its platform's own. The comment
+  that waited on #10 says the jobs exist, and pytest.ini says CI runs them.
+- **The image test would have failed on Windows, not skipped.** A Windows
+  runner's Docker answers `docker info` and builds Windows images, so
+  `_docker()` asks the daemon's OS now.
+- **#234.** `scripts/live-ssh-setup.sh` makes the runner a throwaway SSH
+  host: an account with a password, a key, a passphrase-protected key and
+  a sudo rule; sshd on 127.0.0.1:2222 and a `publickey,password` one on
+  :2223. It writes every `VEN_TEST_*` variable to `$GITHUB_ENV`, masks the
+  random secrets, and tests.yml's `live-ssh` job runs both files and fails
+  on any skip.
+- **The 24 could never all pass in one environment.** `test_ssh_backend.py`
+  opens `VEN_TEST_SSH_HOSTKEY` as a file; `test_sudo.py` pinned its value,
+  the path, as the key. Fixed in the sudo file.
+- AGENTS.md's command block said `-m integration` was 4 tests; it has been
+  5 since batch 166. Its Testing section now names the jobs, the script and
+  the rule that a new `VEN_TEST_` name must be set by the script.
+
+### Verified
+
+- New tests: 6 (3 gates in `test_docs_consistency.py`, a parametrized
+  `_docker()` test of 3). Mutations, each red: the Windows step without the
+  marker, the Linux job without its skip check, the script not setting
+  `VEN_TEST_SUDO_PW`, the job not running `test_sudo.py`, `test_sudo.py`
+  pinning the path again, and `_docker()` taking any daemon.
+- **Full suite**: 8611 passed, 75 skipped and 1 failed (8687) in 9:11, on a
+  machine with 4 of 32 GB free; the failure is
+  `test_eight_concurrent_writers_all_land`'s "database is locked", item 97's
+  load flake, and it and the TUI quit test (which failed in the 13:41 run
+  before it) pass alone, 71 passed. ruff clean; bandit 47 findings, none
+  outside the baseline, no pair grew; gitleaks on an export, no leaks. Under
+  WSL the three touched files gave 278 passed and 3 failed, and the same 3
+  fail at HEAD.
+- **Not yet run anywhere: the setup script as root, and the image test.**
+  Docker Desktop would not start here (stale socket files that only a
+  reboot releases), so the dry run waits for it. Until it runs, CI's first
+  run of these two jobs is their first run anywhere.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.9.bugfixes.r57e749187eaf`.
+
+## Batch 227 -- six prompt tiers, one assembly (2026-11-02)
+
+**#9 (ROADMAP_v2 J11) and register item 19, ROADMAP_v3 §85, A80.** The
+owner chose which design-sized issue to take, then that a tier is thread or
+session state (six of them), and that the one assembly lives in
+`core/loop.py` with the memories guard as one argument.
+
+- **Measured first.** #146 had pinned K6 as a rule over a canary table, and
+  §49 had made the loop's assembly one copy. Left: three hand-written
+  assemblies (a loop turn, a TUI turn, the TUI's `/grill-me` one-shot), the
+  same tiers in the same order at each, the memories guard spelled three
+  ways (`system_prompt is None`, `active_agent is None`, and left out), and a
+  canary table without the persona or a file mention, both built after it.
+- **The assembly.** `session_tiers(prompt, memory, *, agent_built,
+  mentions=True, mention_text=None, active_skills=())` appends goal,
+  memories, refs, todos, file mentions and skill bodies, in
+  `SESSION_TIERS`' order; all three sites call it. Only the memories depend
+  on `agent_built`. The TUI no longer imports the tier functions or the
+  skills manager.
+- **The pin follows it.** `TIER_CANARY` must name exactly `SESSION_TIERS`;
+  the invariance test assembles through `session_tiers` and first checks
+  every tier arrived; an AST scan fails if production code outside
+  `session_tiers` calls a tier function. Four docstrings that called the
+  convergence future work now name it, and AGENTS.md, the J11 row and the
+  register moved together, as item 19 asked.
+
+### Verified
+
+- New tests: 7 (5 in the new section, 2 new canary cases). Mutations, each
+  red: refs conditional like memories, the mention flag ignored, skill
+  bodies before the mentions, a tier with no canary, the TUI appending a
+  tier itself, and the guard wrong at each of the three call sites. The last
+  three were caught by shell tests already there, the one-shot's included.
+- **A false red, caught before it was recorded.** The first full run failed
+  three TUI tests that spied on `tui.app.with_memories` and its siblings,
+  names the TUI no longer imports -- so the first pass's two TUI-site
+  mutations had gone red on an AttributeError, not on the guard. The spies
+  moved to `core.loop`, and the call-site mutations were re-run printing
+  each failure: all four now fail on their assertion.
+- **Full suite**: 8618 passed, 75 skipped and 1 failed (8694) in 4:56; the
+  failure is a TUI modal-scrolling test, unrelated, and its class passes
+  alone. ruff clean; bandit 47 findings, none outside the baseline, no pair
+  grew; gitleaks on an export, no leaks. Under WSL the five tier-related files
+  gave 136 passed and 2 failed, and the same 2 fail at HEAD.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.10.bugfixes.r57e749187eaf`.
+
+## Batch 228 -- a CLI turn printed as it runs, and a second press to stop it (2026-11-03)
+
+**#225 and #244 (register items 71 and 94), ROADMAP_v3 §86, A81.** The owner
+took all four remaining groups as batches 228-231, this one first. Each fork
+went to the recommended option: each step printed as the replay draws it, two
+presses inside 2s, the same rule during a wake turn, and one press still
+exits at the prompt.
+
+- **Measured first.** The loop yields `thinking_delta`/`token_delta` while a
+  call streams, `retract` only then, and `tool_call_start` only after the call
+  finished and D20 saved it. So a printer that waits for each step to finish
+  never has to take anything back, and a first-press message never lands
+  inside a streaming answer, which is how the two issues meet.
+- **Found:** `todo_write`'s summary is documented as "for the CLI, which has
+  no panel" and rode only the `notice` event the CLI drained, so the CLI never
+  printed one; and CN10's CLI handler had no test at all.
+- **The live turn.** `run_to_completion(gen, observe)` hands every event to
+  an observer, and `run_agent_conversation` and `wake_conversation` pass one
+  through. `main._LiveTurn` prints a step at its first tool call from what
+  streamed and the last step from the returned response, through
+  `core.replay.step_entries`, now public and called by `replay_entries`.
+  `retract` drops the held deltas, notices print live and once, and a print
+  failure is logged rather than raised into the loop. The `[thread: ...]` line
+  moved below the answer.
+- **The second press.** `main._SecondPress` handles both turns: the first
+  press only says what a second would do, a second inside
+  `TURN_STOP_CONFIRM_S` (2.0, held equal to the TUI's `QUIT_CONFIRM_S`) acts
+  once, later presses are ignored, and a press after the window re-arms. CN10
+  and A21 carry amendment notes.
+
+### Verified
+
+- New tests: 23 (21 in `tests/test_cli_live_turn.py`, 2 in
+  `test_session_cli.py`). The parity test runs a real two-step turn through
+  the real loop and then replays its thread: the same five lines. 18
+  mutations, each red on its assertion. The one that first survived removed
+  the acted-once guard: the chat turn's action is idempotent (`cancel()` is),
+  so its test could not see a second act, and the wake's is not. A handler
+  unit test now counts acts.
+- Existing tests that changed: the wake-interrupt helper in
+  `test_session_cli.py` presses twice by default; with one press, the
+  300-second session it waits on hung the first run.
+- **Full suite:** 8642 passed, 75 skipped in 2:19, nothing failed. ruff clean.
+- bandit: 0 findings outside the baseline, no count grew. gitleaks on a worktree
+  export: no leaks. WSL, the six CLI files: 262 passed, and
+  `test_a_research_pass_creates_a_research_pass_thread` failed identically at
+  HEAD, because the export has no `providers.json` (gitignored; CI copies the
+  template).
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.11.bugfixes.r57e749187eaf`.
+
+## Batch 229 -- two provider facts about temperature, answered from the providers' own pages (2026-11-03)
+
+**#6 (register item 11), ROADMAP_v3 §87, A82.** Both facts §10's revisit
+recorded as needing a live key were checked against the providers'
+documentation instead, since no key is set here. The owner chose to follow
+OpenAI's own rule rather than list model names, and to list the two Gemini
+models that ignore a temperature.
+
+- **(a) The default is 1.0.** Google's Gemini 3 guide recommends leaving it
+  at 1.0; OpenAI's reference refused the fetch (403) and posts quoting it say
+  it defaults to 1. The installed SDKs (openai 2.45.0, google-genai 2.29.0)
+  state no default. The deleted `ENSEMBLE_TEMPERATURE = 1.0` was a no-op.
+- **(b) OpenAI's reasoning models refuse one** whenever reasoning effort is
+  not `none` ("remove `temperature`, `top_p`, and `top_logprobs`"). The
+  harness ships effort `high`, so the backstop would have let a 400 through
+  on every one of them. The current guide names a GPT-6 family the register
+  never mentioned, which is the case against a name list.
+- **Found: (c).** Gemini 3.6 Flash and 3.5 Flash-Lite silently ignore
+  `temperature`, `top_p` and `top_k`, and Google says all later Geminis will,
+  then refuse them with a 400.
+- **The change.** `_sampling_kwargs` takes the `effort` `call_model_stream`
+  is about to send and, on `OPENAI`, drops a temperature with its WARNING
+  when that effort is not `none`. `gemini-3.6-flash` and
+  `gemini-3.5-flash-lite` join `models_rejecting_sampling_params`. A
+  reasoning model sent no effort still gets the loud 400 an unlisted model
+  always has.
+
+### Verified
+
+- New tests: 6 (4 in `test_client_effort.py`, 2 at the wire in
+  `test_client_translation.py`). 7 mutations, each red on its assertion;
+  the call site passing no effort is visible only to the wire test.
+- **Full suite:** 8648 passed, 75 skipped in 2:15, nothing failed. ruff clean; bandit 0 outside the baseline, no count grew; gitleaks on an export: no leaks.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.12.bugfixes.r57e749187eaf`.
+
+## Batch 230 -- input typed before a question, and the launcher's stdin (2026-11-03)
+
+**Register items 44 and 43, ROADMAP_v3 §88, A83.** The owner chose an
+OS-level flush for `ask()`, then one Escape key on Windows once the
+measurement showed the flush alone missed a read in progress, and the
+launcher fix with measurement.
+
+- **Measured item 44** with the real `_StdinReader`: in a Windows console of
+  its own with keys injected by `WriteConsoleInputW`, and on a WSL pty. A
+  whole line typed before the first question answered it on Windows (3/3);
+  half a line typed before a question, or between two, became the front of
+  the answer on both platforms ("sta" + "fresh"). The approvals match
+  `y`/`yes` exactly, so a stray `y` and then Enter to decline would read
+  as yes.
+- **The fix.** `_flush_terminal()` runs before the pump starts and before
+  the drain: `tcflush(TCIFLUSH)` on POSIX, which cleared every case;
+  `FlushConsoleInputBuffer` on Windows, which cleared all but the half line
+  a cooked read in progress holds, so `_flush_console_input` then writes one
+  Escape, which conhost takes as "clear the line". Every case clean on both
+  platforms afterwards, and a line typed after the prompt still answers it.
+  Only a real terminal is flushed.
+- **Item 43.** The launcher's consent shape reproduced in a console of its
+  own: five keys typed at the child reached it in all three runs as shipped
+  and all three with `process.stdin.pause()` and `unref()` after
+  `rl.close()`. Fixed as the owner chose; benign either way.
+- Probes stayed in the scratchpad. Redirecting `APPDATA` hid the Python user
+  site (pydantic), the Windows twin of the WSL `HOME` trap, so the Windows
+  probe redirects `HOME` and `USERPROFILE` only, and the WSL one sets
+  `PYTHONUSERBASE`.
+
+### Verified
+
+- New tests: 7 in `test_cli.py` (two real-pty tests skip on Windows). Six
+  mutations, all red under WSL and the five Windows can see red there. The
+  first "never flushed" test used a `StringIO`, which has no descriptor, and
+  survived the `isatty` check's removal; it uses a pipe with one now.
+- **Full suite:** 8653 passed, 77 skipped in 2:14, nothing failed (the two pty tests are the new skips on Windows; they passed under WSL). ruff clean; bandit 0 outside the baseline, no count grew; gitleaks on an export: no leaks.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.13.bugfixes.r57e749187eaf`.
+
+## Batch 231 -- one command catalog, and the CLI's slash commands (2026-11-03)
+
+**Issue #8 and register item 45, ROADMAP_v3 §89, A84.** The owner chose one
+catalog with each shell's own handlers, the commands #8 names as real gaps
+plus item 45's view, `/call` to list and open a thread's tool calls, and
+refusal of a `/` line that names nothing.
+
+- **Measured.** The TUI registers 32 slash commands and the CLI had none:
+  every line at its prompt went to the model, so `/help` there was a billed
+  chat turn, and each feature that wanted the CLI shipped a launch flag
+  instead. `main.py` imported neither of the two view modules item 45 says
+  were put in `core/` for both shells.
+- **One catalog.** `core/commands.py` declares every command once (name,
+  summary, usage, aliases, and why a shell lacks it), with the registry
+  mechanism moved there from `tui/commands.py`. A shell binds handlers with
+  `bind()`, and its registry refuses an undeclared name, one declared absent
+  for it, and a description that differs; the catalog refuses its own
+  collisions when built. A name one shell lacks gets the catalog's reason,
+  not "unknown".
+- **Shared decisions.** What the TUI's handlers decided inline moved to
+  functions both shells call: `core.connect.model_switch`,
+  `core.client.effort_choice`, `core.compaction.parse_compact_args`,
+  `core/claims_view.py`, `core.replay.thread_row` and `tool_lines`, and
+  `core.loop.agent_turn`, which the TUI's chat turn and one-shot now use.
+- **The CLI.** `cli_commands.py` binds 18 commands; `run_chat` keeps a
+  `ChatSession` every turn reads. `/skill` reaches the prompt through a new
+  `active_skills` argument on `run_agent_conversation` and
+  `wake_conversation`, a wake runs under the turn's agent and skills, and
+  `/call` routes as the TUI's click does. The module never imports `main`,
+  which runs as `__main__`.
+- **Found.** The TUI's `/model` note for an agent that pins a model said
+  "/agent clear", which `/agent` refuses as an unknown agent; the shared note
+  says `/agent default`.
+
+### Verified
+
+- New tests: 91 in `test_cli_commands.py`, 24 in `test_command_catalog.py`,
+  one in `test_session_cli.py`. Thirty mutations: 29 red, one equivalent.
+  Two survived the first pass and got tests: a `/grill-me` request left
+  armed fires again only on the next `/` line, and a picker test that chose
+  the last row could not see an answer off by one.
+- A piped smoke run of the real CLI: `/help`, an unknown name, `/theme`,
+  `/call`, `/goal`, `/new`, `/effort` and `/exit`, none reaching the model.
+- **Full suite:** 8769 passed, 77 skipped in 1:45, nothing failed; the CLI and TUI files again with AGENT_WORKSPACE unset, and under WSL (872 passed). ruff clean; bandit 0 outside the baseline, no count grew; gitleaks on an export: no leaks.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.14.bugfixes.r57e749187eaf`.
+
+## Batch 232 -- disagreement routed to a check, not deducted (2026-11-03)
+
+**Issue #12, ROADMAP_v3 §90, A85.** The owner chose routing over deduction,
+with the penalty retired; "at most half the candidates" as the threshold; and
+the count, not the other candidates' answers, as what 6a is told.
+
+- **Measured.** Swept through `score_claim`, E8's penalty changed a tier only
+  where at most half the candidates asserted a claim. A grounded claim fell
+  from HIGH to MEDIUM there. A partially grounded one fell from MEDIUM (0.60)
+  to LOW (0.50 at 1 of 3), which D1 flags: 6a was not told why, and 6b
+  re-scored it under the same penalty, so a claim whose grounding never moved
+  rode the loop to D2's cap and was published UNVERIFIED. Nothing else read
+  the signal.
+- **Contested.** `score_claim` marks a factual claim `contested` in its
+  breakdown when its consistency is at most `CONTESTED_SHARE` (0.5), after
+  B8's dedupe and clamp. An unreported numerator (B7) is not contested, and a
+  non-factual claim is never asked (E9). The score has no agreement term on
+  any run.
+- **Routed.** D1 flags a claim that is contested or whose tier is flagged.
+  The loop keeps a claim for its tier only, so a contested claim the check
+  clears leaves after one round. 6a's entry for it carries
+  `disagreement_feedback` (`asserted_by`, `of`), `revise.md` says to check it
+  rather than reword it, and D1's checkpoint counts them. No gate gained a
+  model call.
+- **The key.** `confidence.disagreement_penalty_factor` still loads, warns
+  and applies nothing (E4's rule).
+- **Found.** §89 said the CLI still lacks fourteen commands, and so did batch
+  231's closing report. The catalog declares fifteen absent from it, eleven
+  of them not yet built. §89 says fifteen now.
+- **Found by the first full run.** Two tests in `test_storage_e2e.py`
+  reloaded `core.replay` to point it at the real database, and a reload
+  outlives its test: restoring `sys.modules` cannot undo it, so every later
+  fake-storage test on the same xdist worker replayed threads from the
+  deleted database. Six of batch 231's `/call` tests failed when scheduling
+  put them after that file (reproduced in one process with the two files in
+  that order). The tests patch `core.replay.archive_history` with
+  monkeypatch now, and `_replay_is_put_back` asserts the binding is restored
+  when the module's swap tears down; with one reload put back, it fails
+  inside that file.
+
+### Verified
+
+- New tests: 20 in `test_confidence_scoring.py`, 8 in `test_orchestrator.py`;
+  ten scoring tests that asserted the penalty assert the routing now. Twenty
+  mutations, all red, and a green control. E9 was first written twice, in the
+  mark's condition and in the branch that records it, so deleting either
+  changed nothing; it is enforced once.
+- **Full suite:** 8797 passed, 77 skipped in 1:50, nothing failed; the touched files again with AGENT_WORKSPACE unset (804 passed), and under WSL (808 passed, plus register item 102's known failure). ruff clean; bandit 0 outside the baseline, no count grew; pip-audit clean; gitleaks on an export: no leaks. The two pass-prompt digests in `test_untrusted_content.py` moved with the two prompt edits, deliberately, and say so.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.15.bugfixes.r57e749187eaf`.
+
+## Batch 233 -- a confined child may write its own result (2026-11-03)
+
+**PR #272's first CI run.** `pytest` in `tests.yml` and `py313-info` in
+`compat.yml` failed the same nine tests, all in `test_confine.py`'s
+`TestTheWallsHold`: every confined probe returned "no usable result (exit
+120)". Nothing else failed, and the new `integration` and `live-ssh` jobs
+passed on their first run.
+
+- **Cause, batch 221's.** #204 moved a math child's stdout and stderr from
+  pipes to temporary files capped by `RLIMIT_FSIZE`, and
+  `security/confine.py`'s limits layer set `RLIMIT_FSIZE` to zero. A
+  confined child could not write its own result, and Python exits 120 when
+  the final flush fails. In a shared deployment that is every math call.
+  Reproduced under WSL, which has Landlock: the same nine fail.
+- **Fix.** The limits layer keeps the cap already in force and lowers only
+  an unlimited one to zero. Landlock is what refuses opening any file for
+  writing; the only files a confined child can grow are the two outputs
+  `isolation.py` hands it, already capped at twice the result bound.
+- **Found.** The startup self-test passed throughout, because its child
+  writes to pipes. Recorded as register item 116 rather than changed here:
+  it is what a deployment checks before serving anyone.
+
+### Verified
+
+- Two new tests in `test_confine.py`, each running the limits layer in a
+  child. Under WSL `test_confine.py`, `test_tool_budgets.py` and
+  `test_math_tools.py` pass (420). Mutations under WSL: zero again fails ten
+  (CI's nine and the new cap test), an unlimited parent left unlimited fails
+  the control, and a comment change stays green.
+- **Full suite:** 8797 passed, 79 skipped in 1:55, nothing failed (the two new tests skip on Windows and ran under WSL). ruff clean; bandit 0 outside the baseline once the new test's subprocess call carried its reasoned `nosec`, no count grew; gitleaks on an export: no leaks.
+- **Version**, by `scripts/version.py bump`: `0.3.4-b.16.bugfixes.r57e749187eaf`.

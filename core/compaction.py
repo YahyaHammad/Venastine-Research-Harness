@@ -168,6 +168,16 @@ _context_window_warned: set = set()
 # one set would also mean whichever fired first silenced the other.
 _floor_warned: set = set()
 
+# And a third, for the case A24 left out on purpose: the headroom CAP, not
+# the floor, leaves less room than one bounded read (TECHNICAL_DEBT 96,
+# batch 220). Its own set, keyed the same way and for the same reasons.
+_read_warned: set = set()
+
+# Threads whose turn count has already been reported as yielding (#217,
+# batch 221), so the INFO line is said once per thread. Keyed on the
+# THREAD, not the model: the condition is a property of the conversation.
+_yield_logged: set = set()
+
 
 # A trailing release date, as Anthropic and Google spell it.
 _DATE_SUFFIX = re.compile(r"-\d{8}$")
@@ -446,7 +456,8 @@ def _warn_if_the_floor_left_no_room(model: str, provider_name: Optional[str],
     (12,500 proxy tokens), but the CAP is what bound it, the cap is
     deliberate (see headroom_for), and the only remedy there is a bigger
     model -- so a warning naming two settings would name the wrong thing.
-    That case is TECHNICAL_DEBT 96, recorded rather than announced.
+    That case is TECHNICAL_DEBT 96, and since batch 220 it has a line of its
+    own, `_warn_if_one_read_cannot_fit`, naming the read instead.
 
     Two wordings for one condition, because the remedy differs: at or above
     the window the trigger cannot be reached at all, and just below it the
@@ -482,6 +493,47 @@ def _warn_if_the_floor_left_no_room(model: str, provider_name: Optional[str],
         "so the step after a fold can still overflow. The floor is one token "
         "above the larger of %s -- lowering them lowers it.",
         model, where, window - trigger, window, trigger, one_read, settings)
+
+
+def _warn_if_one_read_cannot_fit(model: str, provider_name: Optional[str],
+                                 window: int, share: int, floor: int,
+                                 trigger: int) -> None:
+    """Say ONCE, per (provider, model), that one read can overflow the window.
+
+    TECHNICAL_DEBT 96 (#246, batch 220): the case the warning above leaves
+    out on purpose. On a 16,384- or 32,768-token window the floor does not
+    bind; headroom_for's CAP does, and it leaves 4,096 or 8,192 tokens
+    between the trigger and the window -- less than one bounded read's
+    12,500. A thread just under the trigger takes one large `read`, the
+    prompt overflows, and nothing in core/ recovers from that.
+
+    A24 was right that naming the two margins would name the wrong remedy.
+    The right one is the READ: `max_read_chars` is a setting, and a value
+    that fits the headroom keeps one read inside the window. The owner chose
+    to say so over shrinking reads per model, which would need the window
+    plumbed into every tool that reads the global. It applies to every
+    model, and the line says that too.
+    """
+    if floor >= share:
+        return  # the floor binds; the warning above owns that case
+    one_read = int(config.MAX_READ_CHARS) // CHARS_PER_TOKEN
+    headroom = window - trigger
+    if headroom >= one_read:
+        return
+    key = (provider_name or "", model)
+    if key in _read_warned:
+        return
+    _read_warned.add(key)
+    where = f" on {provider_name}" if provider_name else ""
+    logger.warning(
+        "Compaction for %r%s fires at %s tokens of a %s-token window, leaving "
+        "%s tokens of headroom: less than one bounded tool read "
+        "(max_read_chars is %s characters, about %s tokens), so one large "
+        "read just below the trigger can overflow the window and end the "
+        "turn. A max_read_chars of %s or less in config.yaml keeps a read "
+        "inside it; it applies to every model.",
+        model, where, trigger, window, headroom, config.MAX_READ_CHARS,
+        one_read, headroom * CHARS_PER_TOKEN)
 
 
 def derived_trigger(model: str, provider_name: Optional[str] = None) -> int:
@@ -540,6 +592,8 @@ def derived_trigger(model: str, provider_name: Optional[str] = None) -> int:
     trigger = max(1, share, floor)
     _warn_if_the_floor_left_no_room(model, provider_name, window, share,
                                     floor, trigger)
+    _warn_if_one_read_cannot_fit(model, provider_name, window, share, floor,
+                                 trigger)
     return trigger
 
 
@@ -856,7 +910,17 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
     if preferred >= 1:
         cutoff = preferred
     elif cutoff >= 1:
-        logger.info(
+        # A STANDING CONDITION, said once per thread (batch 221, #217).
+        # This runs once per compact(), which _maybe_compact calls after
+        # every step while the thread is over the trigger -- so at INFO it
+        # repeated per step for the life of the conversation, the shape #44
+        # took out of this module. The first time a thread yields says it;
+        # the rest are DEBUG, like the no-progress line that follows them.
+        level = (logging.DEBUG if memory.thread_id in _yield_logged
+                 else logging.INFO)
+        _yield_logged.add(memory.thread_id)
+        logger.log(
+            level,
             "Compaction on thread %s: keep_recent_turns=%d would have held "
             "all %d turns and blocked every fold, so it yielded. The current "
             "turn and keep_recent_tokens still hold.",
@@ -1108,6 +1172,45 @@ def _input_budget(model: str, provider_name: Optional[str] = None) -> int:
     """
     return max(1_000, context_limit(model, provider_name)
                - config.COMPACTION_PIPELINE_BACKSTOP_TOKENS)
+
+
+def parse_compact_args(args: str) -> tuple:
+    """(overrides, error). ROADMAP_v2 §21's per-invocation override --
+    applies to this one run and persists nothing, which is the last step
+    of D27's resolution order.
+
+    `/compact`'s grammar in either shell: both parse here, so one cannot
+    accept a spelling the other refuses (ROADMAP_v3 §89; moved from
+    tui/app.py).
+
+    An unrecognised flag is an ERROR, not something to ignore. Silently
+    dropping `--strenght 4` would compact at the default strength while
+    the user believes they asked for something else, and the result looks
+    exactly like a compaction that obeyed them.
+    """
+    overrides: dict = {}
+    tokens = args.split()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in ("--strength", "-s"):
+            index += 1
+            if index >= len(tokens):
+                return None, "--strength needs a value from 1 to 5."
+            try:
+                overrides["strength"] = int(tokens[index])
+            except ValueError:
+                return None, f"--strength needs a number, got {tokens[index]!r}."
+        elif token.startswith("--strength="):
+            value = token.split("=", 1)[1]
+            try:
+                overrides["strength"] = int(value)
+            except ValueError:
+                return None, f"--strength needs a number, got {value!r}."
+        else:
+            return None, f"Unknown option {token!r}. Usage: /compact [--strength N]"
+        index += 1
+    return overrides, None
 
 
 def compact(memory, model: str, provider_name: str,
@@ -1559,8 +1662,19 @@ def _summarize(loop_cls, manager, agent, base_prompt, segment_text, target,
     discarding it would spend the calls and keep the full history, leaving
     the thread exactly as stuck as before with less budget to fix it.
     """
+    from core.loop import advertisement_facts
+
     context = manager.active_context(agent)
-    system_prompt = manager.system_prompt_for(agent, base_prompt, context=context)
+    # #228: the catalogs this prompt carries are decided by the run it is
+    # for, through the bundle that run is given below -- the reviewer's
+    # rule (core/reasoning/review.py). With system_prompt_for's attended
+    # defaults this was right only while compactor.md's empty
+    # allowed_tools kept both catalog tools out; a widening would have
+    # reopened #68 on every automatic compaction of a headless run.
+    callable_only, granted = advertisement_facts(authorization)
+    system_prompt = manager.system_prompt_for(
+        agent, base_prompt, context=context,
+        callable_only=callable_only, granted=granted)
     tolerance = int(target * (1 + config.COMPACTION_RATIO_TOLERANCE))
 
     response = loop_cls.run_agent_conversation(

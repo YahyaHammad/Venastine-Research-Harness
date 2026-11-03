@@ -15,7 +15,8 @@
 # in test_shell.py and test_posture.py. Running those two files on
 # windows-latest covers the platform split for ~2 min instead of a second
 # 15-minute suite. Same fresh-clone steps (providers.json is needed even
-# here), same `python -m pytest` rule.
+# here), same `python -m pytest` rule. Since batch 226 it also runs the
+# `integration` tests, whose Windows half nothing else runs.
 #
 # Every job here takes pytest.ini's parallel default. For windows-subset
 # that is nearly a no-op and the arithmetic says why: it names two files,
@@ -103,3 +104,17 @@ jobs:
 
       - name: Run platform-sensitive tests
         run: python -m pytest tests/test_shell.py tests/test_posture.py -q
+
+      # #230 (batch 226): the integration tests on Windows, where the
+      # fallback shell's wait test means something and the three MCP
+      # orphan tests take the platform's own process tree. tests.yml's
+      # `integration` job runs the Linux half. The one skip allowed is the
+      # bundle image test: this runner's Docker builds Windows images only.
+      - name: Run the integration tests
+        shell: bash
+        run: |
+          python -m pytest -m integration -q -n0 -rs | tee integration.txt
+          if grep "^SKIPPED" integration.txt | grep -v "running Linux containers"; then
+            echo "::error::an integration test skipped on the runner set up to run it"
+            exit 1
+          fi

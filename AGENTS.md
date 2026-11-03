@@ -60,11 +60,11 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8545 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 8876 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
-pytest -m integration                             # opt-in, 4 tests; three spawn a real stdio MCP server (§17 AC8) and one the fallback shell (batch 130)
+pytest -m integration                             # opt-in, 5 tests; three spawn a real stdio MCP server (§17 AC8), one the fallback shell (batch 130, Windows) and one builds the bundle's image (batch 166, Docker); CI runs them since batch 226
 
 # PARALLEL BY DEFAULT since batch 109 -- pytest.ini's addopts carries
 #   `-n auto --dist loadscope`, and nothing below needs typing normally.
@@ -75,9 +75,11 @@ pytest -n logical                                 # every core -- and MEASURABLY
 
 Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio` and `pytest-xdist`) are listed in `requirements-test.txt`, not `requirements.txt` — the comment above its `pip install` line says why. **`pytest-xdist` is not optional**: `pytest.ini` puts `-n auto` in `addopts`, so without it `pytest` fails at argument parsing rather than quietly running serially, which is the intended trade — a suite that silently takes eight times longer on a machine missing a package is worse than one that names the package.
 
-**`--dist loadscope` is a coverage decision, not a performance one, and it is the one thing here not to "optimise".** xdist's default `load` hands out individual tests, and three places depend on one test running immediately after another in the same process: `test_probe_isolation.py::TestWhatOneTestLeavesForTheNext` (two ordered pairs, and its docstring says so), `test_config_edit.py::TestTheLoaderCacheDoesNotLeakBetweenTests`, and `test_storage_e2e.py`'s module-scoped `real_storage` plus the tests that read what earlier ones wrote to its database. Split across workers **none of them fails** — the autouse fixtures in `tests/conftest.py` reinstall the clean state for every test, so "and the next one does not inherit it" passes whoever ran before it, and the file goes silently vacuous. `loadscope` keeps all three **structurally**: it groups by CLASS for a test inside one and by MODULE for a test that is not, and each of the three is a single class or a module of plain functions.
+**`--dist loadscope` is a coverage decision, not a performance one, and it is the one thing here not to "optimise".** xdist's default `load` hands out individual tests, and four places depend on one test running immediately after another in the same process: `test_probe_isolation.py::TestWhatOneTestLeavesForTheNext` (two ordered pairs, and its docstring says so), `test_process_memos.py::TestWhatOneTestLeavesForTheNext` (one pair), `test_config_edit.py::TestTheLoaderCacheDoesNotLeakBetweenTests`, and `test_storage_e2e.py`'s module-scoped `real_storage` plus the tests that read what earlier ones wrote to its database. Split across workers **none of them fails** — the autouse fixtures in `tests/conftest.py` reinstall the clean state for every test, so "and the next one does not inherit it" passes whoever ran before it, and the file goes silently vacuous. `loadscope` keeps all four **structurally**: it groups by CLASS for a test inside one and by MODULE for a test that is not, and each of the four is a single class or a module of plain functions.
 
 **And a file is no longer one unit, which is the trap loadscope adds.** A file holding both module-level tests and a class is TWO groups, so a non-function-scoped fixture in it is set up twice on any worker that takes both — found by measuring, not by reading, when a `-n logical` run put `test_storage_e2e.py`'s two groups on one worker and the second `real_storage` raised `Table 'conversationthread' is already defined`. Five `-n auto` runs had been green, so it is a scheduling lottery. **If you add a module- or session-scoped fixture, its file must hold no test class** -- and nothing here states how many such fixtures exist, because a count written beside a rule that does not need one goes stale (A34). The rule is enforced for the file you are writing rather than described for the file that happens to hold the fixtures today: `test_every_file_with_a_module_scoped_fixture_declares_no_test_class` reads every test module's fixture DECORATORS and fails on any file that has both, and `test_this_file_declares_no_test_class` still pins the one file that has them now.
+
+**A module-level memo is reset for every test, or it is exempted by name with a reason (#233).** A cache, a warn-once set or a lazily computed answer in a module global outlives the test that filled it, and which test runs next on that worker is the lottery above. `tests/test_process_memos.py` reads every production module for the two shapes such state takes -- a name some function declares `global`, and a lowercase module-level container or `*Cache` -- and fails on any name no autouse fixture resets and nothing exempts, and on a listed name that has gone. If you add one, put it in `PROCESS_MEMOS` in `tests/conftest.py` with how to reset it (the module's own reset function where it has one), or in the fixture that already owns its module, or in that file's `EXEMPT` with the reason its value cannot decide what a test asserts. Batches 220 and 221 each added a warn-once set without noticing, which is why this is a census rather than a list somebody keeps.
 
 **The suite was FLOOR-BOUND and is not any more, and batch 114 is why.** The slowest single GROUP sets the wall time whatever the worker count, and under loadscope that was `tests/test_tui.py`'s 183 module-level tests — one group, because a test outside a class is grouped by MODULE — at 292 node ids and about a fifth of the suite's measured time. They were cut into 41 classes along the section banners the file already had (TECHNICAL_DEBT 30) and are **73** now, which is the rule working rather than drifting. That number is read back out of this sentence by `test_agents_md_states_the_real_test_tui_class_count` (batch 128), so a batch that adds a class here also edits this digit. Measured properly: three runs a side, ALTERNATED on one box so drift cancels instead of landing on whichever side ran second — **2:17.9 / 2:07.9 / 2:28.6 before against 1:10.7 / 1:40.6 / 1:26.3 after, a mean of 138.1s against 85.9s, 1.61×**, and the two ranges do not overlap, which is the part that makes it a result rather than a pair of averages. Against a serial run that read 8:41 the same evening, 6.1× where it was 3.8×.
 
@@ -91,7 +93,7 @@ Test dependencies (`pytest`, `pytest-mock`, `pytest-asyncio` and `pytest-xdist`)
 
 MCP servers are a *third* config file again — `mcp.json`, user-level or `.venastine/`-level. Not `.env`, not `providers.json`, not `settings.json`.
 
-**Credentials are two separate mechanisms, deliberately.** LLM provider keys → `providers.json` (managed by `credentials.py`, gitignored, template at `providers.json.example`, and written for you by `/connect` since §79; a shared hosted session keeps a connected key in memory instead and never writes it, HD5). The ChatGPT plan has no key: its hourly tokens live in `chatgpt_auth.json` beside that file, managed by `core/chatgpt_auth.py` (§83). Misc tool API keys (GitHub, NVD) → `.env` (managed by `env_secrets.py`, template at `.env.example`). Never mix them.
+**Credentials are two separate mechanisms, deliberately.** LLM provider keys → `providers.json` (managed by `credentials.py`, gitignored, template at `providers.json.example`, and written for you by `/connect` since §79; a shared hosted session keeps a connected key in memory instead and never writes it, HD5). The ChatGPT plan has no key: its hourly tokens live in `chatgpt_auth.json` beside that file, managed by `core/chatgpt_auth.py` (§83). Misc tool API keys (GitHub, NVD) → `.env` (managed by `env_secrets.py`, template at `.env.example`) — for a FUTURE tool: no shipped tool calls `get_env_secret` yet, so nothing reads that file today (#210), and the documents that mention it say so. Never mix them.
 
 ## Version naming and batch completion (batch 202)
 
@@ -331,7 +333,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §54, §55, §58, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81 and §82 built; §53, §56, §57, §59 and §60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A78 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR6 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82 and CG1–CG24 from §83). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §54, §55, §58, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84, §85, §86, §87, §88, §89 and §90 built; §53, §56, §57, §59 and §60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A85 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85, A81 in §86, A82 in §87, A83 in §88, A84 in §89, A85 in §90), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM4 from §57, PR1–PR6 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82 and CG1–CG24 from §83). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -348,16 +350,24 @@ fails on one that does not.
 | Rev. 1 open questions | `S11`, `S12`, `S16` | `Rev. 1 S12` | resolved inline in `ROADMAP_v2.md` |
 | audit severities | `S1`–`S4` | `severity S1`, or an issue title | `#15`, the audit tracker |
 | review findings / mutations | `F2`, `P10` | `review finding F2`, `mutation P10` | `DEVLOG.md`, the audit's mutation passes |
+| Unicode control sets | `C0`, `C1` | `Unicode C1` | the Unicode standard -- prose about control characters, as in `core/ansi.py` (#253) |
 
 `D1` and `D2` are the unavoidable pair: both a decision and a gate. They resolve,
 so nothing can force the distinction mechanically — write `gate D1` when you mean
 the gate. A seventh use of `C1`–`C10` is the research pipeline's **claim ids**,
 which are run data rather than references; see the C table in `ROADMAP_v2.md`.
+
+**Cite an issue, never its state (#241).** `#NNN` in a comment is the most useful
+citation there is, but whether that issue is open lives on GitHub, and a sentence
+saying so goes stale the day it closes -- one said a credential residual was open
+for seven weeks after its fix had shipped. Say what the code does and cite the
+issue for why; `test_no_production_comment_says_an_issue_is_open` refuses "tracked
+in #N", "#N is still open" and "when #N closes" in the `.py` and `.mjs` files.
 - **CONFIG_ARCHITECTURE.md** — why every value in `config.yaml` is what it is. `config.py`'s 788 lines of rationale, carried over verbatim when the values moved into YAML, keyed by the YAML's own names. Read the entry for a key before changing it; several of these numbers have already been "corrected" back to a value they were deliberately moved away from.
 - **docs/DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **docs/TECHNICAL_DEBT.md** — the register: what a review found and what was deliberately left, each item open or closed with the batch that closed it. Cite an item as `TECHNICAL_DEBT 42`, bare — one form, since three were in use. An entry is evidence, not instruction: batches 126 and 127 each found the ENTRY itself wrong about where its own defect came from, so measure the claim before building the fix it proposes.
 - **docs/REVIEW_MARATHON.md** — the pre-merge review marathon: 19 independent review scopes covering every production module, the finding format every report uses, and the rules of engagement for a read-only reviewer. **Open while it is open** — the run log at the bottom says which scopes have been reviewed. The per-scope reports are NOT in the repository: they go to a gitignored `review/`, because a tracked `.md` moves the gated readable-doc count and because `read_project_doc` would advertise a list of open defects to every run.
-- **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix.
+- **tests/BREAKING_CHANGES.md** — what breaks each test when production code changes, the symptom, and the fix. A test that no longer exists is struck through, ~~`test_old`~~, with what replaced it; every other test name there must exist, and `test_every_test_name_the_guard_log_cites_exists` checks (#256).
 - **CLAUDE.md / QWEN.md** — pointers to this file, nothing more. They exist so a harness that looks for one filename finds it without searching; the content has one copy.
 
 ## Architecture
@@ -447,6 +457,8 @@ depends on which it finds.
 ### The TUI (`tui/`, §16)
 
 A **shell**, not a feature home. D12 makes the CLI a permanent fallback, so anything implemented in `tui/` is invisible to the CLI *and* the research pipeline — which is why the question tool, todo list, goal mode, `/init`, session summaries and cross-thread referencing are all specified in §18/§21/§23/§24 instead. `tui/commands.py` is a registry other sections register into.
+
+**One command catalog, each shell its own handlers (ROADMAP_v3 §89, A84).** `core/commands.py` declares every slash command ONCE -- name, summary, usage, aliases, and for a shell that lacks it the sentence saying why -- and both shells bind handlers to it with `bind(name, handler)`. A shell's `CommandRegistry` refuses at registration a name the catalog lacks, a name declared absent from that shell, and a description that differs from the catalog's, so adding or rewording a command happens in one place; a test that registers a command of its own declares it in `CATALOG` first. A name one shell lacks is answered with the catalog's reason, never "unknown". The handlers stay per shell because that is where the shells genuinely differ, and they are THIN: what a command decides is a core function both call (`core.connect.model_switch`, `core.client.effort_choice`, `core.compaction.parse_compact_args`, `core/claims_view.py`, `core.loop.agent_turn`). Moving policy back into a handler is the copy that drifts. The CLI's handlers are `cli_commands.py`, which **must not import `main`**: main.py runs as `__main__`, so a second copy would be a second stdin reader -- `run_chat` hands it `ask`, `replay` and `show` on the `ChatSession` instead. A CLI line starting with `/` is never sent to the model, the TUI's rule since §16.
 
 **`/config` is the exception that proves the rule** (batch 84). The command lives here; the catalogue, the value grammar and the comment-preserving writer live in `config_edit.py` at the root, so a command-line surface can be added over the same module without moving a line. What is in `tui/` is the two-stage completer, the authority confirmation and the queued restart -- drawing and asking, which is what a shell is for.
 
@@ -1682,7 +1694,9 @@ would never clear.
 
 **A composed tool name is validated and an invalid one is refused** (A30, batch 150). Both halves of `mcp__<server>__<tool>` come from outside this repo and the installed SDK constrains neither -- `Tool.model_fields["name"]` is a bare `str`. A dotted `mcp.json` key, a space or newline from a server, or two ordinary long words (70 characters) all used to register AND advertise, and `schemas()` is rebuilt every call (K7), so one such name made every provider request malformed for the rest of the session from a server that was working. Refused rather than mangled, because a renamed tool is one the model cannot name back and the prefix is not a parser. One warning per SERVER when the server half is at fault (it poisons every name, and the operator can rename it), one per TOOL otherwise. This is not the up-front schema validation decision G rules out: nothing in `register_all` reads `mcp.json`, and a named per-server failure is what G asks for.
 
-**A tool's description, title and input_schema are third-party text in every request, and all three are bounded at the producer** (A31, batch 150). A5's rule, which the other two sources of model-facing third-party text already followed: whitespace collapsed, capped at `registration.MAX_TOOL_DESCRIPTION_CHARS` (2000 -- NOT `MAX_CATALOG_TEXT_CHARS`, whose 300 is sized for a one-line bullet), applied after the `[MCP: ]` prefix and the server's `title` are composed in so one call covers all three strings. `input_schema` is bounded by a different mechanism because capping strings inside a schema turns a load-time failure into a call-time one: the serialised whole schema is capped at `MAX_TOOL_SCHEMA_CHARS` (16384) and an oversized tool is refused. The success path's `result` is still unbounded on purpose -- that is TECHNICAL_DEBT 48, ruled DEFER.
+**A tool's description, title and input_schema are third-party text in every request, and all three are bounded at the producer** (A31, batch 150). A5's rule, which the other two sources of model-facing third-party text already followed: whitespace collapsed, capped at `registration.MAX_TOOL_DESCRIPTION_CHARS` (2000 -- NOT `MAX_CATALOG_TEXT_CHARS`, whose 300 is sized for a one-line bullet), applied after the `[MCP: ]` prefix and the server's `title` are composed in so one call covers all three strings. `input_schema` is bounded by a different mechanism because capping strings inside a schema turns a load-time failure into a call-time one: the serialised whole schema is capped at `MAX_TOOL_SCHEMA_CHARS` (16384) and an oversized tool is refused. A tool's RESULT has its own bound since batch 225, below.
+
+**An MCP tool's whole result is bounded at `max_read_chars`, cut and never refused** (ROADMAP_v3 §84, A79, batch 225). `_normalize` cuts the server's text at the bound and appends a note giving the size it had; the error path takes the same cut. A structured payload is kept whole if it fits in what the text left of the bound and is otherwise dropped with a note -- never cut, because a JSON document cut short can read as complete -- and the note says when the payload repeated the text, which mcp 2.3.0's own server does for every string result (`_repeats`). A word the cut splits goes too (`fragment_end`, shared with A72's shell buffer from `safety/policy_enforcement.py`), because the redactor runs after the cut on the dispatch path and cannot match half a credential; a text that is one unbroken run, a base64 blob, therefore shows nothing but the note. One WARNING per cut or drop names the tool. Refusing was the math tools' answer and was rejected here: an MCP tool has already run when its result arrives, so a refusal hides what its side effects produced. The number is `max_read_chars` rather than a new key because the compaction headroom check measures one read against it.
 
 **Redaction recurses now.** `check_output_policy()` used to scan top-level strings only; `structured_content` arrives under `result` as a dict, so third-party MCP output was the one unscanned path. Fixed in `safety/policy_enforcement.py`, not at the MCP boundary — any tool returning nested data had the same hole.
 
@@ -1702,7 +1716,7 @@ The pipeline carries effort like authorization (#139): every pass, every JSON re
 
 ### Sampling parameters
 
-Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_REJECTING_SAMPLING_PARAMS`). `_sampling_kwargs()` drops them with a WARNING.
+Current Anthropic models reject `temperature`/`top_p`/`top_k`, and Gemini 3.6 Flash and 3.5 Flash-Lite ignore them (`config.MODELS_REJECTING_SAMPLING_PARAMS`). On `OPENAI`, a temperature is dropped whenever a reasoning effort other than `none` is sent, which is OpenAI's own rule and keys on the effort `call_model_stream` passes, not on model names (ROADMAP_v3 §87, A82). `_sampling_kwargs()` drops them with a WARNING.
 
 **Nothing in the harness passes a `temperature` any more, and the WARNING is what keeps that safe.** Ensemble mode was the one caller; §10's revisit replaced sampling variation with a roster of different models, so `_sampling_kwargs` is now a **backstop** rather than a guard on a live path — the boundary the next caller wanting sampling variation will meet, and the warning is how that caller learns it cannot have it. The threading through `core/loop.py` stays for the same reason. Do not delete either as dead code: silence here is exactly how §10 came to be built, documented as working, and incapable of running against this harness's own default model.
 
@@ -1716,7 +1730,7 @@ Current Anthropic models reject `temperature`/`top_p`/`top_k` (`config.MODELS_RE
 - **Fewer than two DISTINCT `(provider, model)` pairs is refused** (E5). Repeating one entry N times recreates the original defect through the new config: no sampling variation remains to make the candidates differ, so they arrive near-identical and every claim scores maximal consistency. Counting entries instead of distinct pairs is a pinned mutation.
 - **A failed candidate is named, traced and skipped** (E7) — §20's containment rule. One survivor **degrades to the single-candidate path** (`ensemble_n=0`), which is the correct formula when there is nothing to compare against, not a degraded one; scoring one candidate as an ensemble of one would report unanimous corroboration from a single source.
 - **Candidate labels follow the SURVIVORS, never roster position** (E11). A gap ("Candidate 1, Candidate 3") makes Pass 2 tag a claim both survivors asserted as `[1, 3]` against a denominator of 2, so unanimous claims read as dissented-against.
-- **Consistency enters as a DISAGREEMENT PENALTY** (E8): `raw -= 0.15 * (1 - consistency)`, factual claims only, subtracted like `ASSUMPTION_FLAG_PENALTY`. §10's shipped formula redistributed `0.5/0.35` → `0.4/0.3`, which made grounding count for *less* whenever ensemble was on and — since the maximum stayed `0.85` — meant consistency could only ever demote a well-grounded claim. As a penalty, unanimity is free and the non-ensemble formula is *literally* unchanged, so §10's byte-for-byte regression holds by construction. Non-factual claims are untouched (E9).
+- **Disagreement ROUTES a claim; it does not score one** (ROADMAP_v3 §90, A85, superseding E8). A factual claim asserted by at most half the candidates that produced text is `contested` in its `score_breakdown`, and D1 sends it to the 6a/6b loop whatever it scored, with `disagreement_feedback` giving 6a the count. **Entry only**: the loop keeps a claim for its tier, never for being contested, because who asserted a claim does not change when 6a rewrites it. A loop that kept it would hold it to D2's cap, which is what E8's penalty did to a partially grounded claim: 0.60 (MEDIUM) became 0.50 (LOW) at 1 of 3, every re-scoring applied the same penalty, and D2 published it UNVERIFIED. The score has no agreement term on any run, so the non-ensemble formula is the only one and §10's byte-for-byte regression covers both. **Do not put a penalty back beside the routing**: a checked claim would carry a deduction for the doubt its check resolved, which is #12's own warning. (§10's first shape, a fourth weighted term that redistributed `0.5/0.35` to `0.4/0.3`, made grounding count for less, and is why E8 existed.) Non-factual claims are never contested (E9), and E9 is enforced once, on the branch that records the mark. `confidence.disagreement_penalty_factor` is still a known settings key that warns and does nothing (E4's rule).
 - **`score_claim` rounds ONCE** (E10). The tier used to compare the unrounded float while the breakdown stored `round(raw, 4)`, so a claim computing `0.7999999999999999` was persisted as `raw_score: 0.8` and tiered MEDIUM against a table saying `≥0.8` is HIGH. Reachable from ordinary weights, and it is what §10's own acceptance criterion produces.
 - **The record keeps every surviving candidate** (E13, #77). `run.candidates` carries metadata per survivor (text in memory only; `candidates_json` strips it at persistence — the bodies are artifacts and pass threads), Pass 3b sees all labelled candidates when ≥2 survive, and the artifacts are `01_candidate_N.md`, numbered to match the trace and `asserted_by_candidates`. A degraded single survivor keeps `01_raw_response.md` byte for byte.
 - **A pass failure is `pass_complete(ok=False)`, never a new kind** (E14, #115). Both pass wrappers emit it before re-raising; the widget's `pass_completed(pass_id, *, ok)` makes the answer REQUIRED so no caller can tick a failed row done. Panel-only display: the trace line already narrates the cause, and no shell prints it twice.
@@ -2131,7 +2145,10 @@ that is audit #100 — after the first gated call the pump takes every line and 
 
 Two methods, and the difference is a safety property rather than a preference:
 
-- `ask(prompt, timeout=None)` — the gated prompts. **Drains** stale input first, because a line typed
+- `ask(prompt, timeout=None)` — the gated prompts. **Flushes** a real terminal's own buffer and then
+  **drains** the queue first (ROADMAP_v3 §88, A83: `tcflush` on POSIX; `FlushConsoleInputBuffer` and one
+  Escape key on Windows, because a cooked read in progress holds a half line the flush cannot reach;
+  never a pipe), because a line typed
   after a question timed out was answering *that* question.
 - `readline(prompt)` — the chat prompt and the one-shot startup prompts. **Keeps** type-ahead, blocks,
   raises `EOFError` on Ctrl+D. Do not add a `drain=` flag; that puts the rule one keyword argument
@@ -2198,6 +2215,14 @@ sentence used to give the CLI's table existed nowhere in the tree, for 24 batche
 **Nothing runs before `parse_args()`** except building the parser. `--help` and a typo'd flag must
 leave the filesystem untouched (#101). `_classify_legacy_threads()` runs below the early-exit
 commands: it exists for the thread picker, and none of them shows one.
+
+**Ctrl+C during a turn takes TWO presses** (ROADMAP_v3 §86, A81, amending §61's CN10).
+`main._SecondPress` is the SIGINT handler for the user's own turn and for a wake turn alike: the
+first press changes nothing and prints what a second would do, a second inside
+`TURN_STOP_CONFIRM_S` (the TUI's `QUIT_CONFIRM_S`, held equal by a test) acts once, and later
+presses are ignored. The TUI's copy check cannot come with it, because in a terminal the selection
+belongs to the terminal. At the prompt one press still exits, and while merely waiting on sessions
+one press still stops them: neither has a turn running to lose.
 
 **Tests type at the CLI through `cli_stdin`**, not by patching `builtins.input` — that stopped being
 the seam, which is the fix working. `FakeStdinReader` records `prompts` and `timeouts`, so a test can
@@ -2571,7 +2596,8 @@ And slice 1's tools, the sleeping subagent and the CLI (batch 95):
   failed before returning one is identifiable anyway.
 - **The CLI waits between turns** (`main._await_sessions`) and runs a wake turn per batch. Ctrl+C there is
   aimed at the SESSIONS, not at the conversation: they are stopped and the prompt comes back, with their
-  results held for the next message (SS19). Held results are written into the thread before the turn that
+  results held for the next message (SS19). During a wake turn it stops them only after the turn ends
+  (A21), and only on a second press inside the window (A81). Held results are written into the thread before the turn that
   answers that message, so the model reads them beside it. Quitting with sessions live confirms (SS6),
   and nobody to ask counts as yes. `main._close_sessions` kills, records a row in each owning thread and
   sweeps this process's containers -- before `teardown_mcp`, because that row needs the database.
@@ -2680,10 +2706,12 @@ decisions are about the seams.
   history — the risk `SUMMARY_PREFIX` addresses for a compaction summary.
 - **`/summary` describes; `/compact` folds** (M20). Two different requests that happen to
   share a summariser.
-- **The CLI gets flags, not slash commands** (M21): `--summary [thread]`, `--ref <thread>`
-  (repeatable). The CLI has no slash-command layer and adding one is §23's business. Both
-  go through the same `attach_ref` / `summarize_thread` the TUI uses, so the shells cannot
-  disagree about the cap or the stored shape.
+- **The CLI got flags, then slash commands too** (M21, amended by ROADMAP_v3 §89/A84):
+  `--summary [thread]`, `--ref <thread>` (repeatable) for a scripted run, and `/summary`
+  and `/ref` mid-conversation, which lifts M21's accepted limit that a CLI user attached
+  references only at launch. All of them go through the same `attach_ref` /
+  `summarize_thread` the TUI uses, so the shells cannot disagree about the cap or the
+  stored shape.
 
 ### Live research view (§22)
 
@@ -2802,7 +2830,10 @@ run rather than by reading the code.
   row that broke early. Nothing is drawn in its place and the widget logs nothing —
   `tui/app.py` reads a count at `on_turn_finished` and records one INFO line per
   turn, because `Transcript.write*` doing no logging is what stops
-  `on_log_record_message` closing a loop.
+  `on_log_record_message` closing a loop. Since #239 the first turn in a session
+  that strips anything also gets ONE system line saying so (the owner's choice):
+  a system line rather than a mark in the text, so a model cannot spoof it and
+  the answer's own entry is untouched.
 - **`/copy last` is READ from that log, never tracked beside it** (batch 48).
   `_last_response` was the second buffer, updated from whichever flush site kept
   `flush_stream()`'s return — and the one that mattered did not. `on_loop_event_message`
@@ -2847,6 +2878,15 @@ independent bugs, both found by using the app.
 - **Tool calls replay as one redacted line; tool RESULTS are skipped** (T4). A
   grounding-heavy thread carries hundreds of kilobytes of fetched page text in those
   rows.
+- **A live CLI turn prints what its replay prints** (ROADMAP_v3 §86, A81). `main._LiveTurn`
+  is handed to `run_to_completion` as its observer and prints each model step when it
+  FINISHES -- at its first tool call, or from the returned response for the last one --
+  through `core.replay.step_entries`, the function the replay uses. Never while a step
+  streams: a `retract` can only arrive then, and the printer honours it by dropping what
+  it held. The answer is always read off the response, never assembled from deltas, so
+  a provider that streams no text still has its answer printed. A wake turn is printed
+  the same way. `tests/test_cli_live_turn.py` runs a real turn and then replays its
+  thread, and the two must print the same lines.
 - **`ConversationThread.kind` is a column, not an `extra_data` key** (T1), because
   `list_threads()` is the one query that must stay cheap on a database gaining ten
   rows per research run. It is deliberately **not indexed**: `ensure_columns()` ALTERs
@@ -3008,6 +3048,10 @@ worker, and how a malformed answer decodes.
   the middle one is the easy mistake; `interaction.decode` tests `isinstance`
   rather than truthiness for exactly that reason.
 - **`tui/app.py` has one `_blocking_modal`.** Four asks did the same six lines,
+  and the `_permission_channel` field each published is what
+  `_release_permission_channel` reaches for when the app exits with a modal
+  open. It is no longer the loop's channel — it is this app's parked-worker
+  queue.
 
 **Slice 2 — the two tools the channel existed for.**
 
@@ -3037,15 +3081,21 @@ worker, and how a malformed answer decodes.
   neither a new field nor a new type: `notice` was already kind-discriminated.
 - **The todo panel reads its CONTENT from thread state**, using the event only
   as a trigger, so the list never exists in two places that can disagree.
-- **`with_todos` is K6's FOURTH instance** (after M13 and M19), and converging
-  the four `with_*` tiers is now a recorded deferral (J11) rather than a
-  docstring aside — they differ in signature *and* in conditionality.
+- **`with_todos` is K6's FOURTH instance** (after M13 and M19). Converging the
+  tiers was a recorded deferral (J11) until batch 227: see the next bullet.
+- **A conversation prompt's tiers are six, and `core.loop.session_tiers` alone
+  appends them** (ROADMAP_v3 §85, A80): goal, memories, refs, todos, file
+  mentions and active skill bodies, in `SESSION_TIERS`' order, at a loop turn,
+  a TUI turn and the TUI's one-shot alike. Its `agent_built` argument is the
+  one conditional -- memories only when no agent built the prompt, since an
+  agent's arrive in `system_prompt_for()` -- and the other five are the
+  thread's, so an agent-built prompt gets them too. The persona, the catalogs,
+  an agent's body and the project hub are the BASE, not tiers. A new tier goes
+  into `session_tiers` and `SESSION_TIERS`, and `test_prompt_tier_boundary.py`
+  fails until it has a canary; an AST scan fails if anything else calls a tier
+  function. "FOURTH" counts numbered K6 instances, not tiers.
 - **Whole-list write** (J13): no item is ever addressed by name or index, which
   is the problem `clear_refs` refused to solve.
-  and the `_permission_channel` field each published is what
-  `_release_permission_channel` reaches for when the app exits with a modal
-  open. It is no longer the loop's channel — it is this app's parked-worker
-  queue.
 
 ### Project scaffolding (`project_init/`, §24)
 
@@ -3244,6 +3294,8 @@ Load-bearing: untrusted project content is **absent**, not loaded-and-disabled. 
 
 **A symlinked PROJECT tier root is treated as absent (#18).** `os.walk` follows the path handed to it as `top` but not symlinked subdirectories, and the two sides of the trust boundary start from different places: `workspace_trust` walks from `.venastine`, so `skills/` is a subdirectory it will not descend, while `_md_files` walks from `.venastine/skills`, so it *is* the top and gets followed. Directory names never enter the hash either, so the link contributed nothing — not even its own name. Behind it, definitions loaded as project tier while being absent from the trust prompt's listing **and** from the hash, so their bodies could be rewritten freely after one grant with `is_trusted()` still returning `True`. The payload is instructions, not data: a project-tier body becomes system-prompt content. Git stores symlinks natively, so this arrives on clone — D17's own stated threat. The guard is scoped to the **project** tier deliberately; nothing hashes the harness or user directories, and symlinking `~/.config/venastine/` into a dotfiles repo is legitimate. The invariant to keep however this is later refined: **the loader must read no file the trust listing omits** (`test_workspace_trust.py`).
 
+**A cloned project's content is read only through `json_store.read_regular_text`** (batch 219, #214). Git carries a symlink, `open()` follows one, and `/dev/zero` is on every POSIX machine: measured, the trust prompt's listing read a skill linked to it until a 1 GiB cap raised MemoryError, before any grant, while the hash stepped over it. The reader opens non-blocking (a FIFO's open would otherwise wait for a writer forever) and refuses whatever `fstat` does not call a regular file, as an OSError every caller already handles. A new reader of the hub, `settings.json`, `mcp.json` or a definition uses it too; a plain `open().read()` there reintroduces the hang and the allocation.
+
 Progressive disclosure: system prompts list skills as name + one-line description only; full bodies enter context solely via the `load_skill` tool result. Assembly lives in one place — `prompts/system_prompts.py`'s `with_skill_catalog()` / `pass_prompt()` — so the catalog can't diverge between an attempt and its JSON retry.
 
 **Chat identity follows the live model** (ROADMAP_v3 §58, PR1–PR6, batch 203).
@@ -3282,7 +3334,7 @@ outside `with_catalogs`, so research passes and internal tasks do not inherit it
 
 **Verify against production code, not the test double.** `tests/conftest.py`'s `FakeStorage` is a simplified model of `storage.py`, not the real thing — its `save_checkpoint` has none of the real one's watermark-advance guard, so a test that arranged a backwards checkpoint through the fake would see it applied, and `latest_checkpoint` is a dict lookup there rather than "newest row wins by timestamp". A passing test proves the fake and the code agree — not that either is right. If you change `storage.py`'s reconstruction, change the fake identically.
 
-That example is deliberately a *current* divergence, because a rule whose only evidence is stale gets read as boilerplate. The checkpoint divergence costs nothing today, because the guard is pinned against real SQLite in `test_storage_e2e.py` and the fake's `save_checkpoint` is only ever used to *arrange* a compacted view. `test_fake_storage_mirror.py` (#123) now compares the reconstruction halves directly.
+That example is deliberately a *current* divergence, because a rule whose only evidence is stale gets read as boilerplate. The checkpoint divergence costs nothing today, because the guard is pinned against real SQLite in `test_storage_e2e.py` and the fake's `save_checkpoint` is only ever used to *arrange* a compacted view. `test_fake_storage_mirror.py` (#123) now compares the reconstruction halves directly, and `test_storage_e2e.py` drives the fake's re-derived queries -- thread order, child order, memory visibility, the failed-turn row -- beside the real ones on one set of rows (#231).
 
 **Never name a top-level file after a stdlib or installed package.** A root `logging.py` once silently shadowed stdlib `logging`; hence `logging_setup.py`.
 
@@ -3315,6 +3367,8 @@ All tests run offline: zero network, zero real API keys. The **root** `conftest.
 **Waiting in a Textual pilot test: `settle`, never a pump count** (`tests/conftest.py`, TECHNICAL_DEBT 8). `await settle(pilot, predicate)` waits on a wall-clock deadline and quiesces once the predicate holds; `await pump(pilot, n)` gives the loop `n` turns and is for *negative* assertions only ("prove X did not happen"), where there is no predicate and a deadline would make every such site pay its full timeout. Do not hand-roll either — there were five copies with five budgets and two orderings, and the two bugs in them were invisible to 1246 passing tests, so `test_pilot_wait.py` now fails on a sixth. Two facts behind this: `pilot.pause()` is **not** a fixed unit of time (21ms with nothing burning CPU in-process, 1021ms with one busy sibling thread — its exit condition is a process-wide CPU heuristic), and a predicate like `isinstance(app.screen, SomeModal)` goes true *before* the worker reaches `channel.get()`, so joining that thread from the event-loop thread deadlocks both ways.
 
 **A test that mocks `registry.dispatch` cannot see an authorization defect** (batch 60). The approval gate lives INSIDE `dispatch()`, so mocking it removes the thing under test. Every test pinning the §23 memo and the §25 grants did exactly that and stayed green through it for four weeks: they counted `permission_request` events and never asked whether the call that skipped the prompt actually ran. A test asserting an approval, grant or sign-off is HONOURED must drive the real `dispatch` and stub the tool's HANDLER instead — `mock.patch.object(registry._tools[name], "handler", ...)` — which removes the side effect and leaves every gate live. Two traps come with it: `shell` and `write` are DISABLED in the shipped config and are refused by `is_tool_allowed()` long before the gate, so such a test must raise `ToolPermissions` or it passes while proving nothing; and `subagent_tool.run` builds the child's system prompt, which reaches the memories subsystem and therefore storage.
+
+**Two CI jobs and one step are not offline, and each fails on a skip** (batch 226, #230, #234). The offline default stands: they run apart from the suite, not as flags on it. tests.yml's `integration` and an integration step in compat.yml's Windows job run `-m integration`, each allowing only the skip its platform cannot avoid (the Windows-only shell test on Linux, the Linux image build on Windows, whose Docker builds Windows images; `_docker()` asks the daemon's OS since then). tests.yml's `live-ssh` runs `scripts/live-ssh-setup.sh`, which makes the runner a throwaway SSH host -- an account with a password, a key, a passphrase-protected key and a sudo rule, sshd on 127.0.0.1:2222 and a second on :2223 requiring `publickey,password` -- and writes the `VEN_TEST_*` variables to `$GITHUB_ENV`, then runs `test_ssh_backend.py` and `test_sudo.py`. **A new live test gated on a new `VEN_TEST_` name fails `test_the_live_ssh_job_sets_every_variable_the_tests_read` until the script sets it**, because a gate whose variable no run sets is how 24 tests went unobserved. The variables are all PATHS where they name a file: `VEN_TEST_SSH_HOSTKEY` holds the file `ssh-keyscan` wrote, and `test_sudo.py` pinned the path itself as the key until the job was written. The three `needs_wsl` tests in `test_wsl_backend.py` still run nowhere but a developer's Windows box with a distro: a hosted Windows runner has none.
 
 ### Before calling a change done
 

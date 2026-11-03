@@ -52,9 +52,8 @@ import config_edit
 import config_schema
 import config_update
 import storage
-from agents.manager import manager
 from agents.tui_commands import register_agent_commands
-from core import config_loader, session_wake, shell_sessions
+from core import compaction, config_loader, session_wake, shell_sessions
 from core import connect as model_connect
 from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
@@ -63,20 +62,19 @@ from core.cancel import CancelToken
 from core.client import (
     ChatGPTUsageLimit,
     api_initialization,
+    effort_choice,
     effort_levels_for_model,
 )
+from core.commands import TUI, absent_reason
 from core.file_mentions import FileIndex, active_mention
 from core.loop import (
     DEFAULT_PROVIDER,
     DEFAULT_SYSTEM_PROMPT,
     RunAgentLoop,
     advertisement_facts,
-    with_file_mentions,
-    with_goal,
-    with_memories,
+    agent_turn,
+    session_tiers,
     with_persona,
-    with_refs,
-    with_todos,
 )
 from core.memory import ConversationMemory
 
@@ -96,13 +94,12 @@ from safety.policy_enforcement import (
     redact_output_text,
 )
 from security import hosted, posture
-from skills.manager import manager as skills
 from skills.tui_commands import register_skill_commands
 from tools.base import OPENS_SESSION, OPENS_THREAD
 from tools.builtin import file_ops
 from tools.registry import registry as tool_registry
 from tui import diffs, history, hosted_driver, meters, preferences, ravens, themes
-from tui.commands import SlashCommand
+from tui.commands import SlashCommand, bind
 from tui.commands import registry as commands
 from tui.screens import (
     AgentPickerScreen,
@@ -1123,6 +1120,11 @@ class VenastineApp(App):
         # that clear it; a per-turn map that outlives its turn is a
         # leak on an app that stays open for hours.
         self._file_calls: dict = {}
+        # #239. Whether this session has already said, on screen, that a
+        # turn's text had terminal control sequences removed. Once per app,
+        # because what the user needs is to know it happens; every turn's
+        # count goes to the log either way.
+        self._strip_said = False
         # Batch 59. The sidebar's view of who is running. `_agent_stack` is
         # what the panel was last told to draw and is touched ONLY on the
         # UI thread, in on_agent_stack_changed; the sink that feeds it
@@ -1961,27 +1963,16 @@ class VenastineApp(App):
             self._transcript.write_error(
                 f"Could not read effort levels: {message.error}")
             return
-        levels, args = message.levels, message.requested
-        if not levels:
-            self._transcript.write_system(
-                f"{self.model} exposes no reasoning-effort control.")
+        # core.client.effort_choice decides, so the CLI's /effort
+        # accepts exactly what this one does (§89).
+        effort, line, refused = effort_choice(
+            message.levels, message.requested, self.effort, self.model)
+        if refused:
+            self._transcript.write_error(line)
             return
-        if not args:
-            self._transcript.write_system(
-                f"Effort: {self.effort or 'auto'}. "
-                f"Available: {', '.join(levels)} (or 'auto').")
-            return
-        if args == "auto":
-            self.effort = None
-        elif args in levels:
-            self.effort = args
-        else:
-            self._transcript.write_error(
-                f"{self.model} does not support effort {args!r}. "
-                f"Available: {', '.join(levels)}.")
-            return
+        self.effort = effort
         self.query_one("#effort-raven", EffortRaven).effort = self.effort
-        self._transcript.write_system(f"Effort set to {self.effort or 'auto'}.")
+        self._transcript.write_system(line)
 
     @property
     def memory(self) -> ConversationMemory:
@@ -3076,8 +3067,11 @@ class VenastineApp(App):
                 )
                 return
             if not handled:
+                # §89: a command the CLI has and this shell does not is
+                # not a typo, so it gets the catalog's reason instead.
                 self._transcript.write_error(
-                    f"Unknown command /{name}. Try /help."
+                    absent_reason(name, TUI)
+                    or f"Unknown command /{name}. Try /help."
                 )
             return
         self.run_agent_turn(text)
@@ -3145,47 +3139,23 @@ class VenastineApp(App):
         # §18: a session-scoped active agent supplies the system prompt,
         # the ToolContext, and model/provider/max_steps overrides. With
         # none active this is the default harness run (base + catalogs).
-        if self.active_agent is not None:
-            agent = self.active_agent
-            context = manager.active_context(agent)
-            model = agent.model or self.model
-            provider = agent.provider or self.provider_name
-            base_prompt = manager.system_prompt_for(
-                agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
-                self.active_skills,
-                context=context)
-            max_steps = agent.max_steps or config.MAX_ITERATIONS
-        else:
-            context = None
-            model = self.model
-            provider = self.provider_name
+        # core.loop.agent_turn since §89, so the CLI's /agent makes the
+        # same turn of an agent that this does.
+        turn = agent_turn(self.active_agent, self.model, self.provider_name,
+                          self.active_skills)
+        context, model, provider = turn.context, turn.model, turn.provider_name
+        max_steps = turn.max_steps
+        base_prompt = turn.system_prompt
+        if base_prompt is None:
             base_prompt = system_prompts.with_catalogs(
                 with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
                 self.active_skills)
-            max_steps = config.MAX_ITERATIONS
-        prompt = with_goal(base_prompt, self.memory)
-        # §21b (M13). Only for a plain turn -- an active agent already got
-        # its memories inside system_prompt_for(), and appending here too
-        # would duplicate them.
-        if self.active_agent is None:
-            prompt = with_memories(prompt)
-        # §21c. Unconditional, for the reason the loop's copy of this line
-        # gives: a reference is thread state, not an agent's opt-in.
-        prompt = with_refs(prompt, self.memory)
-        # §23 slice 2. Unconditional too: a checklist is thread state.
-        prompt = with_todos(prompt, self.memory)
-        prompt = with_file_mentions(prompt, self.memory)
-        # §19 K1/K6: active skill bodies are pinned HERE, beside with_goal,
-        # and deliberately NOT inside with_catalogs -- that function feeds
-        # pass_prompt(), so pinning there would inject a skill activated in
-        # this chat session into all ten passes of a research run.
-        #
-        # Last in the prompt on purpose: an activated skill is the most
-        # specific instruction the user has given, and should read as
-        # governing what precedes it.
-        fragment = skills.prompt_fragment(self.active_skills)
-        if fragment:
-            prompt = f"{prompt}\n\n{fragment}"
+        # Goal, memories, refs, checklist, file mentions and the active
+        # skill bodies, in that order and all outside with_catalogs (K6):
+        # one assembly for every conversation prompt (#9, A80).
+        prompt = session_tiers(base_prompt, self.memory,
+                               agent_built=self.active_agent is not None,
+                               active_skills=self.active_skills)
 
         # §23: the SAME channel the research path uses. The chat turn used
         # to hand the loop a bare queue and push its modal from
@@ -3458,26 +3428,17 @@ class VenastineApp(App):
         authorization = RunAuthorization(provider=channel)
         callable_only, granted = advertisement_facts(
             response_channel=channel)
-        base_prompt = manager.system_prompt_for(
-            agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider),
-            self.active_skills,
-            callable_only=callable_only, granted=granted)
-        # §18/§21c/§23. Unconditional, for with_refs' documented reason:
-        # goal, references and checklist are thread state, not an agent's
-        # opt-in. Deliberately NO with_memories — system_prompt_for has
-        # already appended this agent's memories (M13), and a second call
-        # would duplicate them.
-        prompt = with_goal(base_prompt, self.memory)
-        prompt = with_refs(prompt, self.memory)
-        prompt = with_todos(prompt, self.memory)
-        # continue_conversation writes this message later, on the worker.
-        prompt = with_file_mentions(prompt, self.memory, text=message)
-        # K1 holds for one-shot turns too (review §19-20 f22 decision):
-        # an activated skill governs the /grill-me turn in the same
-        # thread, mirroring run_agent_turn's pinning.
-        fragment = skills.prompt_fragment(self.active_skills)
-        if fragment:
-            prompt = f"{prompt}\n\n{fragment}"
+        base_prompt = agent_turn(
+            agent, model, provider, self.active_skills, one_shot=True,
+            callable_only=callable_only, granted=granted).system_prompt
+        # The same tiers as a turn (#9, A80). Agent-built, so no second
+        # copy of the memories system_prompt_for() already appended (M13);
+        # the message is passed because continue_conversation writes it
+        # later, on the worker. K1 holds here too (review §19-20 f22): an
+        # activated skill governs the /grill-me turn in the same thread.
+        prompt = session_tiers(base_prompt, self.memory, agent_built=True,
+                               mention_text=message,
+                               active_skills=self.active_skills)
 
         def work() -> None:
             error = None
@@ -4679,13 +4640,19 @@ class VenastineApp(App):
             # to notice the transition. set_blocked is idempotent, so the
             # two routes are one piece of state.
             #
-            # DIRECT, never call_from_thread: this runs on a worker, and
-            # a quitting app has no message pump left to marshal into --
-            # measured, that parks the worker forever and breaks the
-            # shutdown release this method exists to keep working
-            # (test_quitting_during_an_attended_research_prompt_releases_
-            # the_worker). The meter touches no widget, so there is
-            # nothing to marshal.
+            # DIRECT, not call_from_thread, because the meter touches no
+            # widget: there is nothing to marshal, and a call on the
+            # shutdown path should not depend on a pump that may be gone.
+            #
+            # This said a marshal here "parks the worker forever", as a
+            # measurement. Re-taken under textual 8.2.8 (batch 223, #220),
+            # it does not: a worker marshalling after the app exits gets
+            # its answer at once while the loop runs, and RuntimeError
+            # once the loop has closed, and with this very line marshalled
+            # test_quitting_during_an_attended_research_prompt_releases_
+            # the_worker still passes. Re-take it when the textual pin
+            # moves (D22) -- the probe is three cases: on the UI thread,
+            # after exit with the loop running, after the loop closes.
             self._meter.set_blocked(True, monotonic())
             self.call_from_thread(
                 self.push_screen, screen, lambda answer: channel.put(answer))
@@ -4947,11 +4914,24 @@ class VenastineApp(App):
         # on screen, which is `core/ansi.py`'s locked answer for the pty
         # and the same answer here, so that `_entries`, the screen, `/copy`
         # and the replay stay byte-identical to one another.
+        #
+        # ONCE PER SESSION, ON SCREEN TOO (#239, the owner's choice). The
+        # log alone was "an audit trail for someone already reading the
+        # file", and a sequence in a model's text is an anomaly worth
+        # knowing about once. A SYSTEM line, not a mark in the text: it
+        # cannot be spoofed by a model typing it, since the count comes
+        # from the stripper, and the answer's own entry stays untouched.
         stripped = self._transcript.take_stripped_count()
         if stripped:
             logger.info(
                 "Removed %d terminal control sequence(s) from this turn's "
                 "rendered text.", stripped)
+            if not self._strip_said:
+                self._strip_said = True
+                self._transcript.write_system(
+                    "Terminal control sequences were removed from this "
+                    "turn's text before it was shown. Said once per "
+                    "session; logs/app.log counts them every turn.")
         self._permission_channel = None
         # ROADMAP_v3 §61 (CN9). Same lifetime as the channel above: with
         # no turn to stop, escape goes back to meaning only what it
@@ -5466,67 +5446,27 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
     running worker would leave the transcript claiming one model and the
     thread recording another.
     """
-    from core import chatgpt_auth
     from credentials import load_provider_data
-
-    providers = load_provider_data()
-
-    def _configured() -> str:
-        named = sorted(p for p, e in providers.items() if e.get("API_KEY"))
-        # §83: the plan has no key; its sign-in is what connects it.
-        if chatgpt_auth.status().signed_in:
-            named.append("CHATGPT (signed in)")
-        return ", ".join(named) if named else "none (add a key to providers.json)"
 
     if not args:
         app._transcript.write_system(
             f"Provider: {app.provider_name} | model: {app.model}")
-        app._transcript.write_system(f"Providers with a key: {_configured()}")
         app._transcript.write_system(
-            "Usage: /model <name>, or /model <PROVIDER> <name>.")
+            "Providers with a key: "
+            f"{model_connect.configured_providers(load_provider_data())}")
+        app._transcript.write_system(model_connect.MODEL_USAGE)
         return
 
     if app.refuse_if_occupied("change the model"):
         return
 
-    parts = args.split()
-    if len(parts) == 1:
-        provider, model = app.provider_name, parts[0]
-    elif len(parts) == 2:
-        provider, model = parts[0].upper(), parts[1]
-    else:
-        app._transcript.write_error(
-            "Usage: /model <name>, or /model <PROVIDER> <name>.")
-        return
-
-    # CG1: a hosted deployment never reaches the plan, signed in or not, so
-    # the switch refuses with the reason -- not with "/connect chatgpt
-    # signs in", which that deployment refuses in turn (batch 195).
-    if provider == "CHATGPT" and hosted.is_hosted():
-        app._transcript.write_error(chatgpt_auth.LOCAL_ONLY)
-        return
-    # ROADMAP_v3 §83. CG11's refusal is lifted: the plan answers since slice
-    # 2b. While it is signed out a switch would fail the next turn rather
-    # than this command, so this refuses and says how to sign in (CG20).
-    if provider == "CHATGPT" and not chatgpt_auth.status().signed_in:
-        app._transcript.write_error(_CHATGPT_SIGNED_OUT)
-        return
-    if provider == "CHATGPT" and provider not in providers:
-        # A sign-in made before slice 2b wrote no entry; it is written now.
-        try:
-            model_connect.store_chatgpt_entry()
-        except (OSError, ValueError) as exc:
-            app._transcript.write_error(
-                f"Could not record CHATGPT in providers.json: {exc}")
-            return
-        providers = load_provider_data()
-
-    # Unknown provider REFUSES: api_initialization would raise the same
-    # ValueError on the next turn, a long way from the typo that caused it.
-    if provider not in providers:
-        app._transcript.write_error(
-            f"Unknown provider {provider!r}. Configured: "
-            f"{', '.join(sorted(providers)) or 'none'}.")
+    # What may be switched to is core/connect.py's to say, for both shells
+    # (§89): the usage, the plan's two refusals, its missing entry and an
+    # unknown provider.
+    provider, model, providers, error = model_connect.model_switch(
+        args, app.provider_name)
+    if error:
+        app._transcript.write_error(error)
         return
 
     app.provider_name = provider
@@ -5570,13 +5510,10 @@ def _cmd_model(app: VenastineApp, args: str) -> None:
     # in run_agent_turn. Without this the switch is a silent no-op for as
     # long as that agent is active -- the failure shape this project keeps
     # producing.
-    agent = app.active_agent
-    if agent is not None and (agent.model or agent.provider):
-        app._transcript.write_system(
-            f"Note: agent {agent.name!r} pins "
-            f"{agent.provider or app.provider_name} | "
-            f"{agent.model or app.model} for chat turns, so this applies to "
-            f"/research and to turns after /agent clear.")
+    note = model_connect.agent_pin_note(app.active_agent, app.provider_name,
+                                        app.model)
+    if note:
+        app._transcript.write_system(note)
 
     # §43 (RM3). Remembered for the next launch, in the user-tier store
     # BESIDE settings.json -- never in it. Written here rather than in a
@@ -6258,41 +6195,6 @@ def _report_override(app: VenastineApp, key: str) -> None:
         "margin below the window.")
 
 
-def _parse_compact_args(args: str) -> tuple:
-    """(overrides, error). ROADMAP_v2 §21's per-invocation override --
-    applies to this one run and persists nothing, which is the last step
-    of D27's resolution order.
-
-    An unrecognised flag is an ERROR, not something to ignore. Silently
-    dropping `--strenght 4` would compact at the default strength while
-    the user believes they asked for something else, and the result looks
-    exactly like a compaction that obeyed them.
-    """
-    overrides: dict = {}
-    tokens = args.split()
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token in ("--strength", "-s"):
-            index += 1
-            if index >= len(tokens):
-                return None, "--strength needs a value from 1 to 5."
-            try:
-                overrides["strength"] = int(tokens[index])
-            except ValueError:
-                return None, f"--strength needs a number, got {tokens[index]!r}."
-        elif token.startswith("--strength="):
-            value = token.split("=", 1)[1]
-            try:
-                overrides["strength"] = int(value)
-            except ValueError:
-                return None, f"--strength needs a number, got {value!r}."
-        else:
-            return None, f"Unknown option {token!r}. Usage: /compact [--strength N]"
-        index += 1
-    return overrides, None
-
-
 def _cmd_compact(app: VenastineApp, args: str) -> None:
     """Compact the current thread now, rather than waiting for the
     trigger. §21: a user-facing summary is the same machinery invoked
@@ -6309,7 +6211,7 @@ def _cmd_compact(app: VenastineApp, args: str) -> None:
         app._transcript.write_error("Nothing to compact — this thread is empty.")
         return
 
-    overrides, error = _parse_compact_args(args)
+    overrides, error = compaction.parse_compact_args(args)
     if error:
         app._transcript.write_error(error)
         return
@@ -6435,7 +6337,7 @@ _COPY_USAGE = (f"Usage: /copy [{'|'.join(_COPY_TARGETS)}] [--file <path>]")
 def _parse_copy_args(args: str):
     """(target, path, error). `path` is None when --file was not given.
 
-    Same shape as _parse_compact_args above, including that an
+    Same shape as core.compaction.parse_compact_args, including that an
     unrecognised option is an ERROR rather than something to ignore --
     silently dropping `--fiel out.txt` would send the text to a clipboard
     the user has just said they cannot use, and report success.
@@ -7135,10 +7037,14 @@ def _cmd_secrets(app: "VenastineApp", args: str) -> None:
     written without a way to show a password by accident (SS62).
 
     CALLBACKS, NOT `ask_secret_blocking`. A command handler runs on the UI
-    THREAD, and the blocking asks are drained by that same thread -- so
-    calling one here would deadlock the app on the first `/secrets`, not
-    fail it. `action_pick_thread` is the pattern being followed: push the
-    screen, continue in its dismiss callback.
+    THREAD, and the blocking asks marshal onto that same thread -- so
+    calling one here could never ask anything. It would not deadlock, as
+    this said until #221: textual refuses `call_from_thread` on the app's
+    own thread with a RuntimeError at once (measured, textual 8.2.8), and
+    since batch 135 the dispatcher contains a handler's exception -- so
+    every `/secrets` would end in "/secrets failed", loudly, which a test
+    of the command catches. `action_pick_thread` is the pattern being
+    followed: push the screen, continue in its dismiss callback.
 
     NOT MODEL-REACHABLE, and that is a property rather than an accident:
     slash commands are typed by a human and are not tools, so nothing in a
@@ -7714,9 +7620,8 @@ def _sign_in_huggingface(app: "VenastineApp", preset) -> None:
 
 # ---- ROADMAP_v3 §83: the ChatGPT plan ---------------------------------------
 
-_CHATGPT_SIGNED_OUT = (
-    "The ChatGPT plan is not signed in, so it cannot answer. /connect "
-    "chatgpt signs in; then /model CHATGPT <name>.")
+# core/connect.py's since §89, so the CLI's /model says the same.
+_CHATGPT_SIGNED_OUT = model_connect.CHATGPT_SIGNED_OUT
 # OpenAI's words for the indicator and its link (CG8), and the one action the
 # header's link runs (CG19). Constants: nothing else reaches that markup.
 _USING_PLAN = "Using ChatGPT plan"
@@ -8292,54 +8197,35 @@ def _cmd_mentions(app: VenastineApp, args: str) -> None:
 
 def register_builtin_commands() -> None:
     """Idempotent — registering by name overwrites, so a re-import or a
-    second app instance in the test suite does not duplicate entries."""
+    second app instance in the test suite does not duplicate entries.
+
+    Names, summaries, usage and aliases are core/commands.py's catalog's
+    since ROADMAP_v3 §89 (#8): this binds handlers to them, and the CLI
+    binds its own to the same entries."""
     for command in (
-        SlashCommand("help", "list commands", _cmd_help),
-        SlashCommand("mentions", "show file mention status or include ignored paths",
-                     _cmd_mentions, "[ignored on|off]"),
-        SlashCommand("theme", "switch colour theme", _cmd_theme, "[name]"),
-        SlashCommand("effort", "switch reasoning effort", _cmd_effort, "[level|auto]"),
-        SlashCommand("thinking", "show or hide reasoning inline",
-                     _cmd_thinking, "[on|off]"),
-        SlashCommand("model", "switch provider and/or model for this session",
-                     _cmd_model, "[[PROVIDER] name]"),
-        SlashCommand("connect", "connect a model provider: sign in or paste a key",
-                     _cmd_connect, "[name [--key]|custom <NAME> <url>|cancel]",
-                     complete=_connect_rows),
-        SlashCommand("disconnect", "remove a provider's key, or sign out of one",
-                     _cmd_disconnect, "[name [--forget]]",
-                     complete=_disconnect_rows),
-        SlashCommand("critic", "route the grounding and critic passes to another model",
-                     _cmd_critic, "[[PROVIDER] name|off]"),
-        SlashCommand("embedder", "choose the model that scores source similarity",
-                     _cmd_embedder, "[[PROVIDER] name|off]"),
-        SlashCommand("research", "run the deep-research pipeline",
-                     _cmd_research,
-                     "[--attended] [--review|--no-review] "
-                     "[--grant[=a,b]] <query>"),
-        SlashCommand("compact", "summarize this conversation's older turns now",
-                     _cmd_compact, "[--strength 1-5]"),
-        SlashCommand("window", "override this model's context window for the session",
-                     _cmd_window, "[tokens|off]"),
-        SlashCommand("trigger", "override when this chat compacts, for the session",
-                     _cmd_trigger, "[tokens|off]"),
-        SlashCommand("config", "browse and set the harness configuration",
-                     _cmd_config, "[key] [value]", complete=_config_rows),
-        SlashCommand("secrets", "manage the harness-held secret store",
-                     _cmd_secrets,
-                     "[status|list|set <name>|delete <name>|lock]"),
-        SlashCommand("claims", "show a research run's claims and their tiers",
-                     _cmd_claims, "[run id]"),
-        SlashCommand("copy", "copy text out of the session", _cmd_copy,
-                     f"[{'|'.join(_COPY_TARGETS)}] [--file <path>]"),
-        SlashCommand("threads", "resume a saved thread", _cmd_threads),
-        SlashCommand("resume", "resume a thread by id, even an old one",
-                     _cmd_resume, "<thread-id>"),
-        SlashCommand("new", "start a new thread", _cmd_new),
-        SlashCommand("kill", "stop a background session", _cmd_kill,
-                     "[session-id]"),
-        SlashCommand("quit", "exit the harness", _cmd_quit,
-                     aliases=("exit", "bye")),
+        bind("help", _cmd_help),
+        bind("mentions", _cmd_mentions),
+        bind("theme", _cmd_theme),
+        bind("effort", _cmd_effort),
+        bind("thinking", _cmd_thinking),
+        bind("model", _cmd_model),
+        bind("connect", _cmd_connect, complete=_connect_rows),
+        bind("disconnect", _cmd_disconnect, complete=_disconnect_rows),
+        bind("critic", _cmd_critic),
+        bind("embedder", _cmd_embedder),
+        bind("research", _cmd_research),
+        bind("compact", _cmd_compact),
+        bind("window", _cmd_window),
+        bind("trigger", _cmd_trigger),
+        bind("config", _cmd_config, complete=_config_rows),
+        bind("secrets", _cmd_secrets),
+        bind("claims", _cmd_claims),
+        bind("copy", _cmd_copy),
+        bind("threads", _cmd_threads),
+        bind("resume", _cmd_resume),
+        bind("new", _cmd_new),
+        bind("kill", _cmd_kill),
+        bind("quit", _cmd_quit),
     ):
         commands.register(command)
 

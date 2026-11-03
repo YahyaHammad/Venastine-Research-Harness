@@ -68,8 +68,16 @@ logger = logging.getLogger(__name__)
 # third shell.
 #
 # NO TIMEOUT, deliberately. Every waiter is bounded by the holder's own
-# deadline: the TUI parks for at most ATTENDED_APPROVAL_TIMEOUT_S and a
-# run-backed CLI prompt carries the same, so the queue drains on its own.
+# deadline ONCE THE HOLDER IS PARKED: the TUI parks for at most
+# ATTENDED_APPROVAL_TIMEOUT_S and a run-backed CLI prompt carries the same,
+# so the queue drains on its own. The step before the TUI's park has no
+# deadline of its own, and until #223 this paragraph read as if it had:
+# `_blocking_modal` first marshals its screen onto the UI thread, which is
+# bounded only by that thread staying responsive -- the bound every other
+# marshal in the shell lives with. Measured under textual 8.2.8 (#220), a
+# marshal after the app exits returns or raises at once rather than
+# parking, so what is left unbounded is a UI thread that is alive and
+# wedged, where nothing else in the shell answers either.
 # A deadline here would need this leaf module to know a number that
 # belongs to config.py, and the failure it would prevent is one no shell
 # can currently produce. Shutdown does not wait either: the TUI's release

@@ -33,6 +33,7 @@ from typing import Optional
 
 import config
 from core import config_loader, workspace_trust
+from json_store import read_regular_text
 from project_init import config_files, doc_sets
 from project_init import manifest as manifest_mod
 
@@ -169,13 +170,29 @@ def _shadow_lines() -> list:
 
 
 def _read_existing_context(project_path: str) -> Optional[str]:
+    """The current hub, or None to generate a fresh one.
+
+    BOUNDED SINCE BATCH 221 (#226). It was read, diffed, embedded in the
+    model's task and printed whole: measured, a 5.4 MB hub went into a
+    5.4 MB task and a 5.4 MB diff. Head-plus-a-notice was the other shape,
+    and it is wrong here: the initializer's reply BECOMES the whole hub, so
+    a model shown the head would rewrite the file without its tail. So a
+    hub past `init_max_hub_chars` is refused with nothing sent anywhere,
+    and the owner sized that at about three times this repository's own
+    347 KB hub. The size is checked before the read, in bytes, where four
+    bytes per character makes the comparison safe; the count is checked
+    after it. And the read itself is regular-files-only (batch 219).
+    """
     from tools.builtin.project_docs import HUB_FILENAME, doc_path
     path = doc_path(project_path, HUB_FILENAME)
     if not os.path.exists(path):
         return None
+    cap = config.INIT_MAX_HUB_CHARS
     try:
-        with open(path, encoding="utf-8-sig") as f:
-            return f.read()
+        if os.path.getsize(path) > 4 * cap:
+            raise InitError(_too_large(HUB_FILENAME, os.path.getsize(path),
+                                       "bytes", cap))
+        text = read_regular_text(path)
     except (OSError, UnicodeDecodeError) as e:
         # Degrade like config_loader does with an unreadable hub document.
         # An undecodable existing file must not stop /init from writing a
@@ -184,6 +201,31 @@ def _read_existing_context(project_path: str) -> Optional[str]:
         logger.warning("Could not read the existing %s at %s; "
                        "generating a fresh one: %s", HUB_FILENAME, path, e)
         return None
+    if len(text) > cap:
+        raise InitError(_too_large(HUB_FILENAME, len(text), "characters",
+                                   cap))
+    return text
+
+
+def _too_large(name: str, size: int, unit: str, cap: int) -> str:
+    return (f"{name} is {size:,} {unit}, more than /init revises "
+            f"({cap:,} characters, init_max_hub_chars in config.yaml). "
+            f"Nothing has been changed: trim it, or edit it by hand.")
+
+
+def _shown(diff: str) -> str:
+    """The diff as the shell shows it: at most `init_diff_shown_lines`
+    lines, and a line saying how many more there are (#226). The whole
+    diff still decides whether anything changed; only the print is cut,
+    because a megabyte-scale row freezes the transcript it is printed to."""
+    lines = diff.splitlines(keepends=True)
+    cap = config.INIT_DIFF_SHOWN_LINES
+    if len(lines) <= cap:
+        return diff
+    return ("".join(lines[:cap]).rstrip("\n")
+            + f"\n... {len(lines) - cap:,} more line(s) of the diff are not "
+              f"shown ({cap:,} of {len(lines):,}; init_diff_shown_lines in "
+              f"config.yaml).")
 
 
 def _task(manifest_text: str, existing: Optional[str], kind: str) -> str:
@@ -223,7 +265,7 @@ def _run_initializer(project_path: str, kind: str, existing: Optional[str],
                      model: str, provider_name: str, activity=None) -> str:
     from agents.manager import manager
     from core import agent_activity
-    from core.loop import DEFAULT_SYSTEM_PROMPT, RunAgentLoop
+    from core.loop import DEFAULT_SYSTEM_PROMPT, RunAgentLoop, advertisement_facts
     from storage import THREAD_KIND_SUBAGENT
 
     agent = manager.get(config.INITIALIZER_AGENT)
@@ -233,8 +275,15 @@ def _run_initializer(project_path: str, kind: str, existing: Optional[str],
             f"there is nothing to generate the hub document with.")
 
     context = manager.active_context(agent)
+    # #228: the run below is given no authorization, so it is HEADLESS --
+    # nothing can answer an approval -- and the prompt says what THAT run
+    # can call, the reviewer's rule (core/reasoning/review.py). With
+    # system_prompt_for's attended defaults this was right only while
+    # initializer.md's allowed_tools kept both catalog tools out.
+    callable_only, granted = advertisement_facts()
     system_prompt = manager.system_prompt_for(
-        agent, DEFAULT_SYSTEM_PROMPT, context=context)
+        agent, DEFAULT_SYSTEM_PROMPT, context=context,
+        callable_only=callable_only, granted=granted)
 
     # §47, the span batch 59 named as a follow-on and did not build. /init
     # is a long agent-shaped run -- it reads the project and drafts a
@@ -397,7 +446,7 @@ def generate(
 
     if scaffold_docs:
         if diff:
-            say(diff)
+            say(_shown(diff))
         else:
             say(f"{HUB_FILENAME} is unchanged.")
         if to_create:

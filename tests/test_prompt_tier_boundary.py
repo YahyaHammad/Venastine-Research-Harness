@@ -57,7 +57,16 @@ import pytest
 
 import prompts.system_prompts as system_prompts
 from core import config_loader
-from core.loop import with_goal, with_memories, with_refs, with_todos
+from core.loop import (
+    SESSION_TIERS,
+    session_tiers,
+    with_file_mentions,
+    with_goal,
+    with_memories,
+    with_persona,
+    with_refs,
+    with_todos,
+)
 
 CANARIES = {
     "goal": "CANARY-GOAL-a1",
@@ -67,15 +76,32 @@ CANARIES = {
     "skill_body": "CANARY-SKILL-BODY-e5",
     "agent_body": "CANARY-AGENT-BODY-f6",
     "context": "CANARY-PROJECT-CONTEXT-g7",
+    # Batch 227: the two members built after this table was (§58's
+    # persona, part of the base, and §54's file mentions, a session tier).
+    "persona": "CANARY-PERSONA-h8",
+    "file_mention": "CANARY-MENTION-i9.txt",
+}
+
+#: Which canary stands for each of core.loop.SESSION_TIERS (#9, A80). A
+#: tier added there fails test_every_session_tier_has_a_canary until it
+#: gets a line here, and so a canary every test below then checks.
+TIER_CANARY = {
+    "goal": "goal",
+    "memories": "memory",
+    "refs": "ref",
+    "todos": "todo",
+    "file_mentions": "file_mention",
+    "skill_bodies": "skill_body",
 }
 
 
 class _FakeMemoryForTiers:
-    """The thread-state carrier `with_goal` / `with_todos` / `with_refs`
-    read. Only `extra` is consulted by all three."""
+    """The thread-state carrier the tiers read: `extra` for the goal, the
+    checklist and the refs, and `messages` for the file mentions."""
 
-    def __init__(self, extra):
+    def __init__(self, extra, messages=()):
         self.extra = extra
+        self.messages = list(messages)
         self.thread_id = uuid4()
 
 
@@ -90,7 +116,7 @@ def catalogued(monkeypatch, tmp_path):
     agent = types.SimpleNamespace(
         name="reviewer", description="a reviewer", body=CANARIES["agent_body"],
         model=None, provider=None, allowed_tools=None, approval_overrides={},
-        use_project_context=True, use_memory=True, max_steps=None,
+        use_project_context=True, use_memory=True, max_steps=None,
         tier="user", path=str(tmp_path / "reviewer.md"),
         # §32 A3: the real AgentDef carries this, and
         # agent_catalog_text reads it. True so the agent catalog is
@@ -131,7 +157,8 @@ def populated(catalogued, monkeypatch, fake_storage):
         "goal": CANARIES["goal"],
         "todos": [{"content": CANARIES["todo"], "status": "in_progress"}],
         "refs": [{"thread_id": str(uuid4()), "summary": CANARIES["ref"]}],
-    })
+    }, messages=[{"role": "user",
+                  "content": f"look at @{CANARIES['file_mention']}"}])
     return types.SimpleNamespace(memory=memory, agent=catalogued.agent,
                                  active_skills=["crypto"])
 
@@ -150,15 +177,20 @@ def test_a_pass_prompt_is_invariant_under_every_session_tier(catalogued, populat
     baseline = {p: system_prompts.pass_prompt(p)
                 for p in system_prompts.passes_prompts}
 
-    # Assemble a full chat prompt the way a shell does, so every tier's
-    # fragment function actually runs against the populated state. If any of
-    # them wrote into module-level state that with_catalogs() reads, the
-    # comparison below would see it.
-    prompt = system_prompts.with_catalogs("BASE", populated.active_skills)
-    prompt = with_goal(prompt, populated.memory)
-    prompt = with_todos(prompt, populated.memory)
-    prompt = with_memories(prompt, populated.agent)
-    prompt = with_refs(prompt, populated.memory)
+    # Assemble a full chat prompt the way both shells do since batch 227, so
+    # every tier's fragment function actually runs against the populated
+    # state. If any of them wrote into module-level state that
+    # with_catalogs() reads, the comparison below would see it.
+    prompt = session_tiers(
+        system_prompts.with_catalogs(
+            with_persona("BASE", CANARIES["persona"], "P"),
+            populated.active_skills),
+        populated.memory, agent_built=False,
+        active_skills=populated.active_skills)
+    for tier in SESSION_TIERS:
+        assert CANARIES[TIER_CANARY[tier]] in prompt, (
+            f"session_tiers() did not append the {tier!r} tier, so this "
+            "test would pass without it")
 
     for pass_id, expected in baseline.items():
         assert system_prompts.pass_prompt(pass_id) == expected, (
@@ -231,5 +263,91 @@ def test_the_populated_fixture_really_populates_every_tier(populated):
     assert CANARIES["memory"] in with_memories("B", populated.agent)
     assert CANARIES["skill_body"] in skill_manager.prompt_fragment(
         populated.active_skills)
+    assert CANARIES["file_mention"] in with_file_mentions("B", populated.memory)
+    assert CANARIES["persona"] in with_persona("B", CANARIES["persona"], "P")
     assert config_loader.context_for_agent(populated.agent) == CANARIES["context"]
     assert populated.agent.body == CANARIES["agent_body"]
+
+
+def test_every_session_tier_has_a_canary():
+    """The pin follows the assembly (#9, A80). SESSION_TIERS is what
+    session_tiers() appends; a name there with no canary is a tier no test
+    here would notice leaking into a pass."""
+    assert set(TIER_CANARY) == set(SESSION_TIERS), (
+        f"SESSION_TIERS {sorted(SESSION_TIERS)} and this file's TIER_CANARY "
+        f"{sorted(TIER_CANARY)} disagree. Give a new tier a canary.")
+    assert set(TIER_CANARY.values()) <= set(CANARIES)
+
+
+# ---------------------------------------------------------------------------
+# ---- The one assembly (#9, J11, batch 227) ---------------------------------
+# ---------------------------------------------------------------------------
+
+def _order(prompt: str) -> list:
+    found = [(prompt.index(CANARIES[TIER_CANARY[t]]), t)
+             for t in SESSION_TIERS if CANARIES[TIER_CANARY[t]] in prompt]
+    return [t for _, t in sorted(found)]
+
+
+def test_session_tiers_appends_every_tier_in_its_stated_order(populated):
+    prompt = session_tiers("BASE", populated.memory, agent_built=False,
+                           active_skills=populated.active_skills)
+    assert _order(prompt) == list(SESSION_TIERS)
+
+
+def test_an_agent_built_prompt_gets_every_tier_but_the_memories(populated):
+    """M13 against M19: an agent got its memories in system_prompt_for(),
+    and the refs, checklist and goal are the thread's, so it still needs
+    those. Conditioning them all alike is the edit that looks right."""
+    prompt = session_tiers("BASE", populated.memory, agent_built=True,
+                           active_skills=populated.active_skills)
+    assert _order(prompt) == [t for t in SESSION_TIERS if t != "memories"]
+
+
+def test_an_internal_turn_gets_no_file_mentions(populated):
+    """§54 AT7: compaction and review are not a person's mention request."""
+    prompt = session_tiers("BASE", populated.memory, agent_built=False,
+                           mentions=False)
+    assert CANARIES["file_mention"] not in prompt
+
+
+def test_every_conversation_prompt_is_assembled_by_session_tiers():
+    """The three hand-written copies were the defect: a loop turn, a TUI
+    turn and the TUI's one-shot each appended the tiers themselves, and the
+    one-shot's copy was the one no test covered (#110). No production
+    module calls a tier function directly now, outside core/loop.py's own
+    definitions and session_tiers()."""
+    import ast
+    import os
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    direct = {"with_goal", "with_memories", "with_refs", "with_todos",
+              "with_file_mentions"}
+    callers = []
+    scanned = 0
+    for folder, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in {
+            "tests", "review", "node_modules", "__pycache__", "venv",
+            "build", "dist", "output", "logs"}]
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(folder, name)
+            with open(path, encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            scanned += 1
+            inside = set()
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.FunctionDef)
+                        and node.name == "session_tiers"):
+                    inside |= {id(n) for n in ast.walk(node)}
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and id(node) not in inside
+                        and getattr(node.func, "id", None) in direct):
+                    callers.append(f"{os.path.relpath(path, root)}:"
+                                   f"{node.lineno} {node.func.id}")
+    assert scanned > 100, f"scanned {scanned} files; repoint the walk"
+    assert not callers, (
+        f"a tier appended outside session_tiers(): {callers}. Call "
+        f"session_tiers, or add the tier to it and to SESSION_TIERS.")
+

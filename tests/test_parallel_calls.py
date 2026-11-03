@@ -555,6 +555,67 @@ class TestNarrationIsLive:
 
 
 # ---------------------------------------------------------------------------
+# ---- An abandoned batch keeps its rows (#215, batch 221) -----------------
+# ---------------------------------------------------------------------------
+
+class TestAnAbandonedBatchKeepsItsRows:
+    """#42's rule -- the row before the event -- held per call and not per
+    batch. D20 writes every `tool_use` before dispatch, so a consumer that
+    went away mid-batch left tools that had run with no row answering them:
+    M4's pairing broken, an unresumable thread. Two windows, one each."""
+
+    def test_closed_during_the_drain_every_finished_call_is_recorded(
+            self, mocker):
+        """The window the issue named: outcomes parked in futures while the
+        frame yields a sibling's narration. Closed there, the batch used to
+        record nothing."""
+        from core.events import LoopEvent
+
+        def narrating_call(call, **kwargs):
+            yield LoopEvent(notice={"kind": "probe", "id": call.id})
+            return core.loop._CallOutcome(result={"ok": call.id})
+
+        mocker.patch.object(core.loop, "_dispatch_one", narrating_call)
+        memory = _Mem()
+        batch = core.loop._dispatch_parallel(
+            [_Call("c0", "get_time"), _Call("c1", "get_time")],
+            context=None, run_info=None, response_channel=None,
+            memory=memory, activity=None)
+
+        next(batch)       # a worker's narration: the batch is mid-drain
+        batch.close()
+
+        assert [row[0] for row in memory.tool_results] == ["c0", "c1"], (
+            memory.tool_results)
+
+    def test_closed_at_the_first_result_every_call_is_recorded(self, mocker):
+        """The window one step later: the batch is drained, and settling
+        used to write one row, yield its event, and only then write the
+        next. Closed at the first `tool_result`, c1 and c2 had run and had
+        no rows."""
+        _make_parallel(mocker, "get_time")
+        uses = make_model_response(text="", tool_calls=[
+            {"id": "c%d" % i, "name": "get_time", "input": {}}
+            for i in range(3)])
+        mocker.patch("core.loop.api_initialization", return_value=object())
+        mocker.patch("core.loop.effort_for", return_value=None)
+        mocker.patch("core.loop.call_model_stream",
+                     side_effect=lambda *a, **kw: iter(
+                         [StreamToken(final_response=uses)]))
+        memory = _Mem()
+        turn = RunAgentLoop._run(
+            memory=memory, system_prompt="s", provider_name="ANTHROPIC",
+            model="m", context=None, max_steps=2, response_channel=None)
+
+        for event in turn:
+            if event.tool_result is not None:
+                turn.close()
+                break
+
+        assert [row[0] for row in memory.tool_results] == ["c0", "c1", "c2"]
+
+
+# ---------------------------------------------------------------------------
 # ---- A raising sibling (NA14) --------------------------------------------
 # ---------------------------------------------------------------------------
 

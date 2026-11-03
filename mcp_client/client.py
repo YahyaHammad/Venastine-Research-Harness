@@ -56,6 +56,7 @@ from mcp.client.streamable_http import (
 from mcp.shared.exceptions import MCPError
 
 import config as _harness_config
+from safety.policy_enforcement import TOKEN_CHARS, fragment_end
 
 logger = logging.getLogger(__name__)
 
@@ -82,10 +83,8 @@ TEARDOWN_BUDGET_S = _harness_config.TEARDOWN_BUDGET_S
 # payload actually carries, and the cut is visible for the reason
 # _catalog_text's is.
 #
-# The SUCCESS path's `result` is deliberately not bounded here -- an
-# unbounded tool RESULT is TECHNICAL_DEBT 48, which the review marathon
-# measured and which is ruled DEFER; capping it in passing would close a
-# filed item halfway and in the wrong module.
+# The result AS A WHOLE has its own bound, `max_read_chars` (A79); see
+# _normalize.
 MAX_ERROR_DETAIL_CHARS = 500
 
 # Per-server, inside the manager. CONNECT_TIMEOUT_S is the caller-side
@@ -190,6 +189,49 @@ def _detail(structured) -> str:
     return rendered[:MAX_ERROR_DETAIL_CHARS - 1].rstrip() + "\u2026"
 
 
+def _cut(text: str, limit: int) -> str:
+    """The first *limit* characters of *text*, less a word the cut split.
+
+    The redactor runs after this, on the dispatch path, and cannot match
+    half a credential. So when the character past the cut is a token
+    character, the token-character run the cut ends inside goes too: the
+    rule A72 made for a shell session's dropped middle. A cut that fell
+    between two words drops nothing more.
+    """
+    if len(text) <= limit:
+        return text
+    kept = text[:limit]
+    if text[limit] in TOKEN_CHARS:
+        kept = kept[:fragment_end(kept)]
+    return kept
+
+
+def _json_chars(structured) -> Optional[int]:
+    """How many characters *structured* takes as JSON, or None when it
+    cannot be rendered -- which _normalize reads as too large to keep,
+    since nothing can say how large it is."""
+    try:
+        return len(json.dumps(structured, default=str, ensure_ascii=False))
+    except Exception:
+        return None
+
+
+def _repeats(structured, text: str) -> bool:
+    """Whether *structured* is the server's text over again.
+
+    The SDK's own server sends a tool that returns a string as that text
+    AND as `{"result": <the text>}`, and a typed return as the JSON in
+    both places. A dropped copy of the text is no loss, and the note says
+    so, so the model does not call again for something it already has.
+    """
+    if structured == {"result": text}:
+        return True
+    try:
+        return json.loads(text) == structured
+    except Exception:
+        return False
+
+
 def _normalize(result, tool_name: str = "") -> dict:
     """CallToolResult -> the plain dict shape every other tool handler
     returns (D23).
@@ -223,7 +265,23 @@ def _normalize(result, tool_name: str = "") -> dict:
     v2 renamed these fields to snake_case (.content/.structured_content/
     .is_error); §17's sketch reads the v1 camelCase spellings and would
     silently see is_error as always-False against v2.
+
+    THE RESULT IS BOUNDED HERE, AS A WHOLE, AT `max_read_chars` (A79).
+    Every other producer of third-party text bounds what it hands on, and
+    this one handed on anything: 10 MB of text, of structured content or
+    of an error message went through whole, into the thread and the
+    model's context, behind a redaction pass that took 1.2-2.5 s over it.
+    The server's text is cut at the bound with a note giving the size it
+    had. A structured payload is kept whole if it fits in what the text
+    left of the bound, and otherwise dropped with a note -- never cut,
+    since a JSON document cut short can read as complete. A server that
+    follows the MCP spec sends structured output as text as well, so the
+    text usually carries what was dropped, and the note says when it was
+    a repeat (see `_repeats`). The bound is `max_read_chars`
+    because it is already how much one read is, and the compaction
+    headroom check measures a read against it.
     """
+    bound = int(_harness_config.MAX_READ_CHARS)
     blocks = getattr(result, "content", None) or []
     kept, dropped = [], []
     for block in blocks:
@@ -240,7 +298,9 @@ def _normalize(result, tool_name: str = "") -> dict:
             continue
         dropped.append(kind)
 
-    text = "\n".join(kept)
+    full = "\n".join(kept)
+    text = _cut(full, bound)
+    sent, shown = len(full), len(text)
     if dropped:
         # APPENDED, NOT SUBSTITUTED (A32). Non-text blocks (images,
         # embedded resources) are still dropped -- the harness has no
@@ -267,6 +327,17 @@ def _normalize(result, tool_name: str = "") -> dict:
             "the result says so in band.",
             tool_name or "<unknown>", len(dropped), kinds)
 
+    if shown < sent:
+        # After the non-text note, so neither note is what the cut takes.
+        note = (f"[MCP result cut: the server sent {sent:,} characters of "
+                f"text, and the {shown:,} shown end at the last word break "
+                f"inside the bound, max_read_chars ({bound:,})]")
+        text = f"{text}\n{note}" if text else note
+        logger.warning(
+            "MCP tool %s returned %d characters of text; it was cut to %d "
+            "(max_read_chars is %d) and the result says so in band.",
+            tool_name or "<unknown>", sent, shown, bound)
+
     structured = getattr(result, "structured_content", None)
     if getattr(result, "is_error", False):
         message = text or "MCP tool call failed"
@@ -282,6 +353,27 @@ def _normalize(result, tool_name: str = "") -> dict:
                 "folded into the error string: %s",
                 tool_name or "<unknown>", detail)
         return {"error": message}
+
+    if structured is not None:
+        size, room = _json_chars(structured), bound - shown
+        if size is None or size > room:
+            if size is None:
+                why = "it could not be rendered as JSON to be measured"
+            else:
+                why = (f"it is {size:,} characters as JSON, and the text "
+                       f"left {room:,} of the bound, max_read_chars "
+                       f"({bound:,})")
+            if _repeats(structured, full):
+                why += "; it repeats the server's text"
+            note = f"[MCP structured result dropped: {why}]"
+            text = f"{text}\n{note}" if text else note
+            logger.warning(
+                "MCP tool %s returned structured content of %s characters "
+                "with %d left of max_read_chars; it was dropped and the "
+                "result says so in band.",
+                tool_name or "<unknown>",
+                "unmeasurable" if size is None else size, room)
+            structured = None
 
     out = {"content": text}
     if structured is not None:

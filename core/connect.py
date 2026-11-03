@@ -279,6 +279,96 @@ def connected_providers() -> set:
 
 
 # ---------------------------------------------------------------------------
+# ---- /model ----------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# What `/model` may switch to, for either shell (ROADMAP_v3 §89). Moved out
+# of the TUI's handler when the CLI got one: which switches REFUSE is the
+# part two copies would come to disagree about, and a refusal one shell
+# makes and the other skips is a turn that fails a long way from its cause.
+
+MODEL_USAGE = "Usage: /model <name>, or /model <PROVIDER> <name>."
+
+CHATGPT_SIGNED_OUT = (
+    "The ChatGPT plan is not signed in, so it cannot answer. /connect "
+    "chatgpt signs in; then /model CHATGPT <name>.")
+
+
+def configured_providers(providers: dict) -> str:
+    """The providers a switch can reach, for a bare `/model`."""
+    from core import chatgpt_auth
+
+    named = sorted(p for p, e in providers.items() if e.get("API_KEY"))
+    # §83: the plan has no key; its sign-in is what connects it.
+    if chatgpt_auth.status().signed_in:
+        named.append("CHATGPT (signed in)")
+    return ", ".join(named) if named else "none (add a key to providers.json)"
+
+
+def model_switch(args: str, current_provider: str) -> tuple:
+    """`(provider, model, providers, error)` for `/model`'s argument.
+
+    `/model <name>` keeps `current_provider`; `/model <PROVIDER> <name>`
+    switches both. `error` is the sentence a refusal shows, and the other
+    three are None with it. `providers` is the file as read after any
+    entry this wrote, for the caller's missing-key warning.
+    """
+    from core import chatgpt_auth
+    from security import hosted
+
+    parts = args.split()
+    if len(parts) == 1:
+        provider, model = current_provider, parts[0]
+    elif len(parts) == 2:
+        provider, model = parts[0].upper(), parts[1]
+    else:
+        return None, None, None, MODEL_USAGE
+
+    # CG1: a hosted deployment never reaches the plan, signed in or not, so
+    # the switch refuses with the reason -- not with "/connect chatgpt
+    # signs in", which that deployment refuses in turn (batch 195).
+    if provider == "CHATGPT" and hosted.is_hosted():
+        return None, None, None, chatgpt_auth.LOCAL_ONLY
+    # ROADMAP_v3 §83. CG11's refusal is lifted: the plan answers since slice
+    # 2b. While it is signed out a switch would fail the next turn rather
+    # than this command, so this refuses and says how to sign in (CG20).
+    if provider == "CHATGPT" and not chatgpt_auth.status().signed_in:
+        return None, None, None, CHATGPT_SIGNED_OUT
+    providers = credentials.load_provider_data()
+    if provider == "CHATGPT" and provider not in providers:
+        # A sign-in made before slice 2b wrote no entry; it is written now.
+        try:
+            store_chatgpt_entry()
+        except (OSError, ValueError) as exc:
+            return (None, None, None,
+                    f"Could not record CHATGPT in providers.json: {exc}")
+        providers = credentials.load_provider_data()
+
+    # Unknown provider REFUSES: api_initialization would raise the same
+    # ValueError on the next turn, a long way from the typo that caused it.
+    if provider not in providers:
+        return (None, None, None,
+                f"Unknown provider {provider!r}. Configured: "
+                f"{', '.join(sorted(providers)) or 'none'}.")
+    return provider, model, providers, None
+
+
+def agent_pin_note(agent, provider: str, model: str) -> Optional[str]:
+    """The note a switch owes when an active agent pins its own pair.
+
+    An agent may name its own model/provider (§18), and those win for a
+    chat turn. Without this the switch is a silent no-op for as long as
+    that agent is active -- the failure shape this project keeps
+    producing.
+    """
+    if agent is None or not (agent.model or agent.provider):
+        return None
+    return (f"Note: agent {agent.name!r} pins "
+            f"{agent.provider or provider} | {agent.model or model} for "
+            f"chat turns, so this applies to /research and to turns after "
+            f"/agent default.")
+
+
+# ---------------------------------------------------------------------------
 # ---- HTTP -----------------------------------------------------------------
 # ---------------------------------------------------------------------------
 

@@ -1127,8 +1127,12 @@ class TestAgainstARealRootCommand:
                             _env("VEN_TEST_SSH_KEY"))
         monkeypatch.setattr(config, "SSH_REMOTE_WORKSPACE",
                             _env("VEN_TEST_SSH_WS"))
-        monkeypatch.setattr(config, "SSH_HOST_KEY",
-                            _env("VEN_TEST_SSH_HOSTKEY"))
+        # A FILE holding the pinned key, as test_ssh_backend.py reads it:
+        # this site pinned the variable's value itself, the path, so no
+        # one environment could pass both files (batch 226).
+        monkeypatch.setattr(
+            config, "SSH_HOST_KEY",
+            open(_env("VEN_TEST_SSH_HOSTKEY"), encoding="utf-8").read())
         monkeypatch.setattr(config, "SANDBOX_TIMEOUT_SECONDS", 60)
         set_posture(monkeypatch, allow_ssh_backend=True,
                     shell_approval_mode="tiered")

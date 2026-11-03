@@ -817,6 +817,33 @@ def test_call_model_passes_temperature_when_provided():
     assert models3.last_call["config"].temperature == 0.7
 
 
+def test_openai_is_sent_no_temperature_while_it_reasons():
+    """ROADMAP_v3 §87 (#6), at the wire: the call site hands
+    `_sampling_kwargs` the effort it is about to send, so the request that
+    carries `reasoning_effort` carries no temperature -- and one at `none`
+    still does."""
+    captured = {}
+    _call(_stream_openai(captured), "OPENAI", "gpt-5.1", [], "sys", [],
+          temperature=0.7, effort="high")
+    assert captured["reasoning_effort"] == "high"
+    assert "temperature" not in captured
+
+    captured = {}
+    _call(_stream_openai(captured), "OPENAI", "gpt-5.1", [], "sys", [],
+          temperature=0.7, effort="none")
+    assert captured["temperature"] == 0.7
+
+
+def test_a_gemini_that_ignores_temperature_is_sent_none():
+    """§87: Gemini 3.6 Flash ignores one, so the config carries none."""
+    resp = _make_google_response(text="ok",
+                                 usage={"input_tokens": 10, "output_tokens": 5})
+    models = _CapturingGoogleModels(resp)
+    _call(SimpleNamespace(models=models), "GOOGLE", "gemini-3.6-flash", [],
+          "sys", [], temperature=0.7)
+    assert models.last_call["config"].temperature is None
+
+
 def test_call_model_omits_temperature_when_none():
     """When temperature is None (default), it must NOT appear in the
     API call kwargs — each provider uses its own default."""

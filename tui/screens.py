@@ -73,6 +73,9 @@ from textual.widgets import (
 )
 from textual.widgets.selection_list import Selection
 
+from core.claims_view import claims_header, render_claims
+from core.replay import thread_row
+
 
 class ScrollBox(VerticalScroll):
     """A bounded block of text whose overflow can actually be reached
@@ -794,12 +797,10 @@ class ClaimsScreen(ModalScreen[None]):
         self._partial = partial
 
     def compose(self) -> ComposeResult:
-        header = f"{self._title}  ({len(self._claims)})"
-        if self._partial:
-            # Say so, rather than showing thin rows and letting the reader
-            # conclude the pipeline recorded nothing: mid-run, only id,
-            # text and tier have been broadcast as events.
-            header += "  — run in progress, metadata incomplete"
+        # core/claims_view.py says what the view shows (§89), so the
+        # CLI's /claims and this screen cannot disagree about a run.
+        header = claims_header(self._title, len(self._claims),
+                               self._partial)
         yield Vertical(
             Label(Text(header), id="claims-title"),
             # A ScrollBox, not a `max-height` Static (batch 49). EP3's
@@ -808,7 +809,7 @@ class ClaimsScreen(ModalScreen[None]):
             # claims than fit had the remainder GONE rather than below
             # the fold, on the one screen whose entire purpose is showing
             # all of them.
-            ScrollBox(Static(Text(_render_claims(self._claims)),
+            ScrollBox(Static(Text(render_claims(self._claims)),
                              id="claims-body"),
                       id="claims-body-box"),
             id="claims-dialog",
@@ -816,100 +817,6 @@ class ClaimsScreen(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss(None)
-
-
-# Tier order for the claims view: worst first. A reader opening this is
-# looking for what NOT to trust, and burying the unverified claims under
-# the confident ones makes them the hardest thing to find.
-_TIER_ORDER = ("UNVERIFIED", "UNVERIFIED_COVERAGE", "LOW", "MEDIUM", "HIGH")
-
-
-def _as_display_list(value) -> list:
-    """The members of a model-supplied list field, as text.
-
-    EVERY FIELD THIS GUARDS IS MODEL DATA READ BACK FROM A STORED RUN, AND
-    A STORED RUN MAY HAVE FAILED (batch 149). The orchestrator's except
-    block persists a snapshot before it re-raises, so a run that died in
-    Pass 5 on `assumption_flags: 123` leaves that value in the record --
-    and `/claims <run id>` then rendered it. `'; '.join(map(str, 123))`
-    raises TypeError inside `compose()`, which is NOT covered by the
-    containment batch 145 put at the `/` dispatch site: `push_screen`
-    returns an `await_mount`, so compose runs in the message pump rather
-    than in the handler's call stack, and the exception reaches Textual's
-    `_handle_exception` and takes the whole app down. Measured against the
-    real ClaimsScreen in a minimal host app.
-
-    The payload boundary now rejects each of these shapes at the pass that
-    sent them (§66 A25), which closes the producer -- but not for a record
-    written before it did, and this view's whole job is reading those.
-
-    A value that is not a list is shown as the one value it is, rather
-    than dropped: the reader asked what the run recorded, and "123" is the
-    answer.
-    """
-    if isinstance(value, (list, tuple)):
-        return [str(member) for member in value]
-    return [str(value)]
-
-
-def _render_claims(claims: list) -> str:
-    if not claims:
-        return "No claims recorded for this run."
-
-    def _rank(claim):
-        tier = claim.get("confidence_tier")
-        return _TIER_ORDER.index(tier) if tier in _TIER_ORDER else len(_TIER_ORDER)
-
-    out = []
-    for claim in sorted(claims, key=_rank):
-        tier = claim.get("confidence_tier") or "—"
-        head = f"{tier:<20} {claim.get('id', '?')}  {claim.get('type') or ''}"
-        if claim.get("retry_count"):
-            head += f"   revised x{claim['retry_count']}"
-        out.append(head.rstrip())
-        # final_text is what the claim carries into the report; text is
-        # what Pass 2 extracted. Showing final_text when they differ means
-        # the view matches the report rather than the draft behind it.
-        out.append(f"  {claim.get('final_text') or claim.get('text') or ''}")
-        if claim.get("entities"):
-            out.append("  entities: "
-                       + ", ".join(_as_display_list(claim["entities"])))
-        if claim.get("grounding_status") or claim.get("grounding_sources"):
-            sources = len(_as_display_list(claim.get("grounding_sources")
-                                           or ()))
-            out.append(f"  grounding: {claim.get('grounding_status') or 'none'}"
-                       f" ({sources} source{'s' if sources != 1 else ''})")
-        for field, label in (("fallacies", "fallacies"),
-                             ("contradictions", "contradictions"),
-                             ("assumption_flags", "assumptions")):
-            if claim.get(field):
-                out.append(f"  {label}: "
-                           + "; ".join(_as_display_list(claim[field])))
-        if claim.get("score_breakdown"):
-            out.append("  score: " + ", ".join(
-                f"{k}={v}" for k, v in claim["score_breakdown"].items()))
-        if claim.get("annotation"):
-            out.append(f"  {claim['annotation']}")
-        out.append("")
-    return "\n".join(out).rstrip()
-
-
-def _thread_row(thread: dict) -> str:
-    """One picker row: timestamp, first message, id (§27).
-
-    `created_at` and `id` are INDEXED deliberately, not .get: a row
-    without either has nothing honest to render -- storage.list_threads()
-    always supplies both, and the id is the row's whole payload on
-    selection. Only `preview` is optional (.get): §27 added it, so
-    hand-built test rows predate it, and a missing preview degrades to an
-    id-only row rather than a KeyError in a test-only construction.
-    """
-    created = thread["created_at"]
-    stamp = (f"{created:%Y-%m-%d %H:%M}"
-             if hasattr(created, "strftime") else str(created))
-    preview = (thread.get("preview") or "").strip()
-    return f"{stamp}  {preview}  ({thread['id']})" if preview \
-        else f"{stamp}  {thread['id']}"
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -1201,7 +1108,7 @@ class ThreadPickerScreen(ModalScreen[object]):
         self._note = note
 
     def compose(self) -> ComposeResult:
-        items = [ListItem(Label(Text(_thread_row(t))))
+        items = [ListItem(Label(Text(thread_row(t))))
                  for t in self._threads]
         children = [Label("Resume which thread?", id="thread-title")]
         if self._note:

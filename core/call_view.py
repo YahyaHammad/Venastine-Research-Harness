@@ -31,10 +31,8 @@ WHY IT IS HERE AND NOT IN `tui/`. core/session_view.py's reason, one
 subject over: D12 makes the CLI a permanent fallback, so what may be shown
 for a call is a policy decision that must not differ between the two
 shells. Each shell decides how to paint the entries; this decides what they
-are. ONLY THE TUI PAINTS THEM TODAY, and that is recorded rather than
-quietly accepted -- `main.py` has never imported `core/session_view.py`
-either, so the divergence is §49's and predates this file
-(TECHNICAL_DEBT 45).
+are. Both shells paint them since ROADMAP_v3 §89: the TUI on a ctrl+click,
+the CLI on `/call N` (`cli_commands.py`), which closed TECHNICAL_DEBT 45.
 
 THE PRICE OF `str(result)` IS READABILITY, AND IT IS PAID HERE (TR9). The
 stored string is a Python repr -- `{'stdout': 'hello\\n', ...}` -- so the

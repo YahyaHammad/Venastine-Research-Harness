@@ -249,3 +249,48 @@ class TestTheWallsHold:
         assert verdict["ok"], verdict
         assert all(v.startswith("refused") for k, v in verdict["checks"].items()
                    if k not in ("math", "a lazy import"))
+
+
+# The limits layer, run in a child: a lowered hard limit cannot be raised
+# again, so it must not happen to the test process.
+_FILE_LIMIT_PROBE = """
+import resource, sys
+from security import confine
+cap = int(sys.argv[1])
+if cap >= 0:
+    resource.setrlimit(resource.RLIMIT_FSIZE, (cap, cap))
+reason = confine._apply_limits()
+print(reason, resource.getrlimit(resource.RLIMIT_FSIZE)[0])
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="prctl and rlimits are Linux's")
+class TestTheFileLimit:
+    """Batch 233. `_apply_limits` set RLIMIT_FSIZE to zero, and since batch
+    221 (#204) a math child's stdout is a FILE, so a confined child could
+    not write its own result: every confined call exited 120, measured on
+    CI's first run of the branch (PR #272), while the self-test -- whose
+    child writes to pipes -- still passed. The end-to-end half is
+    TestTheWallsHold, which is what failed."""
+
+    def _limit_after(self, cap):
+        import subprocess  # nosec B404 - the limits layer must run in a child of its own
+
+        done = subprocess.run(  # nosec B603 - this interpreter and a script this file wrote
+            [sys.executable, "-c", _FILE_LIMIT_PROBE, str(cap)],
+            cwd=isolation._package_root(), env=isolation._child_env(),
+            capture_output=True, text=True, timeout=60, check=False)
+        assert done.returncode == 0, done.stderr
+        reason, limit = done.stdout.split()
+        assert reason == "None", done.stdout
+        return int(limit)
+
+    def test_a_cap_already_in_force_is_kept(self):
+        """The transport's: what isolation.py lets a child write to the two
+        files it hands it."""
+        assert self._limit_after(4096) == 4096
+
+    def test_no_cap_becomes_zero(self):
+        """THE CONTROL, and the self-test's case: with nothing in force, no
+        file may grow at all, as before."""
+        assert self._limit_after(-1) == 0

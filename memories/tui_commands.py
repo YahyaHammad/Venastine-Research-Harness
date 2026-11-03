@@ -21,7 +21,7 @@ something the user relies on.
 from uuid import UUID
 
 from memories.manager import manager
-from tui.commands import SlashCommand
+from tui.commands import bind
 from tui.commands import registry as commands
 
 
@@ -233,13 +233,7 @@ def register_memory_commands() -> None:
     §21c's two live here with §21b's rather than in a module of their own:
     they are the same section's family, and `/ref` reads what `/summary`
     writes."""
-    commands.register(SlashCommand(
-        "memories", "list durable memories visible here", _cmd_memories))
-    commands.register(SlashCommand(
-        "forget", "delete one durable memory", _cmd_forget, "<id>"))
-    commands.register(SlashCommand(
-        "summary", "distil this conversation without folding it",
-        _cmd_summary))
-    commands.register(SlashCommand(
-        "ref", "reference another conversation's summary", _cmd_ref,
-        "[--list|--clear]"))
+    commands.register(bind("memories", _cmd_memories))
+    commands.register(bind("forget", _cmd_forget))
+    commands.register(bind("summary", _cmd_summary))
+    commands.register(bind("ref", _cmd_ref))

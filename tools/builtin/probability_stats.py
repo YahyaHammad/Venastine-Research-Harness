@@ -61,20 +61,6 @@ TOOL_SCHEMA = {
 }
 
 
-def _build_distribution(name: str, dp: dict):
-    if name == "normal":
-        return sstats.Normal("X", dp.get("mu", 0), dp.get("sigma", 1))
-    if name == "binomial":
-        return sstats.Binomial("X", int(dp["n"]), dp["p"])
-    if name == "poisson":
-        return sstats.Poisson("X", dp["lambda"])
-    if name == "uniform":
-        return sstats.Uniform("X", dp.get("a", 0), dp.get("b", 1))
-    if name == "exponential":
-        return sstats.Exponential("X", dp.get("rate", 1))
-    raise ValueError(f"Unsupported distribution: {name}")
-
-
 def _build_distribution_with_warnings(name: str, dp_orig: Optional[dict]):
     """Build distribution and collect warnings for defaulted params.
 
@@ -82,6 +68,11 @@ def _build_distribution_with_warnings(name: str, dp_orig: Optional[dict]):
     that fell back to a default, per decision 2 (keep forgiving but explain).
     Binomial/poisson have no defaults — missing required keys become a
     friendly error at the caller, not a warning.
+
+    THE ONE BUILDER (#208). A warning-free twin, `_build_distribution`, sat
+    above this with no caller and the same five distributions and defaults,
+    so a change to one would have left the other silently wrong. It is
+    deleted; a caller that wants no warnings takes `[0]` of this.
     """
     dp = dp_orig or {}
     warnings: list[str] = []

@@ -53,8 +53,8 @@ _NAME_CHAR = re.compile(r"[A-Za-z0-9_-]")
 # THE TWO BOUNDS ON THIRD-PARTY TEXT IN AN ADVERTISED SCHEMA. Both are
 # paid on EVERY model call for the rest of the session, because
 # registry.schemas() is recomputed at the top of each one (K7) -- which is
-# the difference between this and TECHNICAL_DEBT 48's unbounded tool
-# RESULT, paid once per call.
+# the difference between these and the bound on a tool RESULT (A79),
+# paid once per call.
 #
 # Deliberately NOT config.MAX_CATALOG_TEXT_CHARS. 300 is right for a
 # one-line catalog bullet and would mutilate a legitimate tool

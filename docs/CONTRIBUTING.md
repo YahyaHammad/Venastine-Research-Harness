@@ -76,6 +76,7 @@ Standardized titles and bodies are not bureaucracy — they are what let a maint
 * **Severity** `S1` critical / `S2` high / `S3` medium / `S4` low — the audit-severity namespace, defined by the `#15` tracker. Use the lowest that still describes the impact.
   * ⚠️ `S1`–`S4` is also the id range of a *design-decision* family in `ROADMAP_v2.md` (from the §14–§18 review). They are unrelated. `AGENTS.md`'s namespace table is the arbiter; outside an issue title, always write "severity `S1`" so the reference cannot resolve to the wrong record.
 * `<area>` is one of: `security`, `correctness`, `coherence`, `test-quality`, `docs-drift`, `performance`, `ux`, `stability` — pick the closest; don't invent a new one without discussion.
+  * Older issues carry an `[S0]` severity and a `complexity` area. Both predate the issue forms (2026-08-27), which are the arbiter: file those as `S1` and `coherence`. `tests/test_docs_consistency.py` holds the form's two lists to the two above.
 * Other title shapes in use (don't mix with `S`):
   * `[tracker] Audit Pass 1 — coverage tracker (read this first)` — the single tracker (`#15`)
   * `[unit X<n>] <area> — description` — per-unit reviews (`#134`, `#142`), e.g. `[unit X5] Decision coherence`
@@ -83,7 +84,7 @@ Standardized titles and bodies are not bureaucracy — they are what let a maint
 
 Example: `[S1][security] shell auto-approval is unbounded: inert commands run on the host with unrestricted arguments`
 
-**Labels — set one:**
+**Labels — set one, at triage.** The *Audit finding* form sets none, on purpose: which of the three below fits depends on the finding, and a form cannot tell. The *Documentation* and *Enhancement* forms each set their own.
 
 * `bug` — an `S1`/`S2` finding, or any severity where behavior is outright wrong today
 * `enhancement` — `S3`/`S4` polish, coherence and performance work where nothing misbehaves yet. Most open findings sit here, including `[S3][coherence]` and `[S3][correctness]` ones — see `#12`, `#9`, `#6`

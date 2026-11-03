@@ -55,7 +55,7 @@ class TestRedactSecrets:
         assert "[REDACTED]" in result
 
     def test_google_api_key_redacted(self):
-        text = "AIzaSyA1234567890abcdefghijklmnopqrstuv"
+        text = "AIza" + "SyA1234567890abcdefghijklmnopqrstuv"
         result = redact_secrets(text)
         assert "AIzaSy" not in result
         assert "[REDACTED]" in result
@@ -67,9 +67,9 @@ class TestRedactSecrets:
         assert "[REDACTED]" in result
 
     def test_private_key_header_redacted(self):
-        text = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpA...\n-----END RSA PRIVATE KEY-----"
+        text = "-----BEGIN RSA " + "PRIVATE KEY-----\nMIIEpA...\n-----END RSA " + "PRIVATE KEY-----"
         result = redact_secrets(text)
-        assert "-----BEGIN RSA PRIVATE KEY-----" not in result
+        assert "-----BEGIN RSA " + "PRIVATE KEY-----" not in result
         assert "[REDACTED]" in result
         # Stays: an ellipsis is no body, and a lone footer is a SHAPE (batch 160)
         assert "-----END RSA PRIVATE KEY-----" in result
@@ -79,7 +79,8 @@ class TestRedactSecrets:
         assert redact_secrets(text) == text
 
     def test_multiple_secrets_in_one_string(self):
-        text = "key1=sk-abc123def456ghi789jkl012mno345pqr678 key2=ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+        text = ("key1=sk-" + "abc123def456ghi789jkl012mno345pqr678 key2=ghp_"
+                + "abcdefghijklmnopqrstuvwxyz1234567890")
         result = redact_secrets(text)
         assert result.count("[REDACTED]") == 2
 
@@ -394,7 +395,7 @@ class TestIsUrlPermittedResolution:
 class TestCheckOutputPolicy:
 
     def test_redacts_content_key(self):
-        result = {"content": "key=sk-abc123def456ghi789jkl012mno345pqr678"}
+        result = {"content": "key=sk-" + "abc123def456ghi789jkl012mno345pqr678"}
         out = check_output_policy("test_tool", result)
         assert "sk-abc" not in out["content"]
         assert "[REDACTED]" in out["content"]
@@ -904,7 +905,8 @@ class TestCredentialShapesInOutputs:
         assert out["content"] == 'password = "abc"'
 
     def test_non_credential_keywords_do_not_match(self):
-        text = 'token = "abcdef1234567890" and secret="zyxwvuts9876543"'
+        text = ('token = "abcdef' + '1234567890" and secret="zyxwvuts'
+                + '9876543"')
         out = check_output_policy("t", {"content": text})
         assert out["content"] == text
 
@@ -1014,13 +1016,13 @@ class TestRedactionKillSwitch:
 # ---- S07-01 / S07-05: the case list, and the one order --------------------
 # ===========================================================================
 
-# DEFERRED, not added to the import block at the top, and the reason is
-# measured. `.gitleaksignore` pins five intentional fake fixtures in this file
-# by LINE NUMBER, and six more names up there pushed all five down by six --
-# re-firing the secret scan and inviting five re-blessings for a change that
-# never needed to touch anything above them. The suite already defers an
-# import into the one gate that needs it where the cost of a module-level one
-# is real (batch 144).
+# DEFERRED, not added to the import block at the top, and the reason was
+# measured. `.gitleaksignore` pinned five intentional fake fixtures in this
+# file by LINE NUMBER, and six more names up there pushed all five down by six
+# -- re-firing the secret scan and inviting five re-blessings for a change
+# that never needed to touch anything above them (batch 144). Since #238 those
+# fakes are built from pieces and nothing is pinned, so the reason is gone;
+# the import stays here because moving it would buy nothing.
 def _every_matcher():
     """Every regex that redacts, vendor patterns and shapes alike."""
     from safety.policy_enforcement import (

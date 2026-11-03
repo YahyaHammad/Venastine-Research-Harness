@@ -326,7 +326,8 @@ Deferred for now (core sequential pipeline only, per current scope):
 ### `ensemble_mode`
 
 Run Pass 1 once per entry below, then extract the union of claims across
-candidates and subtract a disagreement penalty in Pass 5. Off by default.
+candidates, and send a factual claim at most half of them asserted to Pass
+6a/6b to be checked (ROADMAP_v3 §90). Off by default.
 
 DIVERSITY COMES FROM DIFFERENT MODELS, NOT DIFFERENT SAMPLING (E1). §10
 originally raised `temperature` on N runs of one model. That could not work
@@ -385,6 +386,14 @@ queryable, see MODEL_EFFORT_LEVELS) there is nothing to ask. Same posture
 as §21's MODEL_CONTEXT_WINDOWS -- honest about being incomplete, and
 incompleteness is safe here because the failure is a loud 400, not a
 silent wrong answer.
+
+EXCEPT FOR A MODEL THAT IGNORES THEM, which is why two Google names are
+listed (ROADMAP_v3 §87, A82). Gemini 3.6 Flash and 3.5 Flash-Lite ignore
+the parameters: no error, no effect. Google says every later Gemini will do
+the same and then refuse them with a 400, so a new Gemini belongs here when
+it ships. OpenAI's reasoning models are NOT listed: core/client.py drops a
+temperature on OPENAI whenever a reasoning effort other than "none" is
+sent, which is OpenAI's documented rule and needs no names.
 
 ## Critic-model routing (ROADMAP §11)
 
@@ -657,6 +666,10 @@ WARNING, like any other unlisted model.
 
 ### `db_path`
 
+Must not be empty (#213). An empty path was accepted until then and
+opened SQLite's anonymous temporary database, so every thread and memory
+vanished at exit without a word.
+
 ## Output artifacts
 
 ### `output_dir`
@@ -673,6 +686,12 @@ one expression with no branch in it -- an unset AGENT_WORKSPACE gives
 ## File-ops workspace (ROADMAP §6)
 
 ### `workspace_dir`
+
+An empty one is refused by name at startup, by
+`protected_paths.check_workspace`, which answers both routes to it -- this
+key and an empty `AGENT_WORKSPACE`. The schema deliberately does not
+refuse it too (#213): it would answer the variable's case first, as an
+error about this file.
 
 ### `workspace_is_project`
 
@@ -753,6 +772,15 @@ max lines per read call
 
 max chars per read call
 
+It is also the bound on an MCP tool's whole result (ROADMAP_v3 §84, A79,
+batch 225). The server's text is cut at it with a note giving the size it
+had, a structured payload is kept whole if it fits in what the text left
+and dropped with a note if not, and a word the cut splits goes too, so the
+redactor never sees half a credential. One key and not a second one,
+because the compaction headroom check (`compaction_min_headroom_tokens`,
+below) measures one read against this number, and an MCP result is a read
+for that purpose.
+
 ### `max_image_bytes`
 
 ROADMAP_v3 §81 (IM7). The largest image file `view_image` will attach:
@@ -795,6 +823,28 @@ different axis from spend and from the number of reads.
 The number of reads, which neither budget nor read size bounds: a model
 can spend an unbounded number of small reads inside any ceiling.
 
+### `init_max_hub_chars`
+
+Batch 221 (#226, TECHNICAL_DEBT 72). The existing hub was the one read on
+/init's path with no bound at all: measured, a 5.4 MB `AGENTS.md` became a
+5.4 MB model task and a 5.4 MB diff in the transcript. A cap with a notice
+("the first N characters are shown") was rejected, because the initializer's
+reply REPLACES the whole file -- a model shown the head would write the hub
+back without its tail. So past this size /init stops before any model call
+and says to trim the file or edit it by hand. 1,000,000 characters is about
+three times this repository's own 347 KB hub and past what most model
+windows hold anyway, so an ordinary hand-grown hub never meets it. The owner
+chose the shape and the number.
+
+### `init_diff_shown_lines`
+
+The other half of #226: below the cap a hub can still produce a diff of
+tens of thousands of lines, and printing it whole is the transcript freeze
+S15 removed. Only the PRINT is cut, with a line saying how many lines were
+not shown; the whole diff still decides whether anything changed, and the
+write is still the whole proposal. 2,000 lines is enough to judge a rewrite
+by -- this repository's own hub is about 3,300 lines.
+
 ## MCP teardown (ROADMAP_v2 §37 F6, #64)
 
 ### `teardown_budget_s`
@@ -816,8 +866,8 @@ each Streamable HTTP server-sent event whole and fails the call when one
 exceeds `max_sse_event_size`; 2.2.0, on the httpx2 it installed, had no
 limit at all. A result a server STREAMS is one event, so for those this is
 the memory one result can take before the harness sees it -- a bound on
-the transport, NOT on what reaches the model, which is TECHNICAL_DEBT 48's
-other half and stays open.
+the transport, NOT on what reaches the model. That one is `max_read_chars`,
+applied to the whole result since batch 225 (A79).
 
 WHICH RESULTS IT COVERS, measured rather than read (batch 208). A server
 may answer a request as SSE or as plain JSON. mcp 2.3.0's own server,
@@ -953,6 +1003,10 @@ THIS host; it never names one. SS35's split, unchanged: which machine this
 harness may reach is the user's question, which command needs it is the
 agent's. A named map of hosts is a later addition that this shape does not
 block.
+
+`ssh_port` is a whole number from 1 to 65535 (#213). It was a lax `int`
+until then, so `true` was read as port 1 and `99999` reached the SSH call
+before anything said no.
 
 ### `ssh_identity_file`
 

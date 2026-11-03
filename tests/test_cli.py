@@ -323,6 +323,39 @@ def test_f1_bad_settings_key_exits_cleanly_with_the_reason(tmp_path, monkeypatch
     assert "Traceback" not in err
 
 
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0,
+                    reason="chmod 000 refuses a read only to a non-root "
+                           "POSIX user")
+def test_an_unreadable_project_file_is_named_in_the_one_line(
+        tmp_path, monkeypatch, capsys):
+    """#254, batch 219: measured, and the complaint did not reproduce. The
+    trust hash's OSError carries the file's name, so the one line says
+    which file to unlock. Pinned so it stays that way. Refusing to start,
+    rather than starting untrusted, stays the posture (A48); the owner
+    confirmed it."""
+    from main import load_project_config
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    skills = tmp_path / "proj" / ".venastine" / "skills"
+    skills.mkdir(parents=True)
+    locked = skills / "x.md"
+    locked.write_text("---\nname: x\ndescription: d\n---\nbody\n",
+                      encoding="utf-8")
+    locked.chmod(0)
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            load_project_config(str(tmp_path / "proj"), True)
+    finally:
+        locked.chmod(0o644)
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "Configuration error" in err
+    assert os.path.join(".venastine", "skills", "x.md") in err
+
+
 @pytest.mark.parametrize("body", ["{not json", "[]", '"a string"'])
 def test_f1_corrupt_trust_store_fails_closed_instead_of_exiting(
         tmp_path, monkeypatch, capsys, body):
@@ -577,6 +610,200 @@ class TestOneReaderForEveryRead:
         assert not re.search(r"(?<![\w.])input\s*\(", code), (
             "a bare input() is a second reader on the stdin the approval "
             "pump owns -- that is audit #100")
+
+
+@contextlib.contextmanager
+def _pty_stdin(monkeypatch):
+    """A real pty as stdin, in canonical mode, and the controller end to
+    type at it with. Closing the controller ends the pump's read."""
+    import os
+
+    if os.name == "nt":
+        pytest.skip("no pty; the Windows console was measured instead "
+                    "(ROADMAP_v3 §88)")
+    pytest.importorskip("termios")
+    controller, follower = os.openpty()
+    stdin = open(follower, encoding="utf-8", closefd=False)
+    monkeypatch.setattr(sys, "stdin", stdin)
+    try:
+        yield lambda text: os.write(controller, text.encode())
+    finally:
+        os.close(controller)
+        os.close(follower)
+
+
+class TestAskDropsWhatWasTypedBeforeIt:
+    """ROADMAP_v3 §88 (A83), TECHNICAL_DEBT 44. ask()'s drain empties the
+    queue, which holds only what the pump already took. Input still in the
+    terminal -- half a line typed before the question, or between two of
+    them -- became the front of the real answer: measured "sta" + "fresh"
+    = "stafresh" on both platforms. A stray "y" before a prompt, followed
+    by Enter to decline, would read as yes.
+
+    The pty tests run where CI's Linux job runs them; the Windows console
+    half was measured with injected keys in a console of its own, and its
+    Escape key is pinned below by shape."""
+
+    def test_half_a_line_typed_before_the_question_is_not_its_answer(
+            self, monkeypatch, capsys):
+        import threading
+
+        import main
+
+        with _pty_stdin(monkeypatch) as typed:
+            typed("sta")
+            threading.Timer(0.5, typed, ("fresh\n",)).start()
+            assert main._StdinReader().ask("Q? ", timeout=5) == "fresh\n"
+
+    def test_half_a_line_typed_between_two_questions_is_dropped(
+            self, monkeypatch, capsys):
+        """The pump is parked in a read by then, holding the half line
+        unfinished. tcflush reaches it there; the queue drain cannot."""
+        import threading
+        import time
+
+        import main
+
+        with _pty_stdin(monkeypatch) as typed:
+            reader = main._StdinReader()
+            threading.Timer(0.3, typed, ("first\n",)).start()
+            assert reader.ask("Q1? ", timeout=5) == "first\n"
+            typed("sta")
+            time.sleep(0.3)
+            threading.Timer(0.5, typed, ("fresh\n",)).start()
+            assert reader.ask("Q2? ", timeout=5) == "fresh\n"
+
+    def test_the_terminal_is_flushed_before_the_pump_can_start(
+            self, monkeypatch, capsys):
+        """On a process's first ask() the pump has not read anything yet,
+        so flushing AFTER starting it would race it for the stale line."""
+        import main
+
+        order = []
+        reader = main._StdinReader()
+        monkeypatch.setattr(reader, "_flush_terminal",
+                            lambda: order.append("flush"))
+        monkeypatch.setattr(reader, "_start", lambda: order.append("start"))
+        reader._lines.put("taken by the pump\n")
+
+        assert reader.ask("Q? ", timeout=0.05) is None
+        assert order == ["flush", "start"]
+
+    def test_piped_stdin_is_never_flushed(self, monkeypatch):
+        """Piped input is a script's answers, written down on purpose.
+
+        A pipe WITH a descriptor: a StringIO has none, so it returned early
+        for a reason that is not the rule, and the first version of this
+        test passed with the isatty check removed."""
+        import os
+
+        import main
+
+        class _Pipe:
+            def isatty(self):
+                return False
+
+            def fileno(self):
+                return 5
+
+        monkeypatch.setattr(sys, "stdin", _Pipe())
+        monkeypatch.setattr(main, "_flush_console_input",
+                            lambda _h: pytest.fail("a pipe was flushed"))
+        if os.name == "nt":
+            import msvcrt
+            monkeypatch.setattr(msvcrt, "get_osfhandle", lambda fd: fd)
+        else:
+            import termios
+            monkeypatch.setattr(termios, "tcflush",
+                                lambda *_a: pytest.fail("a pipe was flushed"))
+        main._StdinReader._flush_terminal()
+
+    def test_a_windows_console_is_flushed_and_sent_one_escape(
+            self, monkeypatch):
+        """The flush empties the input buffer and cannot reach a cooked
+        read already in progress, which holds its half line in its own
+        edit buffer; Escape clears that line. Measured: without it, the
+        half line typed between two questions still arrived."""
+        import ctypes
+
+        import main
+
+        calls = []
+
+        class _Fn:
+            def __init__(self, name):
+                self.name = name
+
+            def __call__(self, *args):
+                calls.append((self.name, args))
+                return 1
+
+        class _Kernel32:
+            FlushConsoleInputBuffer = _Fn("flush")
+            WriteConsoleInputW = _Fn("write")
+
+        monkeypatch.setattr(ctypes, "WinDLL", lambda *_a, **_k: _Kernel32(),
+                            raising=False)
+
+        main._flush_console_input(77)
+
+        assert [name for name, _args in calls] == ["flush", "write"]
+        assert calls[0][1] == (77,)
+        handle, records, count, _written = calls[1][1]
+        assert handle == 77 and count == 2
+        keys = [(r.EventType, bool(r.Event.KeyEvent.bKeyDown),
+                 r.Event.KeyEvent.wVirtualKeyCode,
+                 r.Event.KeyEvent.uChar.UnicodeChar) for r in records]
+        assert keys == [(1, True, 0x1B, "\x1b"), (1, False, 0x1B, "\x1b")]
+
+    def test_each_platform_flushes_its_own_way(self, monkeypatch):
+        """A real terminal reaches the platform's flush, by its handle on
+        Windows and by its descriptor on POSIX."""
+        import os
+
+        import main
+
+        class _Tty:
+            def isatty(self):
+                return True
+
+            def fileno(self):
+                return 5
+
+        monkeypatch.setattr(sys, "stdin", _Tty())
+        seen = []
+        if os.name == "nt":
+            import msvcrt
+            monkeypatch.setattr(msvcrt, "get_osfhandle", lambda fd: fd + 100)
+            monkeypatch.setattr(main, "_flush_console_input", seen.append)
+            main._StdinReader._flush_terminal()
+            assert seen == [105]
+        else:
+            import termios
+            monkeypatch.setattr(termios, "tcflush",
+                                lambda fd, which: seen.append((fd, which)))
+            main._StdinReader._flush_terminal()
+            assert seen == [(5, termios.TCIFLUSH)]
+
+
+def test_the_npm_launcher_lets_go_of_stdin_after_its_one_question():
+    """ROADMAP_v3 §88 (A83), TECHNICAL_DEBT 43. The launcher asks its
+    first-run consent through readline, then runs the harness under itself
+    with the console inherited. rl.close() only asks libuv to stop reading;
+    the stream is paused and unref'd in so many words after it. Measured in
+    a console of its own: five keys typed at the child all reached it,
+    before and after, three runs each -- so this pins a decision, not a
+    defect anyone saw."""
+    import pathlib
+    import re
+
+    source = (pathlib.Path(__file__).resolve().parent.parent / "bin"
+              / "venastine.mjs").read_text(encoding="utf-8")
+    body = re.search(r"function ask\(question\) \{(.*?)\n\}", source,
+                     re.S).group(1)
+    close = body.index("rl.close();")
+    assert close < body.index("process.stdin.pause();") \
+        < body.index("process.stdin.unref()") < body.index("resolve(")
 
 
 class TestTheTuiIsTheOtherReaderOfThisTerminal:

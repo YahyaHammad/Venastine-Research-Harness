@@ -150,9 +150,9 @@ def with_todos(system_prompt: str, memory: ConversationMemory) -> str:
     function feeds pass_prompt(), so a checklist written in a chat session
     would land in all ten passes of a research run the user started
     separately -- §19's K6, FOURTH instance, after §21b's memories (M13) and
-    §21c's refs (M19). Four copies of one warning is why the convergence of
-    these four functions is now a recorded deferral rather than a docstring
-    aside (J11).
+    §21c's refs (M19). Four copies of one warning made the convergence a
+    recorded deferral (J11); since batch 227 every tier is appended by
+    session_tiers, and SESSION_TIERS is the list the boundary test pins.
 
     THE MODEL IS TOLD IT OWNS THIS. Unlike a memory or a reference, which
     are context the model reads, the todo list is state the model WRITES --
@@ -180,11 +180,10 @@ def with_memories(system_prompt: str, agent=None) -> str:
     """Append §21b's durable-memory tier to a prompt. No-op when this run
     is opted out or nothing is in scope.
 
-    Beside with_goal for the same reason: both shells assemble a plain-chat
-    prompt themselves, so a single named function is what stops the CLI and
-    the TUI drifting apart. §23's response channel is where all three of
-    these (goal, skills, memories) should eventually converge into one
-    assembly point rather than three parallel ones.
+    Beside with_goal for the same reason: a single named function is what
+    stops the CLI and the TUI drifting apart. Both reach it through
+    session_tiers now (batch 227), which applies it only when no agent
+    built the prompt -- an agent's memories arrive in system_prompt_for().
 
     MUST NOT move inside prompts.system_prompts.with_catalogs() -- that
     feeds pass_prompt(), so memories would land in all ten research passes.
@@ -285,6 +284,119 @@ def with_file_mentions(system_prompt: str, memory: ConversationMemory, *,
         "no additional file access; normal tool permissions and approvals apply.\n"
         + "\n".join("- " + json.dumps(path, ensure_ascii=False) for path in paths))
     return f"{system_prompt}\n\n{fragment}"
+
+
+#: The tiers a conversation turn appends after its base prompt, in the
+#: order `session_tiers` appends them (#9, J11, A80). Each is thread or
+#: session state, so none may move inside
+#: prompts.system_prompts.with_catalogs(), which feeds pass_prompt(): §19's
+#: K6. The BASE is not a tier -- the persona and the catalogs, and for an
+#: agent its body and the project hub, which system_prompt_for() composes.
+#: tests/test_prompt_tier_boundary.py keeps a canary for every name here.
+SESSION_TIERS = ("goal", "memories", "refs", "todos", "file_mentions",
+                 "skill_bodies")
+
+
+def session_tiers(system_prompt: str, memory: ConversationMemory, *,
+                  agent_built: bool, mentions: bool = True,
+                  mention_text: str | None = None, active_skills=()) -> str:
+    """Every session tier, in SESSION_TIERS' order: the ONE assembly a
+    conversation prompt takes, in either shell (#9, J11, A80).
+
+    Three call sites assembled this by hand -- a loop turn, a TUI turn and
+    the TUI's one-shot -- in the same order, with the memories guard
+    spelled three ways. They call this now, and the guard is one argument.
+
+    `agent_built` IS THE LOAD-BEARING DIFFERENCE, and the reason this takes
+    a flag rather than making every tier conditional alike. An agent's
+    prompt got its memories inside system_prompt_for() (§21b, M13), so
+    appending them here would duplicate them. Refs, the checklist and the
+    goal are thread state, not an agent's opt-in, so an agent-built prompt
+    needs them too, and system_prompt_for() has no memory to read them
+    from (§21c, M19). Making them conditional "like the line above" is the
+    edit that looks right and drops every attached reference.
+
+    `mentions` is off for an internal compaction or review turn: its
+    source material is not a person's file-mention request (§54 AT7).
+    `mention_text` is the one-shot's message, which is not written to the
+    thread until its worker runs.
+
+    Active skill bodies go LAST on purpose (§19 K1): an activated skill is
+    the most specific instruction the user has given, and should read as
+    governing what precedes it. The CLI's arrive through
+    `run_agent_conversation` and `wake_conversation` since ROADMAP_v3 §89.
+    """
+    from skills.manager import manager as skills
+
+    prompt = with_goal(system_prompt, memory)
+    if not agent_built:
+        prompt = with_memories(prompt)
+    prompt = with_refs(prompt, memory)
+    prompt = with_todos(prompt, memory)
+    if mentions:
+        prompt = with_file_mentions(prompt, memory, text=mention_text)
+    fragment = skills.prompt_fragment(list(active_skills or ()))
+    return f"{prompt}\n\n{fragment}" if fragment else prompt
+
+
+@dataclass(frozen=True)
+class AgentTurn:
+    """What a session's active agent makes of one conversation turn."""
+
+    model: str
+    provider_name: str
+    context: Optional[ToolContext]
+    # None runs the default prompt, which the loop builds itself.
+    system_prompt: Optional[str]
+    max_steps: int
+
+
+def agent_turn(agent, model: str, provider_name: str, active_skills=(), *,
+               callable_only: bool = False, granted=None,
+               one_shot: bool = False) -> AgentTurn:
+    """§18's session-scoped agent, applied to one turn, for either shell.
+
+    An active agent supplies the system prompt, the ToolContext, and
+    model/provider/max_steps overrides; with none active the turn is the
+    default harness run (base + catalogs, built by the loop). The session
+    tiers are NOT added here -- `_conversation_prompt` adds them to
+    whichever prompt runs, which is what keeps a wake turn's prompt the
+    same as the turn it continues.
+
+    ONE COPY (ROADMAP_v3 §89). The TUI's chat turn built this inline, and
+    the CLI's `/agent` needs the same answer: an agent that pins a model
+    in one shell and not the other is two agents with one name.
+
+    `callable_only` / `granted` are `advertisement_facts`' (#68), so an
+    unattended CLI turn under an agent does not advertise gated tools it
+    cannot call -- the TUI always has a channel and passes neither.
+
+    `one_shot` is §18's /grill-me: ONE turn in the session's thread under
+    the agent's prompt, and nothing else of the agent's -- the session's
+    model and provider, no ToolContext, the default step budget. That is
+    the TUI's `run_one_shot` assembly, kept as it was and now shared.
+    """
+    if agent is None:
+        return AgentTurn(model, provider_name, None, None,
+                         config.MAX_ITERATIONS)
+    from agents.manager import manager
+
+    if one_shot:
+        prompt = manager.system_prompt_for(
+            agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
+            list(active_skills or ()),
+            callable_only=callable_only, granted=granted)
+        return AgentTurn(model, provider_name, None, prompt,
+                         config.MAX_ITERATIONS)
+    context = manager.active_context(agent)
+    model = agent.model or model
+    provider_name = agent.provider or provider_name
+    prompt = manager.system_prompt_for(
+        agent, with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
+        list(active_skills or ()), context=context,
+        callable_only=callable_only, granted=granted)
+    return AgentTurn(model, provider_name, context, prompt,
+                     agent.max_steps or config.MAX_ITERATIONS)
 
 
 def attach_ref(memory: ConversationMemory, thread_id, summary: str,
@@ -689,7 +801,7 @@ def _maybe_compact(memory, model, provider_name, notices, mode,
     yield LoopEvent(notice=notices[-1])
 
 
-def run_to_completion(gen) -> ModelResponse:
+def run_to_completion(gen, observe=None) -> ModelResponse:
     """Consumes a _run() generator fully, discarding intermediate events,
     and returns the final ModelResponse — this is what keeps
     run_agent_conversation() and continue_conversation(), the two public
@@ -700,9 +812,20 @@ def run_to_completion(gen) -> ModelResponse:
     its own value -- stream_deep_research_mode(), whose response carries
     `thread_id` attached after the loop finished -- needs the other
     question asked, and `tests/conftest.drain` is where that lives now
-    that the pass wrapper is gone."""
+    that the pass wrapper is gone.
+
+    `observe` (ROADMAP_v3 §86, A81) is handed every event as it is drawn,
+    the terminal one included, so a caller that wants the answer
+    synchronously can still draw the turn while it runs. The CLI is that
+    caller: it prints each step as it finishes, the way the replay of the
+    thread will. Discarding stays the default, and nothing here protects
+    the turn from the observer -- one that raises abandons the generator
+    exactly as an exception in any consumer would, so the observer is the
+    one that must not."""
     final = None
     for event in gen:
+        if observe is not None:
+            observe(event)
         if event.final_response is not None:
             final = event.final_response
     if final is None:
@@ -1319,6 +1442,7 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
             conduit.put(("done", None))
 
     workers = max(1, min(len(calls), config.SUBAGENT_MAX_PARALLEL))
+    abandoned = False
     with ThreadPoolExecutor(max_workers=workers,
                             thread_name_prefix="venastine-call") as pool:
         futures = []
@@ -1326,12 +1450,24 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
             futures.append(
                 (call, pool.submit(copy_context().run, _work, call)))
         outstanding = len(calls)
-        while outstanding:
-            kind, payload = conduit.get()
-            if kind == "done":
-                outstanding -= 1
-            else:
-                yield payload
+        # ABANDONED MID-BATCH, the window #215 names (batch 221). A
+        # consumer that goes away at one of these yields -- the TUI closes
+        # its generator on shutdown -- used to take every finished call's
+        # outcome with it: D20 had written their `tool_use` blocks, the
+        # tools had run, and no row answered them. So the GeneratorExit is
+        # held while the workers finish, which the pool's own exit already
+        # waited for, and every outcome is recorded in the model's order
+        # below before it is raised again. NA11 is untouched: nothing is
+        # recorded out of order, only no longer dropped.
+        try:
+            while outstanding:
+                kind, payload = conduit.get()
+                if kind == "done":
+                    outstanding -= 1
+                else:
+                    yield payload
+        except GeneratorExit:
+            abandoned = True
         for call, future in futures:
             try:
                 settled_calls.append((call, future.result(), None))
@@ -1377,21 +1513,43 @@ def _dispatch_parallel(calls, *, context, run_info, response_channel,
                     call.name, failure)})))
         else:
             ordered.append((call, outcome))
+    if abandoned:
+        # Recorded, never announced: there is nobody left to announce to,
+        # and a generator that yields after GeneratorExit is a
+        # RuntimeError. A failure to record is logged rather than raised,
+        # so it cannot replace the close the consumer asked for.
+        for call, outcome in ordered:
+            try:
+                _settle_one(call, outcome, memory, [], [])
+            except Exception:  # noqa: BLE001 -- see above
+                logger.exception("Could not record %s's result while the "
+                                 "batch was being closed", call.id)
+        raise GeneratorExit
     return ordered
 
 
-def _settle_one(call, outcome, memory, granted_calls, notices):
-    """Record and announce ONE finished call, at its turn in call order.
+def _settle_one(call, outcome, memory, granted_calls, notices) -> list:
+    """Record ONE finished call, at its turn in call order, and return the
+    events that announce it.
 
     Split out of the per-call body so both drivers reach it identically,
     and so everything that touches `memory` or the turn's shared lists
     happens on the generator's own thread in the model's own order (NA11).
     A reordered turn is a thread that will not resume: `add_tool_result`
     pairs each result to its `tool_use` by id (M4/D20).
+
+    A FUNCTION, NOT A GENERATOR, since batch 221 (#215). As a generator it
+    yielded between one call's row and the next one's, so a batch closed
+    at its first `tool_result` lost the rows of every call after it, and
+    `_dispatch_parallel` had nothing to record its finished calls with
+    once its own consumer had gone. Returning the events lets the batch
+    record every result before announcing any, and lets the abandoned path
+    record without announcing at all.
     """
     granted_calls.extend(outcome.granted)
     notices.extend(outcome.notices)
     result = outcome.result
+    events = []
 
     # §23 slice 2 (J10). A tool may attach a `notice` to its
     # result for the shell to show; it is forwarded as a
@@ -1409,7 +1567,7 @@ def _settle_one(call, outcome, memory, granted_calls, notices):
     if isinstance(result, dict) and "notice" in result:
         notice = result.pop("notice")
         if isinstance(notice, dict) and notice.get("kind"):
-            yield LoopEvent(notice=notice)
+            events.append(LoopEvent(notice=notice))
         else:
             # A malformed notice is a bug in the tool, not a
             # reason to fail the call -- the result is still
@@ -1429,7 +1587,8 @@ def _settle_one(call, outcome, memory, granted_calls, notices):
     # lines. The event carries nothing the persist needs, so
     # the order is free.
     memory.add_tool_result(call.id, result)
-    yield LoopEvent(tool_result={"id": call.id, "result": result})
+    events.append(LoopEvent(tool_result={"id": call.id, "result": result}))
+    return events
 
 
 def _finish_cancelled(memory, response, *, partial_text, unrun, reason,
@@ -1959,10 +2118,16 @@ class RunAgentLoop:
                         response_channel=response_channel, memory=memory,
                         activity=activity, cancel=cancel)
 
-                # NA11. In the MODEL'S order, whatever order they finished in.
-                for call, outcome in settled:
-                    yield from _settle_one(
-                        call, outcome, memory, granted_calls, notices)
+                # NA11. In the MODEL'S order, whatever order they finished in
+                # -- and EVERY row of the group recorded before ANY event is
+                # announced (#215, batch 221). #42's persist-before-emit
+                # held per call and not per group: a consumer gone at the
+                # first call's `tool_result` left the later calls' tools run
+                # and their rows never written.
+                announced = [event for call, outcome in settled
+                             for event in _settle_one(call, outcome, memory,
+                                                      granted_calls, notices)]
+                yield from announced
 
             # The mid-turn valve (M3). A single turn can add far more than
             # any buffer covers -- MAX_READ_CHARS alone is ~12.5k tokens
@@ -2018,6 +2183,8 @@ class RunAgentLoop:
         thread_parent_call: Optional[str] = None,
         thread_agent: Optional[str] = None,
         cancel=None,
+        observe=None,
+        active_skills=(),
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -2064,7 +2231,15 @@ class RunAgentLoop:
         thread, ignored on a resume. They are what makes a spawned run
         reachable afterwards -- without them a `▸ spawn_subagent` line
         describes a conversation nothing can find. Only the callers that
-        know they are creating a child pass them."""
+        know they are creating a child pass them.
+
+        observe (ROADMAP_v3 §86) is `run_to_completion`'s: handed every
+        event as the turn runs. The CLI passes one to print the turn live.
+
+        active_skills (§89) are the session's `/skill` activations: marked
+        in the default prompt's catalog and their bodies pinned last by
+        session_tiers (§19 K1). The TUI builds its own prompt and passes
+        none here; the CLI passes its session's."""
         if authorization is not None and granted_tools is not None:
             raise ValueError(
                 "run_agent_conversation: pass authorization= or "
@@ -2089,7 +2264,8 @@ class RunAgentLoop:
         prompt = RunAgentLoop._conversation_prompt(
             memory, system_prompt, model=model, provider_name=provider_name,
             authorization=authorization,
-            response_channel=response_channel, granted_tools=granted_tools)
+            response_channel=response_channel, granted_tools=granted_tools,
+            active_skills=active_skills)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
             else {"granted_tools": granted_tools}
@@ -2117,7 +2293,7 @@ class RunAgentLoop:
             response_channel=response_channel, activity=activity,
             cancel=cancel,
             **auth_kwargs,
-        ))
+        ), observe)
         response.thread_id = memory.thread_id
         return response
 
@@ -2278,7 +2454,8 @@ class RunAgentLoop:
     @staticmethod
     def _conversation_prompt(memory, system_prompt, *, model, provider_name,
                              authorization=None,
-                             response_channel=None, granted_tools=None) -> str:
+                             response_channel=None, granted_tools=None,
+                             active_skills=()) -> str:
         """The system prompt a conversation turn runs under -- ONE copy, for a
         turn the user started and a turn a background session's result
         started (ROADMAP_v3 §49), so a wake turn cannot run under a prompt
@@ -2290,32 +2467,20 @@ class RunAgentLoop:
         # #68, and this branch is the one an unattended CLI run takes.
         _callable_only, _granted = advertisement_facts(
             authorization, response_channel, granted_tools)
-        prompt = with_goal(
-            system_prompt
-            if system_prompt is not None
-            else system_prompts.with_catalogs(
-                with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
-                callable_only=_callable_only,
-                granted=_granted),
-            memory,
-        )
-        # §21b (M13). Only when there is no agent-built prompt: an agent
-        # run got its memories inside system_prompt_for(), and appending
-        # again here would duplicate them. `agent=None` is what makes a
-        # plain chat turn count as opted in -- see memories.manager.
-        if system_prompt is None:
-            prompt = with_memories(prompt)
-        # §21c. UNCONDITIONAL, unlike memories above: a reference belongs to
-        # the thread, not to an agent, so an agent-built prompt needs it too --
-        # and system_prompt_for() has no memory to read it from.
-        prompt = with_refs(prompt, memory)
-        # §23 slice 2. Unconditional too, and for with_refs' reason: a
-        # checklist is thread state, so an agent-built prompt needs it.
-        prompt = with_todos(prompt, memory)
-        # §54 AT7: internal compaction/review also use this wrapper, but
-        # their source material is not a person's file-mention request.
-        return (with_file_mentions(prompt, memory)
-                if memory.kind == THREAD_KIND_CHAT else prompt)
+        base = (system_prompt if system_prompt is not None
+                else system_prompts.with_catalogs(
+                    with_persona(DEFAULT_SYSTEM_PROMPT, model, provider_name),
+                    list(active_skills or ()) or None,
+                    callable_only=_callable_only,
+                    granted=_granted))
+        # A system_prompt handed in is an agent's, built by
+        # system_prompt_for(); see session_tiers for why that decides the
+        # memories. §54 AT7: internal compaction and review also use this
+        # wrapper, and their source is not a person's file mention.
+        return session_tiers(base, memory,
+                             agent_built=system_prompt is not None,
+                             mentions=memory.kind == THREAD_KIND_CHAT,
+                             active_skills=active_skills)
 
     @staticmethod
     def wake_conversation(
@@ -2335,6 +2500,8 @@ class RunAgentLoop:
         authorization=None,
         activity=None,
         cancel=None,
+        observe=None,
+        active_skills=(),
     ) -> ModelResponse:
         """A turn started by the HARNESS in an existing thread: a background
         session's result, delivered as a harness-written user row
@@ -2358,6 +2525,9 @@ class RunAgentLoop:
         denied for a reason that is about the harness rather than the
         request, which is the silent-stripping failure §25 records.
 
+        `observe` is `run_agent_conversation`'s (§86): the CLI's wait loop
+        prints a wake turn live exactly as it prints the user's own.
+
         NOT a second `_run`. tests/test_grants.py walks this module for
         exactly one function by that name, and this is a wrapper over it.
         """
@@ -2373,7 +2543,8 @@ class RunAgentLoop:
         prompt = RunAgentLoop._conversation_prompt(
             memory, system_prompt, model=model, provider_name=provider_name,
             authorization=authorization,
-            response_channel=response_channel, granted_tools=granted_tools)
+            response_channel=response_channel, granted_tools=granted_tools,
+            active_skills=active_skills)
         auth_kwargs = (
             _authorization_kwargs(authorization) if authorization is not None
             else {"granted_tools": granted_tools}
@@ -2390,6 +2561,6 @@ class RunAgentLoop:
             response_channel=response_channel, activity=activity,
             cancel=cancel,
             **auth_kwargs,
-        ))
+        ), observe)
         response.thread_id = memory.thread_id
         return response

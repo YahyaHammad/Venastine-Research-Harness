@@ -208,6 +208,14 @@ class TestTheDescriptionsComeFromTheSchema:
         assert config_edit.find("compaction_trigger_fraction").values == (
             "number from 0 to 1")
 
+    def test_a_closed_range_and_a_non_empty_text_say_so(self):
+        """#213's two shapes, read off the constraints like the rest: the
+        panel offers what the schema now refuses, not a lax `int` or `text`."""
+        assert config_edit.find("ssh_port").values == (
+            "whole number from 1 to 65535")
+        assert config_edit.find("db_path").values == "text, not empty"
+        assert config_edit.find("workspace_dir").values == "text"
+
     def test_a_container_says_so_and_is_not_settable(self):
         row = config_edit.find("domain_authority_suffixes")
         assert row.kind == "container"
@@ -307,7 +315,9 @@ class TestTheRoundTripIsLossless:
         # table (IM1, IM7).
         # 150 since batch 208: `mcp_max_event_bytes`, the ceiling mcp 2.3.0
         # puts on one Streamable HTTP event.
-        assert touched == 150, f"{touched} settable scalars, expected 150"
+        # 152 since batch 221: `init_max_hub_chars` and
+        # `init_diff_shown_lines`, /init's bounds on the existing hub (#226).
+        assert touched == 152, f"{touched} settable scalars, expected 152"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

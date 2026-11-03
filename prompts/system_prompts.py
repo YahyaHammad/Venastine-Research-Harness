@@ -237,7 +237,7 @@ def with_catalogs(base_prompt: str, active_skills=None, context=None,
     feeds pass_prompt(), so anything added inside it lands in all ten
     research passes; a skill the user activated in a TUI chat session has
     no business governing a pipeline run they started separately. Bodies
-    are pinned by the shell, next to its with_goal() call, via
+    are pinned after it, as the last of core.loop.session_tiers(), via
     skills.manager.prompt_fragment(). `active_skills` reaches only as far
     as the catalog, where it marks entries rather than expanding them.
 

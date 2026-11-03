@@ -17,7 +17,7 @@ manager, which holds no state of its own (K3).
 
 from agents.manager import manager as agents
 from skills.manager import manager as skills
-from tui.commands import SlashCommand
+from tui.commands import bind
 from tui.commands import registry as commands
 
 
@@ -107,6 +107,4 @@ def _cmd_skill(app, args: str) -> None:
 def register_skill_commands() -> None:
     """Idempotent -- registering by name overwrites, matching §16's
     register_builtin_commands() and §18's register_agent_commands()."""
-    commands.register(SlashCommand(
-        "skill", "activate a skill for this session", _cmd_skill,
-        "[name|off <name>|clear]"))
+    commands.register(bind("skill", _cmd_skill))

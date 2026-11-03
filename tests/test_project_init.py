@@ -1146,6 +1146,32 @@ class TestDiscovery:
                                                 encoding="utf-8")
         assert "providers.json" not in manifest.build_manifest(str(project))
 
+    @pytest.mark.parametrize("name", [
+        "id_rsa", "id_ed25519", "ID_ECDSA", "deploy-key.pem", "api.key",
+        "secret.KEY", "client.p12", "signing.pfx", "putty.ppk",
+        "release.jks", "app.keystore",
+    ])
+    def test_the_manifest_hides_key_material_by_its_conventional_name(
+            self, project, name):
+        """#227. The layout's only screen used to be five store names and
+        `.env*`, while its comment claimed every credential filename -- so
+        an SSH key or a certificate's private half was named to the model
+        (never read: none of these is a readable extension). One case per
+        shape, and the case folds as the read denylist does."""
+        (project / name).write_text("x\n", encoding="utf-8")
+        assert name not in manifest.build_manifest(str(project))
+
+    def test_a_public_key_and_an_ordinary_file_are_still_listed(
+            self, project):
+        """The control: a screen that hid everything would pass the cases
+        above. `id_rsa.pub` is a public key, and `keys.py` merely mentions
+        one."""
+        for name in ("id_rsa.pub", "keys.py", "pem_notes.md"):
+            (project / name).write_text("x\n", encoding="utf-8")
+        text = manifest.build_manifest(str(project))
+        for name in ("id_rsa.pub", "keys.py", "pem_notes.md"):
+            assert name in text
+
     def test_the_manifest_is_stable_across_runs(self, project, monkeypatch):
         """Byte-identical input is what makes /init's output diffable.
 
@@ -1468,6 +1494,63 @@ class TestGenerating:
             "# Widget\n\nHAND WRITTEN NOTE.\n", encoding="utf-8")
         _generate()
         assert "HAND WRITTEN NOTE." in fake_agent[0]["user_goal"]
+
+    def test_a_hub_past_the_cap_stops_before_any_model_call(
+            self, project, fake_agent, monkeypatch):
+        """#226, batch 221. The reply REPLACES the hub, so a model shown its
+        head would write it back without its tail -- the owner chose a
+        refusal over head-plus-notice. Nothing is sent and nothing moves."""
+        monkeypatch.setattr(config, "INIT_MAX_HUB_CHARS", 100)
+        hub = project / "AGENTS.md"
+        hub.write_text("# Widget\n" + "x" * 200 + "\n", encoding="utf-8")
+        before = hub.read_bytes()
+
+        with pytest.raises(generator.InitError,
+                           match="more than /init revises") as caught:
+            _generate()
+
+        assert "210 characters" in str(caught.value), caught.value
+        assert fake_agent == []
+        assert hub.read_bytes() == before
+
+    def test_one_far_past_the_cap_is_refused_before_it_is_read(
+            self, project, fake_agent, monkeypatch):
+        """In bytes, before the read: four bytes per UTF-8 character makes
+        `size > 4 * cap` a safe refusal without holding the file."""
+        monkeypatch.setattr(config, "INIT_MAX_HUB_CHARS", 100)
+        (project / "AGENTS.md").write_text("y" * 500, encoding="utf-8")
+        reads = []
+        real = generator.read_regular_text
+        monkeypatch.setattr(generator, "read_regular_text",
+                            lambda path: reads.append(path) or real(path))
+
+        with pytest.raises(generator.InitError, match="500 bytes"):
+            _generate()
+
+        assert reads == [] and fake_agent == []
+
+    def test_a_hub_at_the_cap_is_revised_as_before(self, project, fake_agent,
+                                                   monkeypatch):
+        monkeypatch.setattr(config, "INIT_MAX_HUB_CHARS", 100)
+        (project / "AGENTS.md").write_text("z" * 100, encoding="utf-8")
+
+        _generate()
+
+        assert "z" * 100 in fake_agent[0]["user_goal"]
+
+    def test_a_long_diff_is_cut_with_a_line_saying_so(self, monkeypatch):
+        """#226's other half: only the PRINT is cut. Under the cap the
+        diff is shown byte for byte."""
+        monkeypatch.setattr(config, "INIT_DIFF_SHOWN_LINES", 3)
+        diff = "".join(f"+line {i}\n" for i in range(10))
+
+        shown = generator._shown(diff)
+
+        assert shown.splitlines()[:3] == ["+line 0", "+line 1", "+line 2"]
+        assert "7 more line(s) of the diff are not shown (3 of 10" in shown
+        assert "+line 3" not in shown
+        short = "".join(f"+line {i}\n" for i in range(3))
+        assert generator._shown(short) == short
 
     def test_the_run_is_labelled_as_a_subagent_thread(self, project,
                                                       fake_agent):

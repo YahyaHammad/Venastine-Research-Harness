@@ -55,6 +55,7 @@ import os
 import platform
 import subprocess
 import sys
+import tempfile
 from typing import Optional
 
 import config
@@ -69,7 +70,9 @@ MARKER = "@@VENASTINE_RESULT@@"
 
 # Bounded on the CHILD side, where the size is known before anything is
 # written, and re-checked here. #55's own rule -- bound the read, do not
-# slice afterwards -- applied to the mechanism that fixes #55. The value
+# slice afterwards -- applied to the mechanism that fixes #55. That bounds
+# the RESULT; the TRANSPORT carrying it was unbounded until batch 221
+# (#204), and `run_isolated` says how it is bounded now. The value
 # is generous next to what a math tool can actually return: CPython caps
 # int->str at 4300 digits, so the realistic ceiling is far below this and
 # the check is for the pathological case rather than the ordinary one.
@@ -158,6 +161,13 @@ def _resource_limits():
     def _set_limits():
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
         resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+        # The child's stdout and stderr are files since batch 221 (#204),
+        # so what it may write to either is capped here: the result bound
+        # twice over, which a well-behaved child never approaches. Past it
+        # a write fails (CPython ignores SIGXFSZ) and the call reports no
+        # usable result. Windows has no rlimit; the wall clock bounds it.
+        file_bytes = 2 * MAX_CHILD_OUTPUT_BYTES
+        resource.setrlimit(resource.RLIMIT_FSIZE, (file_bytes, file_bytes))
 
     return _set_limits
 
@@ -182,17 +192,21 @@ def _limit_message(tool_name: str, timeout: float) -> str:
 
 
 def _interpret(tool_name: str, stdout: str, stderr: str, returncode: int,
-               timeout: float) -> dict:
+               timeout: float, stdout_bytes: Optional[int] = None) -> dict:
     """Turn what the child said into the dict dispatch expects.
 
     Every branch returns rather than raises. dispatch's own containment
     would convert an exception into an error dict anyway, but it would log
     a traceback with it -- and an oversized factorial is an ordinary thing
     for a model to ask for, not a bug in this harness.
+
+    `stdout_bytes` is the size the child WROTE, which `stdout` no longer
+    holds whole since batch 221: the parent reads only the bound plus one.
     """
-    if len(stdout) > MAX_CHILD_OUTPUT_BYTES:
+    size = len(stdout) if stdout_bytes is None else stdout_bytes
+    if size > MAX_CHILD_OUTPUT_BYTES:
         return {"error": f"{tool_name} produced more output than can be "
-                         f"returned ({len(stdout)} bytes). Ask for a smaller "
+                         f"returned ({size} bytes). Ask for a smaller "
                          f"result."}
 
     for line in stdout.splitlines():
@@ -265,34 +279,68 @@ def run_isolated(handler, params: dict, timeout: float,
     if platform.system() != "Windows":
         popen_kwargs["preexec_fn"] = _resource_limits()
 
-    try:
-        child = subprocess.run(
-            [sys.executable, "-m", "tools.isolation"],
-            input=request,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            cwd=_package_root(),
-            env=_child_env(),
-            **popen_kwargs,
-        )
-    except subprocess.TimeoutExpired:
-        # subprocess.run has already killed the child and reaped it, which
-        # is the property that makes this a bound rather than a report.
-        #
-        # On Unix the CPU limit usually gets there first and this branch
-        # never runs -- see _interpret's negative-returncode case, which
-        # shares this wording rather than repeating it.
-        return {"error": _limit_message(tool_name, timeout)}
-    except OSError as e:
-        logger.warning("Could not start an isolated child for %s: %s",
-                       tool_name, e)
-        return {"error": f"{tool_name} could not be run: {e}"}
+    # THE TRANSPORT IS BOUNDED TOO, since batch 221 (#204). The 4 MB bound
+    # is the child's, on the result it prints; `capture_output` then held
+    # EVERYTHING the child wrote -- progress spam, a warning flood, a giant
+    # traceback, ordinary misbehaviour for the calls this module contains --
+    # in the parent's memory until the wall clock fired. Temporary files
+    # take the pipes' place, the parent reads at most the bound from one and
+    # a tail from the other, and on POSIX `_resource_limits` caps what the
+    # child may write to either. No thread reads anything (H2).
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            child = subprocess.run(
+                [sys.executable, "-m", "tools.isolation"],
+                input=request.encode("utf-8"),
+                stdout=out,
+                stderr=err,
+                timeout=timeout,
+                cwd=_package_root(),
+                env=_child_env(),
+                **popen_kwargs,
+            )
+        except subprocess.TimeoutExpired:
+            # subprocess.run has already killed the child and reaped it,
+            # which is the property that makes this a bound rather than a
+            # report.
+            #
+            # On Unix the CPU limit usually gets there first and this
+            # branch never runs -- see _interpret's negative-returncode
+            # case, which shares this wording rather than repeating it.
+            return {"error": _limit_message(tool_name, timeout)}
+        except OSError as e:
+            logger.warning("Could not start an isolated child for %s: %s",
+                           tool_name, e)
+            return {"error": f"{tool_name} could not be run: {e}"}
+        stdout, stdout_bytes = _head(out, MAX_CHILD_OUTPUT_BYTES + 1)
+        stderr = _tail(err, 4 * _STDERR_EXCERPT)
 
-    return _interpret(tool_name, child.stdout, child.stderr,
-                      child.returncode, timeout)
+    return _interpret(tool_name, stdout, stderr, child.returncode, timeout,
+                      stdout_bytes=stdout_bytes)
+
+
+def _head(handle, limit: int) -> tuple:
+    """(the first `limit` bytes of `handle` as text, its whole size)."""
+    size = os.fstat(handle.fileno()).st_size
+    handle.seek(0)
+    # min(), because read(n) allocates n bytes up front: 4 MB for a result
+    # of forty, which the tracemalloc test below measured.
+    return _text(handle.read(min(limit, size))), size
+
+
+def _tail(handle, limit: int) -> str:
+    """The last `limit` bytes of `handle` as text: the only part of the
+    child's stderr anything reads is the end of it."""
+    size = os.fstat(handle.fileno()).st_size
+    handle.seek(max(0, size - limit))
+    return _text(handle.read())
+
+
+def _text(raw: bytes) -> str:
+    """Decoded as the text-mode pipes decoded it: UTF-8 with replacement,
+    and universal newlines, so a Windows child's \\r\\n reads as \\n."""
+    return (raw.decode("utf-8", errors="replace")
+            .replace("\r\n", "\n").replace("\r", "\n"))
 
 
 def _child_main() -> int:

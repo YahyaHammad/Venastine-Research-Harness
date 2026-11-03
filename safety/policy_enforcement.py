@@ -649,6 +649,33 @@ def redact_output_text(text: str) -> str:
     return redact_diagnostic_text(text)
 
 
+#: What a credential is spelled with: base64 and base64url, hex, and the
+#: separators vendor tokens use. A run of these that a cut splits is the
+#: fragment the cut drops, because the redactor runs after the cut and
+#: cannot match half a token. Punctuation that no token contains -- quotes,
+#: `:`, `@`, braces, commas -- ends a run, so a cut through minified JSON
+#: costs one value and not the whole line. Two cuts take it: a shell
+#: session's dropped middle (A72) and an MCP result's bound (A79).
+TOKEN_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-+/=.~")
+
+
+def fragment_end(head: str) -> int:
+    """Where the token-character run that ends *head* begins."""
+    i = len(head)
+    while i and head[i - 1] in TOKEN_CHARS:
+        i -= 1
+    return i
+
+
+def fragment_start(tail: str) -> int:
+    """Where the token-character run that starts *tail* ends."""
+    i = 0
+    while i < len(tail) and tail[i] in TOKEN_CHARS:
+        i += 1
+    return i
+
+
 
 # How much of one tool parameter reaches a digest, and how much of the whole
 # digest reaches a consumer. A sidebar is 22 columns and a transcript line

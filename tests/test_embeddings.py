@@ -77,7 +77,7 @@ def fake_client(mocker):
 
 
 # ---------------------------------------------------------------------------
-# The three ways a successful response is still unusable
+# The four ways a successful response is still unusable
 # ---------------------------------------------------------------------------
 
 class TestAWrongAnswerIsWorseThanAnError:
@@ -109,6 +109,22 @@ class TestAWrongAnswerIsWorseThanAnError:
         this claim' and is indistinguishable from a real finding."""
         fake_client(_FakeOpenAI(_openai_response([[], []])))
         with pytest.raises(EmbeddingError, match="empty embeddings"):
+            embed_texts("OPENAI", "m", ["a", "b"])
+
+    @pytest.mark.parametrize("bad", [
+        ["a", "b"], [None, 1.0], [True, 1.0], [float("nan"), 1.0],
+        [float("inf"), 1.0], "abc",
+    ], ids=["strings", "none", "bool", "nan", "inf", "a-string-vector"])
+    def test_a_component_that_is_not_a_finite_number_raises(
+            self, fake_client, bad):
+        """The fourth (batch 219, #218). Strings and None used to raise
+        TypeError in `l2_normalize`, past every handler, and fail a run that
+        had already scored; NaN and inf raised nothing and scored NaN. An
+        EmbeddingError is what the scorer already gives up on. (A MISSING
+        vector never got this far: `list(None)` raises inside the provider
+        call's own handler, which already wraps it.)"""
+        fake_client(_FakeOpenAI(_openai_response([bad, [1.0, 2.0]])))
+        with pytest.raises(EmbeddingError, match="not all finite numbers"):
             embed_texts("OPENAI", "m", ["a", "b"])
 
 

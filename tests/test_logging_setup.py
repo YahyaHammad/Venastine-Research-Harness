@@ -190,6 +190,43 @@ def test_configure_logging_falls_back_on_bad_log_path(mocker, capsys):
         handler.close()
 
 
+class TestABadLogLevelWarnsLikeABadLogPath:
+    """#212, batch 219. The two env vars `configure_logging` reads used to
+    disagree about what a mistake costs: an unwritable AGENT_LOG_FILE warned
+    and continued, while AGENT_LOG_LEVEL=verbose raised before anything
+    could log, so startup was one traceback. Both warn now."""
+
+    def test_a_typo_in_the_variable_warns_and_runs_at_info(
+            self, _clean_root, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("AGENT_LOG_LEVEL", "verbose")
+
+        configure_logging(log_file=str(tmp_path / "app.log"), stderr=False)
+
+        assert logging.getLogger().level == logging.INFO
+        err = capsys.readouterr().err
+        assert "AGENT_LOG_LEVEL='verbose' is not a logging level" in err
+        assert "logging at INFO" in err
+
+    @pytest.mark.parametrize("value, level", [
+        ("20", logging.INFO), ("debug", logging.DEBUG), ("warn", logging.WARNING)])
+    def test_a_name_or_a_number_is_taken_without_a_word(
+            self, _clean_root, tmp_path, monkeypatch, capsys, value, level):
+        monkeypatch.setenv("AGENT_LOG_LEVEL", value)
+
+        configure_logging(log_file=str(tmp_path / "app.log"), stderr=False)
+
+        assert logging.getLogger().level == level
+        assert "AGENT_LOG_LEVEL" not in capsys.readouterr().err
+
+    def test_a_bad_level_handed_in_by_code_still_raises(
+            self, _clean_root, tmp_path):
+        """Only the ENVIRONMENT is forgiven. A caller passing `level=` is
+        code, and a wrong value there is a bug to see, not a typo."""
+        with pytest.raises(ValueError):
+            configure_logging(level="verbose",
+                              log_file=str(tmp_path / "app.log"), stderr=False)
+
+
 # ---------------------------------------------------------------------------
 # ---- #132: the log was the fourth sink -------------------------------------
 # ---------------------------------------------------------------------------

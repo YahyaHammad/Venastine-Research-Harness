@@ -19,8 +19,9 @@ every shell gets it. That distinction is what §25 was about.
 
 import pytest
 
+from core.compaction import parse_compact_args as _parse_compact_args
 from tests.conftest import settle
-from tui.app import VenastineApp, _cmd_compact, _parse_compact_args
+from tui.app import VenastineApp, _cmd_compact
 
 # ---------------------------------------------------------------------------
 # ---- The CLI route ---------------------------------------------------------

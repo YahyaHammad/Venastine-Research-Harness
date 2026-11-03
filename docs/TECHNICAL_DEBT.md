@@ -393,7 +393,7 @@ again. The pin lives in test_load_skill.py
 test_config_loader.py's own `_redirect_roots` is autouse and points HARNESS_ROOT
 at an empty dir — exactly the state the pin exists to forbid.
 
-## 11. Two provider facts about sampling parameters are unverified (open, needs network)
+## 11. Two provider facts about sampling parameters are unverified (closed, batch 229 -- answered from the providers' documentation, ROADMAP_v3 §87, A82)
 
 Found while redesigning ROADMAP §10's ensemble mode. Both are recorded rather
 than resolved because neither can be settled offline, and neither blocks
@@ -445,6 +445,21 @@ this file's rule is that an entry is evidence rather than instruction, and
 batches 126 and 127 each found one wrong about its own defect. This one is
 accurate. Neither half can be settled offline, so it stays open for the reason
 it was filed.
+
+**CLOSED (batch 229, #6, ROADMAP_v3 §87, A82).** Checked against the
+providers' own documentation on 2026-11-03, since no live key is set here.
+(a) is right: the default is 1.0 on Gemini 3 by Google's guide, and on OpenAI
+by the posts quoting its reference (the page itself refused the fetch), so
+the deleted constant was a no-op there. (b) is right and worse than this
+entry said: OpenAI's rule is "When reasoning effort is not `none`, remove
+`temperature`, `top_p`, and `top_logprobs`", and the harness ships effort
+`high`, so the guard would have let a 400 through on every OpenAI reasoning
+model, not only `gpt-5.1`. The owner chose to follow the rule rather than
+list names: on `OPENAI`, `_sampling_kwargs` drops a temperature whenever the
+effort being sent is not `none`. The measurement found a third fact: Gemini
+3.6 Flash and 3.5 Flash-Lite silently IGNORE the parameters, and Google says
+every later Gemini will; those two are now in the set. The negative result
+this entry asked to be written down is written down, in §87.
 
 ---
 
@@ -896,7 +911,7 @@ defect found.
   asserts and production carries zero (measured). If production ever
   gains an `assert`, that skip starts hiding exactly what it is for.
 
-## 19. `with_goal` uncounted in the `with_*` tier convergence (open, deferred 2026-09-10)
+## 19. `with_goal` uncounted in the `with_*` tier convergence (closed, batch 227 -- six tiers, one assembly, ROADMAP_v3 §85, A80)
 
 `core/loop.py` assembles five prompt tiers outside `with_catalogs()`
 (`with_goal`, `with_catalogs`, `with_memories`, `with_refs`, `with_todos`),
@@ -963,6 +978,18 @@ of the four carries a `MUST NOT move inside prompts.system_prompts.with_catalogs
 docstring naming its own instance, and `memories/manager.py:24`,
 `skills/manager.py:119` and `project_init/manifest.py:20` repeat it from the
 other side.
+
+**CLOSED (batch 227, #9, ROADMAP_v3 §85, A80).** The owner answered the
+question this entry was waiting on: a tier is thread or session state, and
+there are six -- goal, memories, refs, todos, file mentions and active skill
+bodies. The persona joins the base, with the catalogs, an agent's body and the
+project hub. `core.loop.session_tiers` appends the six at all three call sites
+(a loop turn, a TUI turn, the TUI's one-shot), and the memories guard, spelled
+three ways, is one `agent_built` argument. The tier pin this entry deferred is
+`TIER_CANARY` in `test_prompt_tier_boundary.py`, which must name exactly
+`SESSION_TIERS`; the canary table gained the persona and a file mention. The
+AGENTS bullet and the J11 row moved together, as this entry asked, and
+"FOURTH instance" stays: it counts the numbered K6 instances, not tiers.
 
 ## 20. Restart-required config editor (closed, batch 84)
 
@@ -2534,7 +2561,7 @@ docstring rather than left to be discovered. Cost: one extra
 **0.065ms per step** of a research run in absolute ones, against **4.696ms**
 for one ordinary tool result's redaction pass.
 
-## 43. The npm launcher reads stdin on first run, then waits with the console inherited (open)
+## 43. The npm launcher reads stdin on first run, then waits with the console inherited (closed, batch 230 -- paused and unref'd, measured harmless both ways, ROADMAP_v3 §88, A83)
 
 `bin/venastine.mjs` opens a Node `readline` on `process.stdin` for the
 first-run install consent (`ask()`, line 194), then runs the harness under
@@ -2566,7 +2593,16 @@ reviewer of the harness's own shells can name this and nothing more. Item 49
 is the fourth instance of the same one-reader-at-a-time property (§29 N1), on
 the sandbox's one-shot executors.
 
-## 44. `ask()`'s drain can only drop what the pump already took (open)
+**CLOSED (batch 230, ROADMAP_v3 §88, A83).** Measured the way this entry
+prescribed: the launcher's three calls reproduced in a console of its own,
+with a child reading the console as Textual's EventMonitor does and five keys
+injected with `WriteConsoleInputW` after the consent. All five reached the
+child in three runs as shipped and three with the fix, so "probably benign"
+held. The owner chose to fix it anyway and measure: `ask()` calls
+`process.stdin.pause()` and `unref()` after `rl.close()`, and a test pins
+the order.
+
+## 44. `ask()`'s drain can only drop what the pump already took (closed, batch 230 -- the terminal is flushed first, ROADMAP_v3 §88, A83)
 
 `ask()` drops stale input before each gated prompt, because "a line typed
 after a question timed out was an answer to THAT question". It does that
@@ -2595,7 +2631,18 @@ is untouched. Nothing to add -- and item 49 now cites this entry for the half
 it explains: a one-shot child reading the terminal directly is consuming input
 the drain was never able to reach.
 
-## 45. A view policy module in `core/` that only one shell reads (open)
+**CLOSED (batch 230, ROADMAP_v3 §88, A83).** Measured with the line typed
+BEFORE the prompt, as this entry asked, and with half a line: on a Windows
+console a whole line typed before the first question answered it (3/3), and
+on both platforms half a line typed before a question, or between two, became
+the front of the answer ("sta" + "fresh"). The owner chose the flush this
+entry named, and `tcflush` cleared every case on POSIX. On Windows
+`FlushConsoleInputBuffer` did not clear the half line a cooked read already
+in progress held, so the owner added one Escape key after it, which conhost's
+cooked read takes as "clear the line"; measured clean in every case on both
+platforms, with a line typed after the prompt still answering it.
+
+## 45. A view policy module in `core/` that only one shell reads (closed, batch 231 -- the CLI's `/call` reads both, ROADMAP_v3 §89, A84)
 
 Found while building ROADMAP_v3 §55 (TR14), and PRE-EXISTING: it is §49's,
 not this batch's.
@@ -2646,6 +2693,19 @@ no CLI route to a session view, live or rebuilt. Two things to add:
   the CLI side needs no new data, only a surface. That narrows "designing what
   a CLI session view IS" to the question of the command, which is what this
   entry says the real cost is.
+
+**CLOSED (batch 231, with #8, ROADMAP_v3 §89, A84).** The surface is a slash
+command, now that the CLI has slash commands: the owner chose `/call`, which
+lists the thread's tool calls numbered (off `core.replay.tool_lines`, the lines
+a replay prints) and `/call N` opens one. It routes as the TUI's
+`on_call_selected` does -- a session's call shows `live_entries` while this
+process holds the session and `stored_entries` once it does not, a spawn
+prints the run it started, and anything else, or either of those whose target
+cannot be found, shows `call_entries`. As this entry's recheck predicted, no
+new data was needed. `main.py` still imports neither module: the CLI's
+commands are `cli_commands.py`, which does. So both policy modules now have
+two shells reading them, which is the convention made true rather than
+argued.
 
 ## 46. `check_output_policy`'s walk bounds depth and not breadth (closed, batch 127 -- breadth is the wrong axis)
 
@@ -2738,7 +2798,7 @@ since batch 117 -- a table row for the category case, a direct test beside
 asserting the RULE over both lists so that fixing one and not the other
 fails. That third test is the one this item would have been caught by.
 
-## 48. An MCP result has no size bound of any kind (open)
+## 48. An MCP result has no size bound of any kind (closed, batch 225 -- cut at `max_read_chars`, ROADMAP_v3 §84, A79)
 
 Found while measuring item 46, and PRE-EXISTING: it is §17's, not batch
 127's.
@@ -2843,6 +2903,20 @@ bound; and 16 MiB is a transport ceiling, about 335 times `max_read_chars`,
 not a bound on what reaches the model. The total-size bound in
 `_normalize` that this entry prescribes is still the fix.
 
+**CLOSED (batch 225, ROADMAP_v3 §84, A79), with the bound this entry
+prescribes: on the total, in `_normalize`, before either key is filled.** The
+owner chose to cut rather than refuse, and `max_read_chars` rather than a new
+key. Re-measured first: 10 MB of text, of structured content and of an error
+message each went through whole, and the redaction pass took 1.2-2.5 s over
+them, up from this entry's 93 ms for 8 MB. The text is cut with a note giving
+the size it had; a structured payload is kept whole if it fits in what the
+text left and dropped with a note if not; a word the cut splits goes too
+(A72's rule, now shared from `safety/policy_enforcement.py`). The SDK
+measurement this entry asked for, taken against mcp 2.3.0's own server: a
+string result arrives as text AND as `{"result": <the text>}`, so the note
+says when a dropped payload only repeated the text. The same four results now
+come back at 126-258 characters, redacted in under a millisecond.
+
 # The review marathon's deferred findings (items 49-86)
 
 `docs/REVIEW_MARATHON.md` scoped a pre-merge review of `navigable-agents` into
@@ -2934,7 +3008,7 @@ decision).
 
 **CLOSED (batch 213), with the shape above.** `_run_inert`'s `subprocess.run` and the container one-shot's `Popen` in `_run_docker` pass `stdin=subprocess.DEVNULL`, as `_run_subprocess_fallback` has since batch 142, so every one-shot route gives a child no console now; a session still gets its own `PIPE`. `test_the_inert_route_is_given_no_console` and `test_the_container_one_shot_is_given_no_console` assert the argument on the real call, the way batch 142's fallback test does. A real `cat` run under pytest was not used as the test: in an xdist worker the inherited stdin is execnet's pipe, so the negative control would read the worker's own channel. AGENTS.md's "recorded, not changed" line and ROADMAP_v3 SS70 say it is closed.
 
-## 50. `run_isolated` buffers the child's whole output before bounding it (open, deferred batch 138)
+## 50. `run_isolated` buffers the child's whole output before bounding it (closed, batch 221)
 
 **Issue:** #204.
 
@@ -2965,6 +3039,8 @@ read. `tools/isolation.py` only.
 
 **Not:** lowering `MAX_CHILD_OUTPUT_BYTES` (the result bound is correct);
 thread-based collection (the module's process decision, H2, stands).
+
+**CLOSED (batch 221), the first shape above, on the owner's choice.** `run_isolated` gives the child two temporary files instead of pipes and reads at most the result bound plus one byte from stdout -- `min(limit, size)`, because `read(n)` allocates `n` up front, which the test measured as 4 MB held for a forty-byte result -- and the last 1,600 bytes of stderr. On POSIX `_resource_limits` adds `RLIMIT_FSIZE` at twice the result bound, so a flood fails its own writes. On Windows the clock is still the only bound, now on disk rather than in memory. No thread reads anything (H2), and ROADMAP_v2's H3 row is amended. Measured with tracemalloc: a child writing 6 MB of stderr held 12.6 MB in the parent before and stays under 3 MB after; on Linux a 16 MB flood is stopped with "did not return a usable result". The module comment that said the size was bounded "on the CHILD side" now says which half that was.
 
 ## 51. A session's refused credential is never quarantined (closed, batch 160 -- the session manager hands the exit to the quarantine)
 
@@ -3109,7 +3185,7 @@ names, where the documented latency tradeoff stands; any change to
 
 **CLOSED (batch 213), the behaviour half.** `is_url_permitted(resolve=False)` now asks the resolver with `AI_NUMERICHOST` when `ipaddress` cannot read the host: that flag reads a number and never looks anything up, so the reason `resolve=False` exists -- no DNS per search hit -- still holds. Measured on Windows and in WSL: `2130706433`, `0x7f.0.0.1`, `0x7F000001`, `127.1`, `0177.0.0.1`, `017700000001`, `2852039166` and `0xa9fea9fe` all parse, to 127.0.0.1 or 169.254.169.254, and `example.com`, `localhost`, `999.1.1.1` and `127.0.0.1.` fail with `gaierror` and stay names. Seven spellings are refused through `is_url_permitted`, #207's three are dropped through `web_search._normalize`'s real filter, `134744072` (8.8.8.8) still passes as the control, and the two no-DNS tests now allow a numeric read and refuse a lookup. Without the fix, 10 of the 11 new tests fail; the eleventh is the control. web_search's comment says "every spelling" again, and is true this time.
 
-## 54. `probability_stats._build_distribution` is dead and is a second answer (open, deferred batch 138)
+## 54. `probability_stats._build_distribution` is dead and is a second answer (closed, batch 223)
 
 **Issue:** #208.
 
@@ -3130,6 +3206,8 @@ it is `_build_distribution_with_warnings(...)[0]`.
 
 **Not:** changing the defaults, the warning strings, or
 `_build_distribution_with_warnings`' signature.
+
+**CLOSED (batch 223), the shape above.** `_build_distribution` is deleted, and `_build_distribution_with_warnings` is the one builder; its docstring says why and that a caller wanting no warnings takes `[0]`. No test: nothing called the dead copy, so nothing could have failed.
 
 ## 55. `**`-unpacking is admitted by the math node allowlist (closed, batch 160 -- refused by the guard)
 
@@ -3175,7 +3253,7 @@ a double that fails if evaluation runs. `ast.keyword` stays listed, as the entry
 advised, and the closure argument in `AGENTS.md` names the one shape that is
 recognised rather than unlisted.
 
-## 56. Nothing imports `env_secrets`, so `.env` is read by nothing (open, deferred batch 138)
+## 56. Nothing imports `env_secrets`, so `.env` is read by nothing (closed, batch 223)
 
 **Issue:** #210.
 
@@ -3215,6 +3293,8 @@ the second is actually wanted.
 bandit baseline entry and by two pinned tests in `tests/test_credentials.py`
 whose own `tests/BREAKING_CHANGES.md:2826` row explains what reverting them
 re-breaks; and the `usecwd=True` fix it carries is correct and worth keeping.
+
+**CLOSED (batch 223), the first answer above, on the owner's choice.** The three present-tense claims now say `.env` is for a future tool: AGENTS.md's credentials paragraph, PRIVACY.md's local-storage row, and `.env.example`, which now opens by saying no shipped tool reads it and that a key put there is stored for nothing. PRIVACY's deletion section names `.env`. The module, its `usecwd=True` fix and its two pinned tests are unchanged.
 
 ## 57. `env_secrets` turns an untrusted `.env` into process environment at import (closed, batch 160 -- read, never loaded)
 
@@ -3276,7 +3356,7 @@ also asserts that importing and reading wrote none of three decoys into the
 environment, which the old import did. Whether `.env` joins D17's content hash
 was left where this entry left it.
 
-## 58. One env-var misconfiguration warns and the other raises (open, deferred batch 138)
+## 58. One env-var misconfiguration warns and the other raises (closed, batch 219)
 
 **Issue:** #212.
 
@@ -3315,7 +3395,9 @@ environment variable costs.
 
 **Not:** having `configure_logging` validate anything else.
 
-## 59. The config schema checks shape where fitness also matters, unevenly (open, deferred batch 138)
+**CLOSED (batch 219), with the shape above, on the owner's choice.** `_resolve_level` catches the `ValueError` for a value read from `AGENT_LOG_LEVEL`, prints one stderr line naming the variable, the value and the accepted forms, and returns INFO, as the `OSError` branch does for `AGENT_LOG_FILE`. A bad `level=` passed in by code still raises, because that is a bug rather than a typo. README's "garbage is a startup error" sentence says what happens now. `TestABadLogLevelWarnsLikeABadLogPath` (5 tests) pins the warning, the fallback, the forms that still parse without a word, and the raise for code.
+
+## 59. The config schema checks shape where fitness also matters, unevenly (closed, batch 223)
 
 **Issue:** #213.
 
@@ -3361,7 +3443,9 @@ is deliberate and documented at `config_schema.py:271-283` and validated
 downstream with a better error; `default_effort`, which is already cross-checked;
 `tui.effort`, which downstream per-model validation owns.
 
-## 60. The loader reads `.md` files the trust hash refuses to (open, deferred batch 138)
+**CLOSED (batch 223), the shape above.** `ssh_port` is a `Port`, a strict whole number from 1 to 65535, and `db_path` is `NonEmptyStr`. An empty `db_path` was measured to open SQLite's anonymous temporary database, so every thread and memory would have vanished at exit with nothing said. Because the environment folds into the same check, a refusal of a key a variable set now names the variable (`db_path (set by APP_DB_PATH)`), not just the file. `workspace_dir` stays a bare `str`, on measurement rather than the shape above: the first full run failed `test_an_empty_variable_reaches_the_guard_as_an_empty_path`, which pins that an empty workspace, from either route, is refused by name at `protected_paths.check_workspace`. The schema refusing it too would answer the variable's case first, as an error about `config.yaml`. `_validate_settings` refuses a `max_token_budget` of zero or less by name, and null still means no cap. The three trust rationales name `ensemble_mode`, the live multiplier. `/config` reads the new constraints off the schema like every other, through one generic closed-range phrase ("whole number from 1 to 65535", "text, not empty"). Tests: four cases in `test_an_incoherent_config_yaml_is_refused_by_name`, one for the variable's name, two refusals and three controls for the cap, and one for the panel's phrases.
+
+## 60. The loader reads `.md` files the trust hash refuses to (closed, batch 219)
 
 **Issue:** #214.
 
@@ -3398,7 +3482,9 @@ subprocess timeout as the harness, since a removed guard hangs rather than fails
 **Not:** capping regular-file reads. Measured adequate at 0.66 s per 100 MB;
 inventing a cap would add a failure mode to the largest legitimate manifests.
 
-## 61. A parallel batch widens the window between "the tool ran" and "the row is durable" (open, deferred batch 138)
+**CLOSED (batch 219): guarded, on the owner's answer to the question above, and wider than the finding.** Measured under WSL before the fix, the clone-carried shape is worse than a FIFO: a skill symlinked to `/dev/zero`, which exists on every POSIX machine, made `describe_project_content` -- the trust prompt's listing, before any grant -- raise MemoryError in 1.5 s under a 1 GiB cap, while `_content_hash` stepped over it. The same function read the hub, `settings.json` and `mcp.json` the same way. All of them, plus `initialize`'s hub read, `_read_settings_file` and `mcp_client`'s `_read_file`, now go through `json_store.read_regular_text`, which opens non-blocking and refuses whatever `fstat` does not call a regular file, with an OSError each caller already reported or skipped. `tests/test_json_store.py` drives a FIFO and a `/dev/zero` link in a child capped at 1 GiB and 20 s, and every reader end to end. With `O_NONBLOCK` removed the FIFO test times out, and with the `fstat` check removed three tests fail. Regular-file reads stay uncapped, per **Not** above.
+
+## 61. A parallel batch widens the window between "the tool ran" and "the row is durable" (closed, batch 221)
 
 **Issue:** #215.
 
@@ -3459,6 +3545,8 @@ and asserts one `tool_result` row per tool that actually ran.
 is stated; treating the `shutdown(wait=True)` block as a separate finding, since
 it is a consequence of the same window.
 
+**CLOSED (batch 221), the second shape above, on the owner's choice, and wider than filed.** `_dispatch_parallel` catches `GeneratorExit` at its drain, waits for its workers as the pool's exit already did, records every finished call in the model's order, and raises it again; a record that fails is logged rather than replacing the close. The settle loop had a second window after the drain: `_settle_one` was a generator that wrote one row, yielded, and only then wrote the next, so a consumer gone at the first `tool_result` lost the later rows. It is a plain function now that records and returns its events, and the batch records every row before announcing any. NA11 is untouched. ARCHITECTURE 4.8's `_pump` sentence is corrected: the TUI closes its generator on shutdown and otherwise drops it to the garbage collector. Both windows have a test that fails without the fix. Not changed: `close()` still blocks for the slowest tool in the batch, which the pool's exit always did.
+
 ## 62. A truncated fold is measured against the length it no longer has (closed, batch 213)
 
 **Issue:** #216.
@@ -3502,7 +3590,7 @@ are already correct.
 
 **CLOSED (batch 213), with the one line suggested.** The truncation branch recomputes `target` beside `original`, as the forced-chain branch does. `test_a_truncated_fold_is_targeted_at_the_length_it_kept` reads both numbers out of the instruction a truncated fold sends and requires the cap to be the strength's ratio of the stated length; it fails without the line.
 
-## 63. Batch 119's yield logs a standing condition per step (open, deferred batch 138)
+## 63. Batch 119's yield logs a standing condition per step (closed, batch 221)
 
 **Issue:** #217.
 
@@ -3539,7 +3627,9 @@ the line to DEBUG and let `_maybe_compact` say it once per run under the existin
 `_sub_turn_span` INFO at `:715-719`, which fires at most once per thread per fold
 and is not a standing condition.
 
-## 64. Two scoring helpers raise where the scope says nothing raises (open, deferred batch 138)
+**CLOSED (batch 221), with the module's own once-only discipline rather than a notice.** The line's first time on a thread is INFO, and every repeat on that thread is DEBUG, through `_yield_logged`, a set keyed on the thread id beside the three warning sets. A notice through `_maybe_compact` would have shown the user a standing condition with nothing to do about it. The test drives four evaluations on one thread and one on another: INFO, DEBUG, DEBUG, DEBUG, INFO. `_sub_turn_span`'s INFO is untouched, per Not above.
+
+## 64. Two scoring helpers raise where the scope says nothing raises (closed, batch 219)
 
 **Issue:** #218.
 
@@ -3588,6 +3678,8 @@ line, and the run completes.
 **Not:** retrying a malformed payload -- unlike model JSON, a provider shape will
 not fix itself on retry; changing the give-up-on-first-outage policy, which is
 load-bearing (SQ10).
+
+**CLOSED (batch 219), and wider than the two sites.** Probed with a DOI `doi_for` accepts (a first probe used one it rejects and reported nothing, because no lookup ran), 104 malformed shapes raised out of `authority_for`: the authorship loop, and also `primary_location`, its `source` and `type`, `type`, `primary_topic`, a field id and the authors payload. Every read now goes through `_obj` / `_text`, which turn a shape the module cannot read into an absent signal, and the same probe finds none that raise. On the vector side a fourth check sits in `_check_vectors` beside its three siblings: a component that is not a finite number (a string, None, a bool, NaN or an infinity -- the last two raised nothing and scored NaN) is an `EmbeddingError`, so the scorer gives up for the run and the stage falls back with the cause in the trace. **One departure from Not above:** `_embed` retries any EmbeddingError twice before giving up, and this one is retried like the count, ragged and empty checks beside it. Retrying by cause would change SQ10's policy, which this batch did not touch. Tests: 38 in `test_scholar.py`, 33 of which fail without the fix, and 6 in `test_embeddings.py`.
 
 ## 65. A second `connect_all()` abandons a generation of MCP children silently (closed, batch 213)
 
@@ -3644,7 +3736,7 @@ single-instance assumption and would be the same future section's problem.
 
 **CLOSED (batch 213), raising, the owner's choice** over disconnecting first, which would be the reconnect F7 defers. A `connect_all()` on a client whose manager task is live raises `RuntimeError` naming `disconnect_all()`; a failed connect already sets `_task` to None, so a retry after one is unaffected. `disconnect_all()` clears `_closed` with `clients` and `_catalogs`, and since `_TrackClose` holds the same set object, the next generation's clean closes land in it. `test_a_second_connect_all_on_a_live_client_raises` (the first generation still serves a call) and `test_each_cycle_names_its_own_stragglers` (a server clean in cycle one and wedged in cycle two is named) both fail without the fix. The straggler set is still keyed by server name, which is enough while a generation must end before the next begins.
 
-## 66. A `_blocking_modal` comment states a park that does not happen (open, deferred batch 138)
+## 66. A `_blocking_modal` comment states a park that does not happen (closed, batch 223)
 
 **Issue:** #220.
 
@@ -3684,7 +3776,9 @@ D22 asks of every claim about the installed package.
 
 **Not:** changing the direct `set_blocked` call, which is right.
 
-## 67. `_cmd_secrets` says "would deadlock" where it would raise (open, deferred batch 138)
+**CLOSED (batch 223), the comment narrowed to what was measured, and the measurement went further than the review's.** Under textual 8.2.8 a worker's marshal after the app exits returns at once while its loop runs and raises once the loop has closed. With `set_blocked` itself marshalled, `test_quitting_during_an_attended_research_prompt_releases_the_worker` still passes, so "parks the worker forever" does not reproduce today in the real app either. The direct call stays, for the reason the comment always also gave: the meter touches no widget. The comment names the three-case probe to re-take when the pin moves.
+
+## 67. `_cmd_secrets` says "would deadlock" where it would raise (closed, batch 223)
 
 **Issue:** #221.
 
@@ -3711,7 +3805,9 @@ loudly" versus "it would deadlock" changes whether they trust a test to catch it
 
 **Not:** restructuring `/secrets`, which is sound.
 
-## 68. `AGENTS.md`'s `_blocking_modal` bullet is split by eight unrelated ones (open, deferred batch 138)
+**CLOSED (batch 223).** The docstring said a blocking ask from a command handler would deadlock. It would raise -- textual refuses `call_from_thread` on the app's own thread at once, measured on 8.2.8 -- and since batch 135 contained S14-02, the raise becomes "/secrets failed" rather than a crash. The rule, and `action_pick_thread` as its pattern, are unchanged.
+
+## 68. `AGENTS.md`'s `_blocking_modal` bullet is split by eight unrelated ones (closed, batch 223)
 
 **Issue:** #222.
 
@@ -3741,7 +3837,9 @@ heading. A hand fix, not a new gate.
 
 **Not:** adding a check for it.
 
-## 69. `_ask_lock`'s no-timeout argument covers half the critical section (open, deferred batch 138)
+**CLOSED (batch 223).** The four stranded lines are back on the `_blocking_modal` bullet. They were split in the commit that wrote them (412a58f), so nothing was lost between the halves. No check, per the item.
+
+## 69. `_ask_lock`'s no-timeout argument covers half the critical section (closed, batch 223)
 
 **Issue:** #223.
 
@@ -3778,6 +3876,8 @@ anything NA12 cares about, or the lock could be acquired around the park alone.
 
 **Not:** adding a timeout to `_ask_lock`, which would put a `config.py` number
 into a leaf module that deliberately imports nothing first-party.
+
+**CLOSED (batch 223), the bound stated as what it is.** `_ask_lock`'s paragraph now says the waiters are bounded once the holder is parked, and that the marshal before the TUI's park is bounded only by the UI thread staying responsive. With item 66's measurement, what is left unbounded is a UI thread that is alive and wedged. No timeout was added, per Not doing.
 
 ## 70. Three widgets measure the terminal in characters, not cells (closed, batch 214)
 
@@ -3828,7 +3928,7 @@ the bound.
 
 **CLOSED (batch 214).** All three measure cells now, with `rich.cells.cell_len`, the measure `markdown.wrap_display`, `plain_wrap` and `display_len` already used. `wrap_source` cuts at the most characters that fit the row's cells and still breaks at the last space within them; a glyph wider than the row goes whole, so the wrap always makes progress. `AgentPanel._fit` (and `SessionPanel`, which shares it) truncates to `width - 1` cells before the ellipsis and drops a glyph that would straddle it. `_write_padded` pads with `total - cell_len(text)` spaces instead of `ljust`. Six tests in `tests/test_diff_view.py`'s `TestCellsNotCharacters`, wide text held in a variable per the cp1252 rule: the issue's 20-in-20 case is two rows, an 18-cell box holds 8 wide characters and the ellipsis, a padded row is exactly `total` cells for wide and ASCII text alike. Five fail without the fix; the sixth, a glyph wider than its row, is the progress guard the new loop needs and passes on either.
 
-## 71. A live chat turn shows neither reasoning nor tool lines; a replay of it shows both (open, deferred batch 138)
+## 71. A live chat turn shows neither reasoning nor tool lines; a replay of it shows both (closed, batch 228 -- each step printed as the replay draws it, ROADMAP_v3 §86, A81)
 
 **Issue:** #225.
 
@@ -3863,7 +3963,20 @@ asserting a live tool line and no live thinking content.
 handling in the CLI, explicitly not required; any TUI work. Do not leak thinking
 content into research-style volume lines.
 
-## 72. The existing hub document is read, diffed, embedded and printed whole (open, deferred batch 138)
+**CLOSED (batch 228, #225, ROADMAP_v3 §86, A81).** The owner chose the
+replay's rendering over the two alternatives this entry named. `main._LiveTurn`
+observes `run_to_completion` and prints each model step when it finishes --
+at its first tool call, from what streamed, and the last one from the
+returned response -- through `core.replay.step_entries`, the function the
+replay itself now calls. Nothing prints while a step streams, so a `retract`
+only ever drops what the printer held, and `core/events.py` says so beside
+the sentence this entry pointed at. A wake turn prints the same way. The
+measurement found one more casualty of the drain: `todo_write`'s summary,
+written "for the CLI, which has no panel", rode only the event the CLI
+discarded, and it prints now. `tests/test_cli_live_turn.py` runs a real turn
+and replays its thread, and the two print the same five lines.
+
+## 72. The existing hub document is read, diffed, embedded and printed whole (closed, batch 221)
 
 **Issue:** #226.
 
@@ -3906,7 +4019,9 @@ below the cap, byte-identical to today.
 each listing line is already small and the count is bounded by the directory
 rather than by this file.
 
-## 73. `_tree` is the one manifest section with no second screen (open, deferred batch 138)
+**CLOSED (batch 221), as a refusal rather than head-plus-notice, on the owner's choice.** The initializer's reply REPLACES the hub, so a model shown its head would write it back without its tail. Above `init_max_hub_chars` (1,000,000 characters, about three times this repository's own 347 KB hub) /init stops with one line before any model call. Far past it, the refusal comes from the size in bytes before the file is read, since four bytes per character makes that safe. Below it nothing changes, except that the shown diff is cut at `init_diff_shown_lines` (2,000) with a line saying how many more there are. The read is regular-files-only too (batch 219). Both values are `config.yaml` keys with CONFIG_ARCHITECTURE sections.
+
+## 73. `_tree` is the one manifest section with no second screen (closed, batch 223)
 
 **Issue:** #227.
 
@@ -3939,7 +4054,9 @@ narrow the comment to name exactly the set it covers.
 
 **Not:** changing what is readable; content redaction; `_DOC_EXTENSIONS`.
 
-## 74. Two headless runs build prompts with the attended catalog defaults (open, deferred batch 138)
+**CLOSED (batch 223), the screen extended, on the owner's choice.** `_is_secret` also hides the default names of SSH private keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519` and the two `_sk` forms) and the suffixes private keys and keystores are saved under (`.pem`, `.key`, `.p12`, `.pfx`, `.ppk`, `.jks`, `.keystore`), with case folded. The comment names that rule instead of claiming every credential filename. A public key and files that merely mention keys are still listed, as the control. Eleven cases, one per shape. `_DOC_EXTENSIONS` is untouched.
+
+## 74. Two headless runs build prompts with the attended catalog defaults (closed, batch 222)
 
 **Issue:** #228.
 
@@ -3973,7 +4090,9 @@ goes red. Test: build each prompt with `callable_only=True` and assert no
 **Not:** changing `with_catalogs` defaults, which the TUI call sites depend on;
 changing either agent's tools.
 
-## 75. The issue template and the prose that governs it are checked against neither (open, deferred batch 138)
+**CLOSED (batch 222), the first shape above.** Both call sites forward the run's facts through `advertisement_facts`, the reviewer's rule. `_run_initializer` hands its run no bundle, so its prompt is built headless; `_summarize` builds the compactor's from the bundle it hands the compactor's run. Three tests in `test_catalog_advertisement.py` widen each agent to admit `spawn_subagent` and assert that the agent catalog is in the prompt exactly when the schema list from the run's own facts carries the tool. An attended compaction is the control, so a hard-coded headless answer fails too, and reverting either call site fails its own test. Neither agent's `allowed_tools` changed.
+
+## 75. The issue template and the prose that governs it are checked against neither (closed, batch 224)
 
 **Issue:** #229.
 
@@ -4025,6 +4144,8 @@ checked offline and should not be -- it is a judgement, not a count.
 **Not:** changing the severity or area enumerations, which match between prose
 and template today and are the half of the taxonomy that has not drifted;
 `config.yml`'s contact links or the PR template, both correct.
+
+**CLOSED (batch 224), the owner's choice: no label by design, plus a check.** Measured first, and the first divergence above counted the wrong population: CONTRIBUTING's claim is about OPEN findings, and 31 of the 43 open severity-tagged issues are `enhancement` (the 51 `S3` + `bug` are mostly closed). The audit form sets no label on purpose, because the right one depends on the finding, and CONTRIBUTING's Labels paragraph now says the maintainer sets it at triage. `[S0]` and `complexity` are written down as predating the forms, which are the arbiter (use `S1` and `coherence`). `test_the_audit_form_offers_what_contributing_says` holds the form's severity and area dropdowns equal to CONTRIBUTING's lists, in order, and the form to setting no label.
 
 ## 76. The CodeQL job contains no mechanism that can fail it (closed, batch 158 -- PR #200 measured the check)
 
@@ -4079,7 +4200,7 @@ header says so rather than naming a value nobody saw. ROADMAP_v3 §75, A67. The
 thirteen alerts themselves were all false positives; §75 and A66 carry how they
 were cleared.
 
-## 77. The suite's one `integration` test runs in no workflow (open, deferred batch 138)
+## 77. The suite's one `integration` test runs in no workflow (closed, batch 226)
 
 **Issue:** #230.
 
@@ -4149,7 +4270,19 @@ giving the real one.
 **Not:** moving the test out of the `integration` marker. `pytest.ini:3-6`'s
 offline default is a locked decision and the marker is what implements it.
 
-## 78. `FakeStorage` makes eleven mirror claims and two are compared (algorithm half closed, batch 216 -- the two transcriptions are compared; the ordering claims remain)
+**CLOSED (batch 226, #230), with the shape above and one more platform.** The
+marker covers five tests now, not one. tests.yml's `integration` job runs them
+on Linux (the three MCP orphan tests and batch 166's bundle image build, with
+`uv==0.13.4` installed as deploy-demo.yml pins it), and compat.yml's Windows job
+runs them on Windows, where batch 130's fallback-shell wait test is the one that
+means something. Each fails on any skip but the one its platform cannot avoid.
+Writing the Windows step found that the image test would have FAILED there, not
+skipped: a Windows runner's Docker answers `docker info` and builds Windows
+images only, so `_docker()` now asks the daemon's OS. Measured before the jobs:
+Windows 4 passed, WSL 3 passed, the image test skipped on both for want of a
+daemon. The tests.yml comment now says the jobs exist.
+
+## 78. `FakeStorage` makes eleven mirror claims and two are compared (closed, batch 222)
 
 **Issue:** #231.
 
@@ -4227,6 +4360,8 @@ compacted view. That argument is sound and is not reopened.
 
 **PARTLY CLOSED (batch 216), the half this entry called worth naming.** The two transcriptions of a published algorithm are compared now. `pinned_through` reads the database, so its index computation became the pure `storage._pinned_indices(rows, span, neutral)` -- behaviour unchanged, `pinned_through` maps it over the reconstructed rows -- and the fake's copy `FakeStorage._pinned_indices` has the same shape. `TestThePinnedSpanMirrorsProduction` compares them over six thread shapes cut at every position (#88's re-inclusion, a half-pinned pair, an unrelated result, a cut turn's opener, an opener already pinned, nothing pinned), plus two reach checks on the production side; `TestTheTurnOpenerMirrorsProduction` compares `_turn_opener_index` directly over the five cases above plus a kept prefix with no user row. Mutating the fake's copy -- the re-inclusion dropped, the opener never added, archive order not restored, the opener added on a turn-aligned cut -- is caught 4/4. **Still open:** the ordering claims that need real SQLite to compare (`list_threads`' COALESCE, `child_threads`' tiebreaker, `list_memories`' AC6 filter, `mark_turn_failed`), which this entry recommended only where the fake re-derives logic, and which belong beside `test_storage_e2e.py`'s module-scoped `real_storage` rather than in a pure-function file; the #31 plain-dict claims stay out, as recommended.
 
+**CLOSED (batch 222), the ordering half.** Four tests in `test_storage_e2e.py` give `FakeStorage` and real storage one set of ids and timestamps and compare the answers. `list_threads`: the COALESCE order, its `created_at` tiebreak (the tie is written in the wrong order on purpose, since both sorts are stable) and the kind filter. `child_threads`: the id tiebreak across five children created in one instant. `list_memories`: AC6 from four vantage points and three scopes, including a project memory with no path. `mark_turn_failed`: the newest user row, and False with none. Each fails when the fake's rule is mutated, and the thread-order test also when production's is. They sit beside `real_storage` because real rows exist only there. Left as they were: the fake orders memories and messages by insertion where production orders by `(created_at, id)`, which agree because rows are stamped in the order they are written, and `thread_preview` stays untruncated. The #31 plain-dict claims are not compared, per the recommendation above.
+
 ## 79. `test_the_tree_names_every_production_module` quantifies over a typed list (closed, batch 216)
 
 **Issue:** #232.
@@ -4281,7 +4416,7 @@ reformatted tree fails loudly.
 
 **CLOSED (batch 216), with the shape suggested, and it found the live gap the entry measured as absent.** `_MAPPED_DIRS` is gone. `_production_modules()` walks the tree with `_walk_project`, skips `tests/`, and drops what `git check-ignore` reports, so `review/` -- gitignored local scratch, which a plain walk turned red on this machine and CI would never see -- stays out; the paths go to git NUL-separated, because in text mode Windows wrote each newline as CRLF and git was asked about `path\r`. `_UNLISTED_MODULES` is an exclusion list, empty. The walk reaches `deploy/hosted/`, which batch 163 added after this entry was measured and which the typed list never named: its seven modules are in the tree, so nothing failed, but only because their authors remembered. `test_the_module_walk_reaches_what_the_typed_list_did_and_more` holds the reach, and the entry's own failure path -- a new `plugins_probe_216/loader.py` with no tree entry -- now fails the gate, measured.
 
-## 80. Five once-per-process globals are reset only by local fixtures (open, deferred batch 138)
+## 80. Five once-per-process globals are reset only by local fixtures (closed, batch 222)
 
 **Issue:** #233.
 
@@ -4370,7 +4505,9 @@ once from disk, never mutated per test) or `mcp_client/registration.py:52
 _registered` (checked: no test calls `register_all` against the global registry,
 so it cannot leak).
 
-## 81. Twenty-four env-gated skips are the guarantees nobody here has observed (open, deferred batch 138)
+**CLOSED (batch 222), wider than filed, on the owner's choice of a reviewed list plus a census.** Re-counted with both of `test_probe_isolation`'s shapes over every production module, fourteen memos had no general reset where four of the five above were still open. The containers: the effort cache, the four compaction warn and log sets (two added in batches 220 and 221), loop's two notice sets (`_image_notices_shown` was reset by nothing at all), the dynamic approval defaults and the MCP `_registered` map. The second shape, names a function declares `global`, added five: `_google_budget_support`, `_ineligible_explained`, `config_edit._document_cache`, `posture._read` and `secrets._state` -- an unlocked store's plaintext, which no fixture locked. The effort cache joined its three siblings in `clear_client_cache`. The other thirteen are in `PROCESS_MEMOS` in `tests/conftest.py`, reset before and after every test by `reset_process_memos`, through the module's own function where there is one. `tests/test_process_memos.py` holds the tree to the lists in both directions, so a new memo fails until it is reset or exempted with a reason, and a listed name that has gone fails too. Eight names are exempt, each with its reason: the two schema dataclasses `config.py` binds at import, the MCP event loop and its thread, the stdin reader, a weak set of live indexes, a constant table, and the posture every seam already restores. A pair of tests dirties every memo the new fixture owns and finds each reset in the next test. Not counted, and said so in the file: memos held by a decorator or inside an object.
+
+## 81. Twenty-four env-gated skips are the guarantees nobody here has observed (closed, batch 226 -- all but the three WSL ones)
 
 **Issue:** #234.
 
@@ -4431,6 +4568,23 @@ with a distro installed and is a larger decision.
 **Not:** turning the env gates into hard failures. A contributor without an SSH
 host must still be able to run the suite and the skip is the right mechanism;
 what is missing is that nothing in CI ever supplies the variables.
+
+**CLOSED (batch 226, #234), for SSH and sudo; WSL stays as written.** The
+owner chose the full shape: `scripts/live-ssh-setup.sh` makes the runner a
+throwaway SSH host (an account with a password, a key, a passphrase-protected
+key and a sudo rule; sshd on 127.0.0.1:2222, and on :2223 one requiring
+`publickey,password`), writes every `VEN_TEST_*` variable to `$GITHUB_ENV`, and
+tests.yml's `live-ssh` job runs both files and fails on any skip.
+`test_the_live_ssh_job_sets_every_variable_the_tests_read` holds the script to
+the names the tests read. Measured first, against an unprivileged sshd in WSL:
+with a key and an encrypted key, 14 of the 24 ran for the first time here and
+passed (317 passed, 10 skipped, against 303 and 24 with no host); the other 10
+need root. **Writing the job found that the 24 could never all pass in one
+environment:** `test_ssh_backend.py` opens `VEN_TEST_SSH_HOSTKEY` as a file and
+`test_sudo.py` pinned its value, the path, as the key. Fixed in the sudo file,
+and `test_every_live_test_reads_its_pinned_host_key_from_a_file` holds it. The
+three `needs_wsl` tests still run only on a developer's Windows box with a
+distro, the larger decision this entry names.
 
 ## 82. The approval-timeout fixture is pinned by its value, not its effect (closed, batch 216)
 
@@ -4902,7 +5056,7 @@ in three files, where batch 157's timer had five. Fixed by raising the shrink
 above `settle`'s deadline rather than pinning each test (ROADMAP_v3 §77, A77).
 
 
-## 86. The decision-id gate scans `.py` only, and this project ships `.mjs` (open, found and filed batch 141)
+## 86. The decision-id gate scans `.py` only, and this project ships `.mjs` (closed, batch 224)
 
 **Issue:** #237.
 
@@ -4959,7 +5113,9 @@ test-name gate has no business reading JavaScript -- a `.mjs` file naming a
 pytest test is not a thing that happens. Give the citation gate its own
 domain.
 
-## 87. `.gitleaksignore` pins its blessings by LINE NUMBER (open, found and filed batch 144, measured again batch 145)
+**CLOSED (batch 224), raw text, on the owner's choice.** `test_every_decision_id_cited_in_the_npm_scripts_resolves` runs the citation rule over the `.mjs` files' whole text, through its own `_production_javascript` domain; `_production_python` is unchanged, since the test-name gate shares it. Its first run found a real miss: `(H3/C2)` in `scripts/prepublish-check.mjs`, the copy of the citation batch 128 dropped from AGENTS.md as unresolvable, which survived because nothing read `.mjs`. It is dropped there too.
+
+## 87. `.gitleaksignore` pins its blessings by LINE NUMBER (closed, batch 224)
 
 **Issue:** #238.
 
@@ -5017,6 +5173,8 @@ an RSA header whose body is literally `MIIEpA...`. Worth recording because
 the wrong form is the one that looks MORE thorough, which is the same
 footgun `pip-audit` has (item 88's entry, and batch 148's correction).
 
+**CLOSED (batch 224), candidate (a), on the owner's choice.** The six blessed fakes are assembled from pieces at runtime, as batch 144 had already done for others, so no rule matches the source and every value a test needs is unchanged (the patch script compared each old and new literal before writing). Splitting the private-key fixture exposed a seventh match two lines down, an assertion's `-----BEGIN RSA PRIVATE KEY-----` pairing with a later `KEY-----`; it is built the same way. `.gitleaksignore` keeps only a comment saying it is empty on purpose, and gitleaks on an export of the tree finds nothing. The comments in `.github/gitleaks.toml` and `.github/workflows/gitleaks.yml` say so too -- the second is a workflow file, which this project's token cannot push.
+
 ## 88. Six workflows are not on `main`, so a branch's CI is reconstructed by hand (closed, batch 159 -- superseded when PR #200 put the six workflows on `main`)
 
 **Closed in batch 159, superseded rather than fixed.** PR #200 merged on
@@ -5057,7 +5215,7 @@ and the script disagree.
 call and the branch is not merged yet; the point of this entry is the local
 reproduction, which is needed either way for the batches before the merge.
 
-## 89. The transcript's ANSI strip is silent, and nothing reads the count it keeps (open, filed batch 145)
+## 89. The transcript's ANSI strip is silent, and nothing reads the count it keeps (closed, batch 223)
 
 **Issue:** #239.
 
@@ -5088,6 +5246,8 @@ since the count comes from the stripper rather than from the text.
 is WARNING+ and routes into the transcript, so that is the inline marker
 arriving by a route nobody chose, with a `[warning]` prefix on an ordinary
 coloured answer.
+
+**CLOSED (batch 223), the middle option, on the owner's choice.** The first turn in a session that strips anything also puts one system line on screen, pointing at `logs/app.log`; the per-turn INFO line is unchanged. It is a system line rather than a mark in the text, so a model cannot spoof it and the answer's entry stays exactly what was stripped. Two tests: three turns give one line with the answer unmarked, and a clean session gets none. AGENTS.md's S15-01 bullet says so.
 
 ## 90. A hardlink is a second name for a file, and the one hard deny cannot see it (closed, batch 160 -- compared by inode)
 
@@ -5146,7 +5306,7 @@ pinned on its own with the deny stubbed out. An ordinary multiply-linked file
 stays readable, which is the control. A `.venastine/` elsewhere on the disk is
 not searched.
 
-## 91. A closed issue cited in a docstring has nothing keeping it honest (open, found and filed batch 146)
+## 91. A closed issue cited in a docstring has nothing keeping it honest (closed, batch 224)
 
 **Issue:** #241.
 
@@ -5186,7 +5346,9 @@ open. That needs the manifest either way.
 **Not:** removing issue numbers from comments. They are the most useful kind
 of citation in the tree -- the question is only what keeps them true.
 
-## 92. An atomic doc write can fail where a truncating one succeeded (open, filed batch 146)
+**CLOSED (batch 224), the owner's choice: forbid claims about state.** Measured first: 499 production comment lines cite an issue, 14 of them beside a word like open, filed or until, and all 14 are history. `test_no_production_comment_says_an_issue_is_open` refuses the present-tense and conditional forms ("#N is still open", "tracked in #N", "when #N closes") in the `.py` comments and docstrings and the `.mjs` text, and its control asserts five such claims match and five historical sentences from the tree do not. No manifest: an issue's state lives on GitHub, and a committed copy would go stale the day an issue closed. AGENTS.md states the rule. `.github/workflows/tests.yml`'s "when #10 closes" is outside the domain and belongs to #230.
+
+## 92. An atomic doc write can fail where a truncating one succeeded (closed, batch 219)
 
 **Issue:** #242.
 
@@ -5217,6 +5379,8 @@ remedy is "close the file" -- which needs the errno distinguished, and WinError
 **Not:** a Windows-only branch that falls back to a truncating write. That is
 item 90 reintroduced on the platform where a case-insensitive filesystem makes
 the rest of this surface hardest to reason about.
+
+**CLOSED (batch 219), the message as suggested.** Measured on Windows: a destination another process holds open and a read-only one both refuse `os.replace` with WinError 5, and an `r+b` open succeeds on the first and fails on the second. After sweeping the temp file, `_replace_through_temp` now asks that question (WinError 32 answers it outright) and raises `json_store.DestinationInUse`, a `PermissionError` chained to the original, saying the file is open in another program and to close it there. Every caller already reported an OSError, so `write`, `edit`, `write_project_doc` and the JSON stores all carry the remedy now. The trade is unchanged and the write still refuses, per **Not** above. Two Windows tests drive the real cases, and two contract tests pin the wrapping and the unchanged re-raise on every platform.
 
 ## 93. An environment override that is SET BUT EMPTY is honoured as a value (closed, batch 160 -- refused before it resolves)
 
@@ -5297,7 +5461,7 @@ unrelated directory, because launched from the harness root the empty path
 resolved to the install tree and was refused already -- the "what limits it
 today" above.
 
-## 94. The CLI's Ctrl+C stops a turn on the FIRST press, with nothing between a stray press and a stopped turn (open, filed batch 147)
+## 94. The CLI's Ctrl+C stops a turn on the FIRST press, with nothing between a stray press and a stopped turn (closed, batch 228 -- two presses, ROADMAP_v3 §86, A81)
 
 **Issue:** #244.
 
@@ -5343,6 +5507,18 @@ tears a thread in half. §64's A21 made the wake turn's handler defer rather
 than unwind, and CN10's own handler already stops the turn at a BOUNDARY
 and writes every row it owes (CN4), so the cost of a stray press is a lost
 turn rather than an unresumable thread.
+
+**CLOSED (batch 228, #244, ROADMAP_v3 §86, A81).** The owner chose two presses
+inside a window, the TUI's shape, for the user's own turn and for a wake turn
+alike. `main._SecondPress` is the handler for both: the first press changes
+nothing and says what a second would do, a second inside
+`TURN_STOP_CONFIRM_S` (2.0s, held equal to the TUI's `QUIT_CONFIRM_S` by a
+test) acts once, and later presses are ignored. The stdout competition this
+entry worried about is gone with #225's choice, since a step prints only once
+it has finished. CN10 and A21 carry amendment notes. At the prompt one press
+still exits, by the owner's choice: nothing is running there. CN10's CLI
+handler had no test before this batch; it has ten now, in
+`tests/test_cli_live_turn.py`.
 
 ## 95. A credential straddling the output buffer's DROPPED MIDDLE is still recoverable from two pages (closed, batch 160 -- the cut word moves into the gap)
 
@@ -5406,7 +5582,7 @@ and RB3's arithmetic holds; the monitor's raw view keeps every character. A
 multi-line PEM block straddling the gap is A71's: an unterminated block is taken
 from its header, an orphan footer from below.
 
-## 96. A window below ~50,000 tokens cannot hold one bounded read in its headroom (open, measured and filed batch 148)
+## 96. A window below ~50,000 tokens cannot hold one bounded read in its headroom (closed, batch 220)
 
 **Issue:** #246.
 
@@ -5458,6 +5634,8 @@ install of a 32k model.
 Recorded here rather than in a warning, so that the next person reading
 `headroom_for`'s floor-and-cap argument finds the measurement instead of
 re-deriving it.
+
+**CLOSED (batch 220), the second shape above, on the owner's choice.** `compaction._warn_if_one_read_cannot_fit` says once per (provider, model), in a set of its own, that a window whose headroom CAP leaves less than one bounded read can overflow after a large read. It names `max_read_chars` with the value that fits the headroom -- 16,384 characters at a 16,384-token window and 32,768 at 32,768 -- and says the setting applies to every model. A24's ruling stands for the margin-naming line, which still fires only where the floor binds; ROADMAP_v3's A24 row is amended to say so. The old control test, which pinned silence at 16k and 32k, is split: 64k and up stay silent, 16k and 32k get exactly one line that does not name the margins, and 8,192 still gets only the floor's line.
 
 ## 97. Two timing-sensitive tests failed in SLOW full-suite runs and neither reproduced (the resize half fixed batch 151; the secrets half open, and deliberately untouched)
 
@@ -5561,7 +5739,7 @@ reasoned carefully about timing without questioning the count.
 **The secrets half is untouched**, as this entry asks. It has not recurred;
 if it does, the comparison is the measurement above.
 
-## 98. Pass 3a is asked about the FACTUAL claims and applied to every claim (open, measured and filed batch 149)
+## 98. Pass 3a is asked about the FACTUAL claims and applied to every claim (closed, batch 220)
 
 **Issue:** #247.
 
@@ -5596,7 +5774,9 @@ which is now a one-argument change, plus `claim_ids` to match -- and the
 decision to make first is whether a 3a entry about a non-factual claim is
 worth a corrective retry or a dropped-and-traced entry.
 
-## 99. Pass 6a drops an unknown claim id in silence, where 6b now says so (open, filed batch 149)
+**CLOSED (batch 220), drop-and-trace on the owner's choice over a corrective retry, and wider than filed.** Pass 3a validates against, applies to and scores only `factual_claims`, D0's own list, and an entry naming any other claim is dropped with a trace line after the checkpoint. Pass 3b had the same shape on the next line, and there it DID move a tier: a non-factual claim's score is its capped critic component, so a stray severity took a speculative claim from MEDIUM to LOW at 0.5 and to UNVERIFIED at 0.8, which also cost it 6a/6b rounds. It is scoped the same way. One consequence of validating against the factual ids: a response naming ONLY non-factual claims is now B5's total mismatch and gets the corrective retry, as 6b's does for its batch. ROADMAP_v3 §66's "Pass 3a keeps the wide default" is amended. `TestPass3TouchesOnlyTheClaimsD0RoutedToIt`: 4 of its 5 tests fail without the fix; the fifth is the control.
+
+## 99. Pass 6a drops an unknown claim id in silence, where 6b now says so (closed, batch 220)
 
 **Issue:** #248.
 
@@ -5624,6 +5804,8 @@ visible as a count but not as a cause.
 and the batch had already grown past both of them; the fix is
 `_note_entries_outside_the_batch(run, flagged, revisions)` with the message
 reworded for a revision, which is the same helper.
+
+**CLOSED (batch 220), with the shape suggested.** `_note_entries_outside_the_batch` takes its pass, scope, question and reason as arguments now, and Pass 6a calls it after its checkpoint line, so `_trace_line`'s first-match readers still see the count. 6b's message is unchanged word for word, since two tests pin its wording. The round counter still bounds the loop. ROADMAP_v3 §66's "Pass 6a's silent drop stays silent" is amended.
 
 ## 100. An MCP tool's description is read as harness-authored instruction (closed, batch 160 -- ruled data, and the prompt says so)
 
@@ -5660,7 +5842,7 @@ server's and cannot add to or change the model's instructions -- present only
 when `schemas()` would offer an `mcp__` tool under the same three facts, so a
 prompt without one is byte-identical. A31's bound and prefix are unchanged.
 
-## 101. `requires_approval` can still return a non-boolean (open, filed batch 150)
+## 101. `requires_approval` can still return a non-boolean (closed, batch 220)
 
 **Issue:** #250.
 
@@ -5688,6 +5870,8 @@ same pair would apply here. The reason it is not done in batch 150 is that
 advertisement, and adding a raise to it for a case no caller in the tree
 produces is a cost with no demonstrated consequence -- which is B4's rule,
 applied to this item rather than against it.
+
+**CLOSED (batch 220), without the raise.** `requires_approval` returns `bool(tool_level or context_level)`. Truthiness is unchanged -- a programmatic `"false"` still tightens, which is D14's ratchet working -- and only the type the signature claims is now true. No raise, per Not above. `test_a_programmatic_override_is_answered_as_a_bool` checks with `is`, which `==` could not, and both of its cases fail without the fix.
 
 ## 102. Under WSL, a test that spawns a subprocess cannot import this project's dependencies (open, measured and filed batch 150)
 
@@ -5748,7 +5932,7 @@ seeing one WSL-only failure in this test should check this entry before
 spending the cycle -- and should still check that the failure is THIS one,
 because a second WSL-only failure would be a different claim.
 
-## 103. The range gate reads a per-section sub-range as a claim about the whole family (open, measured and filed batch 151)
+## 103. The range gate reads a per-section sub-range as a claim about the whole family (closed, batch 224)
 
 **Issue:** #251.
 
@@ -5809,6 +5993,8 @@ re-enact this, and this entry is what the reader should find when it does.
 **Not:** deleting the check, and not relaxing it to the highest range on the
 line. Both give back the property E13 and E14 paid for.
 
+**CLOSED (batch 224), the third shape made a check, on the owner's choice.** `test_each_family_has_one_range_on_the_map_line` requires exactly one range per family, so a per-section range fails there, naming itself and saying to write it as a list, before the range check can misread it as the family's claim. Today every one of the 51 families has one range.
+
 ## 104. Displayed untrusted text is filtered for controls and not for bidi or zero-width characters (closed, batch 160 -- revealed in approvals)
 
 **Issue:** #252.
@@ -5854,7 +6040,7 @@ render as written. **One correction to the entry:** `json.dumps` does not
 these as an escape, so the params block never drew out of order, and a test pins
 it as the control.
 
-## 105. The decision-id gate reads a Unicode control-range name as a decision citation (open, measured batch 152)
+## 105. The decision-id gate reads a Unicode control-range name as a decision citation (closed, batch 224)
 
 **Issue:** #253.
 
@@ -5885,6 +6071,8 @@ bare id in production, which is a surface of its own rather than a line.
 **What a reader should know meanwhile.** `C0`/`C1` in `core/ansi.py` mean
 the Unicode control ranges. The gate cannot tell, and a sentence about
 Unicode that trips it is not drift.
+
+**CLOSED (batch 224), a namespace rather than a list, on the owner's choice.** `_NAMESPACES` gains "Unicode control set": `C0` or `C1` written after `Unicode`. AGENTS.md's namespace table has the row, and `core/ansi.py` writes `Unicode C1` throughout. The grammar test gains one accepted and two refused cases (`Unicode C3` is still a decision). The scan also found a different false pass: `pipeline_storage.py` called batch 154's mutation control `control C1`, which resolved silently to ROADMAP_v2's C1; it says `mutation C1` now.
 
 ## 106. Two private names AGENTS.md documents may be stale, and the gate that would say so costs too much here (closed, batch 159 -- both names measured as explained)
 
@@ -5934,7 +6122,7 @@ rebuild.
 is the boundary A44 states, and `mutate152.py`'s D4 is the must-survive
 control that would turn red when somebody crosses it.
 
-## 107. `is_trusted()` raises for an unreadable file, and every caller pays for that differently (open, measured batch 153)
+## 107. `is_trusted()` raises for an unreadable file, and every caller pays for that differently (closed, batch 219)
 
 **Issue:** #254.
 
@@ -5970,6 +6158,8 @@ repairing one command.
 message could name the path, since the `OSError` carries `filename`. That
 is a one-line change and does not touch the gate.
 
+**CLOSED (batch 219), measured: the message half did not reproduce, and the owner kept the posture.** Under WSL with a redirected HOME, a `chmod 000` skill gives `Configuration error: [Errno 13] Permission denied: '<project>/.venastine/skills/x.md'`: the `PermissionError` from `_content_hash`'s `open` carries `filename`, and its `str()` includes it, so the line already names the file to unlock. The message quoted above had lost that tail. Asked, the owner kept refusing to start over answering False (A48). `test_an_unreadable_project_file_is_named_in_the_one_line` (POSIX, non-root) pins the measured line; no code changed.
+
 ## 108. `generate()`'s other pre-write filesystem calls are still outside its `try` (closed, batch 213)
 
 **Issue:** #255.
@@ -6003,7 +6193,7 @@ useful than a swallowed bug.
 
 **CLOSED (batch 213), both halves, the owner's choice.** `generate()` wraps the kind question's two walks, `manifest.is_blank` and `propose_kind`, and turns an `OSError` from either into an `InitError` that names the error and says to re-run with `--software` or `--research`; `_config_plan` and `_existing_documents` call `os.path.exists`, which does not raise, and stay as they are. `main.run_init_command` also catches `OSError` and ends with `[--init stopped: ...]` and exit 1, for whatever escapes next -- not a blanket `except Exception`, so a bug still shows its stack. Four tests in `TestAnUnlistableProjectEndsInALine`, each failing without the fix.
 
-## 109. Nothing resolves the test names `tests/BREAKING_CHANGES.md` cites (open, measured batch 153)
+## 109. Nothing resolves the test names `tests/BREAKING_CHANGES.md` cites (closed, batch 224)
 
 **Issue:** #256.
 
@@ -6034,7 +6224,9 @@ before the gate.
 were correct until this batch renamed them. It catches the NEXT rename,
 which is the half nobody is present for.
 
-## 110. The thread-kind NULL fallback is in three readers and pinned by none (open, measured batch 154)
+**CLOSED (batch 224), the gate and the sweep, on the owner's choice.** `test_every_test_name_the_guard_log_cites_exists` resolves every test function, class and module name in the log against `tests/` (a name ending in `_` is a prefix; Starlette's `TestClient` is the one listed exception). A name inside `~~...~~` is history and is not read, which is the convention the file's header now states. Of the 44 names that resolved nowhere, the renamed guards carry their current name (eight rows), names written without `.py` count as modules, a placeholder became `<class>::<test>`, a wrapped name was joined, and the rest are struck through with what replaced them: retired tests, guards whose behaviour was later reversed on purpose (the drawn-run retry, the per-path budgets #4 removed, the per-pair window), and the old names in rename chains. One row records a gap rather than a rename: nothing pins `list_threads`' limit ordering since a51c381.
+
+## 110. The thread-kind NULL fallback is in three readers and pinned by none (closed, batch 222)
 
 **Issue:** #257.
 
@@ -6069,7 +6261,9 @@ defensive `getattr`s, finds no test behind them, and removes them --
 which, on a database carrying pre-§27 rows, puts every one of those rows
 back in the picker as `None`.
 
-## 111. `pipeline_storage`'s write and read API has never run against real SQLite (open, measured batch 154)
+**CLOSED (batch 222), and the premise above measured wrong.** The NULL this item and the readers' comments describe is not what a migration leaves. `ensure_columns` has added `kind` with DEFAULT 'chat' since §27 shipped it, so SQLite reads every row older than the ALTER as 'chat' before any reader runs. A NULL takes SQL written by hand, on a database first migrated between §27 and #26 (2026-08-06 to 08-22), where the column was added nullable. On the owner's choice the three fallbacks stay, and their comments now say which NULL they absorb, in one place (`get_thread`'s docstring) with two pointers. `test_a_thread_older_than_its_kind_reads_as_a_conversation` builds exactly that database through the real startup and asks all three readers about a migrated row and a hand-written NULL; deleting any of the three fallbacks fails it, and its raw column read pins the default. `list_threads()` filters in SQL, so its picker never meets such a row, and the test records that rather than promising it. `core/memory.py`'s fourth copy, applied to `get_thread`'s output, is untouched.
+
+## 111. `pipeline_storage`'s write and read API has never run against real SQLite (closed, batch 222)
 
 **Issue:** #258.
 
@@ -6097,6 +6291,8 @@ not; `json.loads(None)` raising is the guard most likely to differ.
 **What it would have caught.** Nothing in this batch -- S09-01 lives at
 the DBAPI seam, which is now driven for real. It is the standing risk that
 the persistence layer's own tests prove the fake and the code agree.
+
+**CLOSED (batch 222), and measuring it changed what the guards are for.** `core.reasoning.pipeline_storage` is in `real_storage`'s swap, imported before `create_db_and_tables()` so its table exists. The fixture also restores the package attribute that import rebinds: without that, `test_orchestrator.py` run after this file failed on a module bound to a deleted database. `test_a_pipeline_run_survives_a_write_and_a_read` drives create, a data-only update, a terminal update and load on real SQLite, plus both missing-id errors. The round trip agrees with the fake on everything asserted; the one difference, naive datetimes on read, is recorded, since nothing reads them. The finding is the NULL guards. `ensure_columns` adds both columns with DEFAULT '[]', so a migrated row reads '[]', and `candidates_json`, which arrived after #26, is NOT NULL on every database. `test_a_run_older_than_its_newer_columns_reads_them_as_empty` builds the database those two batches left and pins all three facts. On the owner's choice both guards stay with corrected comments, as do the two fake-side pins in `test_pipeline_storage.py`, whose docstrings said the same wrong thing. The S09-01 test now writes its run through the real writer instead of into a table it created by hand.
 
 ## 112. The trust prompt says every project agent's description enters every system prompt, and most never do (closed, batch 215)
 
@@ -6149,7 +6345,7 @@ declines it for the same reason.
 
 **CLOSED (batch 215), as suggested: listed, and annotated.** `_shadowing_names` reads the harness and user tiers with `_tier_dirs` and `_parse_md_file` -- `_discover`'s own order and parser -- and a project entry whose name either has says `shadowed by the harness's own "<name>"` (or `your own (user configuration)`), `which is what loads; this file is used only if that one goes away`. It stays listed, because the grant covers its bytes. `test_a_shadowed_entry_is_listed_and_says_what_loads` covers a harness and a user shadow, and `test_what_it_calls_shadowed_is_what_the_loader_ignores` trusts the project, initializes, and checks the note against what the loader registered, with an unshadowed project agent as the control. All three new tests fail without the change.
 
-## 114. `AgentManager`'s two `set()` calls have no belt, where `max_steps` does (open, measured batch 155)
+## 114. `AgentManager`'s two `set()` calls have no belt, where `max_steps` does (closed, batch 223)
 
 **Issue:** #261.
 
@@ -6173,6 +6369,8 @@ comprehension rather than a message naming the field.
 demonstrated consequence -- and a second answer to a question the loader
 already answers is the fix-at-the-consumer shape AGENTS.md names. The
 measurement worth having first is whether any caller ever will.
+
+**CLOSED (batch 223), the premise pinned rather than the belt added, on the owner's choice.** `test_only_the_loader_constructs_an_agent_def` reads production for every `AgentDef(...)` call and requires exactly the one in `_parse_md_file`. The day another appears, it fails, naming the `max_steps` belt as the thing to add then.
 
 ## 115. A release tag is not compared with the version it publishes (closed, batch 162 -- compared before anything is packed)
 
@@ -6231,6 +6429,32 @@ the step would have gone red. What this closure prevents is the silent case the
 example stands for: a tag on a commit whose files name a version npm does not
 have yet.
 
+## 116. The confinement self-test runs its child on pipes, not on the transport a math call uses (open, found batch 233)
+
+**Found on PR #272's first CI run.** Batch 221 (#204) moved a math child's
+stdout and stderr from pipes to temporary files, capped by `RLIMIT_FSIZE`.
+`security/confine.py`'s limits layer then set `RLIMIT_FSIZE` to zero, so in
+a shared deployment every confined call's child failed to write its own
+result and exited 120. Batch 233 fixed the limit. Severity `S3`, `stability`.
+
+**This entry is about the self-test not noticing.** `confine.verify` runs
+`python -m security.confine --self-test` with `capture_output=True`, so its
+child writes its verdict to a pipe, and `RLIMIT_FSIZE` does not apply to a
+pipe. The self-test passed on the commit where every real confined call
+failed, and it is what a shared deployment runs at startup before telling its
+sessions `VENASTINE_CONFINEMENT=verified`. The test that runs a confined call
+through the real transport, `TestTheWallsHold`, needs Landlock: it skips on
+Windows, and batch 221's WSL run did not include it, though it fails there
+deterministically on that transport.
+
+**Shape, not done here.** `verify` runs its child the way `run_isolated` runs
+a math child: stdout and stderr to temporary files under
+`isolation._resource_limits()`, read back the same way. A transport change
+would then fail the startup gate rather than every call after it. Left for
+its own batch because it changes what a deployment checks before it serves
+anyone, which wants a run on the Space; meanwhile `TestTheWallsHold` runs the
+real path in CI on every push.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both
@@ -6247,6 +6471,10 @@ re-verification as a comment since batch 159, made against `main` at
   disagreement, and no verification pass consumes `consistency_score`. Nothing
   to add beyond the issue's own rearchitecture analysis (pure-code gates versus
   a new model call).
+  **Fixed in batch 232 (ROADMAP_v3 §90, A85)**, without a new model call in any
+  gate: D1 reads a `contested` mark Pass 5 writes, sends the claim to the 6a/6b
+  loop that already existed, and the penalty is retired, so a checked claim
+  carries no deduction for the doubt its check resolved.
 - **Issue #8** `[S3][ux]` *the CLI has no slash-command layer*, from the
   headless-shell scope. Verified still true: `main.py` dispatches no
   `/command` at all -- `run_chat` treats every non-empty line as a message,
@@ -6255,3 +6483,6 @@ re-verification as a comment since batch 159, made against `main` at
   `:1975-1982`). One thing to add: **item 71 above is the live-rendering half
   of the same D12 debt**, so the two should be read together -- a shell with no
   command layer and no live narration is less capable in two ways that compound.
+  **Fixed in batch 231 (ROADMAP_v3 §89, A84)**, after item 71 in batch 228: one
+  catalog in `core/commands.py` both shells bind to, and 18 commands in the
+  CLI's `cli_commands.py`. Item 45 closed with it.
