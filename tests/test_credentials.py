@@ -317,6 +317,59 @@ def test_an_empty_but_present_file_is_not_reported_as_missing(_in_tmp):
         api_initialization("ANTHROPIC")
 
 
+def test_an_empty_anthropic_key_is_refused_before_a_client_exists(
+        _in_tmp, monkeypatch):
+    """Batch 234. anthropic 0.116.0 refused an empty key itself, naming the
+    problem. 2.x builds `Authorization: Bearer `, httpx2 refuses that header
+    before anything is sent, and the SDK reports "Connection error." --
+    which provider_errors retries as a network blip (measured). So the
+    refusal happens here, by name, and nothing is built or cached."""
+    import sys
+
+    from core import client as client_module
+
+    built = []
+    monkeypatch.setattr(sys.modules["anthropic"], "Anthropic",
+                        lambda **kw: built.append(kw) or object())
+
+    def write(key):
+        (_in_tmp / "providers.json").write_text(json.dumps(
+            {"ANTHROPIC": {"API_KEY": key, "API_URL": "",
+                           "is_v1_compatible": False}}), encoding="utf-8")
+
+    write("")
+    with pytest.raises(ValueError, match=r"ANTHROPIC has no API_KEY in "
+                                         r"providers\.json, and its SDK "
+                                         r"cannot send a request without one"):
+        client_module.api_initialization("ANTHROPIC")
+    assert built == []
+    assert "ANTHROPIC" not in client_module._client_cache
+
+    # Nothing about the refusal was kept: adding the key is enough.
+    write("sk-test-not-real")
+    assert client_module.api_initialization("ANTHROPIC") is not None
+    assert built == [{"api_key": "sk-test-not-real"}]
+
+
+def test_an_empty_key_elsewhere_still_reaches_its_sdk(_in_tmp, monkeypatch):
+    """The refusal is ANTHROPIC's alone, the owner's choice in batch 234:
+    an OpenAI-compatible entry with no key is handed to its SDK unchanged,
+    which decides, as before."""
+    import sys
+
+    from core import client as client_module
+
+    built = []
+    monkeypatch.setattr(sys.modules["openai"], "OpenAI",
+                        lambda **kw: built.append(kw) or object())
+    (_in_tmp / "providers.json").write_text(json.dumps(
+        {"LOCAL": {"API_KEY": "", "API_URL": "http://127.0.0.1:1/v1",
+                   "is_v1_compatible": True}}), encoding="utf-8")
+
+    client_module.api_initialization("LOCAL")
+    assert built == [{"base_url": "http://127.0.0.1:1/v1", "api_key": ""}]
+
+
 # ---------------------------------------------------------------------------
 # ---- Batch 35: resolution once the harness stops living in the cwd ---------
 # ---------------------------------------------------------------------------

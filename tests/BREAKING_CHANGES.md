@@ -15,6 +15,22 @@ other name.
 
 ---
 
+## anthropic 2.x and openai 3.x (batch 234)
+
+anthropic 2.1.0 sends API version 2026-10-21 and the key as
+`Authorization: Bearer`, and both SDKs run on httpx2. The suite fakes both
+packages everywhere but `test_sdk_conformance.py`, so these rows are where
+the new shapes are held.
+
+| Change | Test | Fix |
+|---|---|---|
+| Send a temperature to ANTHROPIC again, on any model | `test_anthropic_drops_it_on_every_model`, `test_anthropic_is_sent_no_temperature_on_any_model` | 2.x's `messages.stream()` has no such parameter (TypeError) and 2026-10-21 refuses it on every model (A82, amended) |
+| Ask the reject set through ANTHROPIC | `test_sampling_dropped_for_models_that_reject_it` stays green without the set | Ask it through a gateway: ANTHROPIC drops before the set is read |
+| Remove a 5.x Claude name from `models_rejecting_sampling_params` | `test_the_5x_claude_models_are_listed_for_a_gateway` | The names are for Claude by its bare name through an OpenAI-compatible gateway |
+| Build an Anthropic client with an empty key, or cache the refusal | `test_an_empty_anthropic_key_is_refused_before_a_client_exists` | `credentials.empty_key_refusal` before the client: 2.x turns an empty key into a retried "Connection error." |
+| Refuse an empty key for every provider | `test_an_empty_key_elsewhere_still_reaches_its_sdk` | ANTHROPIC only, the owner's choice; an OpenAI-compatible entry's SDK decides |
+| Put the ChatGPT plan's conformance mock back on httpx | `test_the_plan_mock_runs_on_the_http_stack_production_uses` | httpx2's MockTransport: openai 3.x takes an httpx client only through a legacy escape hatch |
+
 ## A confined child may write its own result (batch 233)
 
 `security/confine.py`'s limits layer keeps the `RLIMIT_FSIZE` already in

@@ -29867,3 +29867,107 @@ passed on their first run.
   the control, and a comment change stays green.
 - **Full suite:** 8797 passed, 79 skipped in 1:55, nothing failed (the two new tests skip on Windows and ran under WSL). ruff clean; bandit 0 outside the baseline once the new test's subprocess call carried its reasoned `nosec`, no count grew; gitleaks on an export: no leaks.
 - **Version**, by `scripts/version.py bump`: `0.3.4-b.16.bugfixes.r57e749187eaf`.
+
+## Batch 234 -- anthropic 2.x and openai 3.x, measured where the suite fakes them (2026-11-04)
+
+**The owner's question:** vet Dependabot's PR #271 (anthropic 0.116.0 ->
+2.3.0, openai 2.45.0 -> 3.41.0 and six more), which batch 208 deferred to
+batches of their own. Its CI was green, and `test_sdk_conformance.py` does
+import the installed SDKs, so green held the shapes that file checks. It
+drives no request over HTTP, and the suite fakes both packages everywhere
+else.
+
+**What changed underneath.** Both SDKs moved to httpx2. anthropic 1.0 took
+`temperature`, `top_p` and `top_k` out of `messages.stream()`; 2.0 sends
+`anthropic-version: 2026-10-21`, which refuses all three on every model, and
+sends the key as `Authorization: Bearer` instead of `X-Api-Key`. openai 3.0
+stopped installing httpx. httpx2 was already here through mcp, and httpx
+stays: the harness imports it.
+
+**Measured, not read.** A local mock of `/v1/messages`, `/v1/models`,
+`/v1/chat/completions` and `/v1/embeddings`, driven through
+`core/client.py`'s own `call_model_stream`, `effort_for`,
+`context_window_for` and `embed_texts` under each pin set, and the requests
+and results diffed. Streaming with and without effort, thinking, tool calls,
+usage, the effort and window query, embeddings, error types and retry counts
+came out identical; the headers changed as above. Three things did not:
+
+- A temperature on ANTHROPIC became `TypeError: Messages.stream() got an
+  unexpected keyword argument 'temperature'`, on any model. Latent, since
+  every caller passes None. The baseline found the old pins sending one to
+  `claude-opus-5-5`, which `models_rejecting_sampling_params` predated.
+- An empty ANTHROPIC key, which 0.116.0 refused as a TypeError naming the
+  problem, became "Connection error.": the SDK builds `Bearer `, httpx2
+  refuses it as an illegal header before anything is sent, and the SDK wraps
+  that in `APIConnectionError`, which `provider_errors.is_transient` retries.
+  Reachable, because launch only warns about a missing key. An empty OpenAI
+  key fails at construction on both versions (`OpenAIError`), unchanged.
+- `docs/THIRD_PARTY_NOTICES.md`, which npm ships and no test reads, said
+  anthropic is MIT. 2.x is Apache-2.0, read from the package's own metadata.
+
+**The owner's choices**, each the recommended option:
+
+- **Versions: the two-week rule** of batches 172 and 208. Five of the PR's
+  releases were younger than two weeks (6 to 12 days), so this takes the
+  newest at least two weeks old: anthropic 2.1.0, openai 3.36.0,
+  google-genai 2.32.0, ddgs 9.16.0, and pydantic stays 2.14.1; sqlmodel
+  0.0.48, markitdown 0.1.9 and protobuf 7.36.2 as the PR had them. OSV lists
+  no advisory for any candidate. The probe was re-run on these exact pins.
+- **Floors kept.** The PR raised `rich` to 15.0.0, `cryptography` to 50.0.2
+  and `PyJWT` to 2.15.1. `rich`'s floor is textual's own and the other two
+  sit at the first release with no advisories, which OSV still says of
+  50.0.0 and 2.15.0, so raising them states a requirement nothing has.
+- **The empty key is refused before a client exists.** `api_initialization`
+  raises ValueError with `credentials.empty_key_refusal` for an empty
+  ANTHROPIC key, and caches nothing. ANTHROPIC only: an OpenAI-compatible
+  entry's SDK still decides. Declined: classifying the wrapped
+  LocalProtocolError in `provider_errors` (the message would still read
+  "Connection error"), and both.
+- **The temperature is dropped on ANTHROPIC on every model**, with the
+  WARNING the other drops log (A82, amended). The set stays for Claude by
+  its bare name through an OpenAI-compatible gateway, and gains Fable 5.1,
+  Mythos 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5. Declined: the drop alone,
+  and removing the parameter from the loop.
+
+**Found while writing it: the plan's conformance mock was on the wrong
+stack.** The ChatGPT-plan tests handed the real openai an httpx client with
+httpx's MockTransport, and stayed green on 3.x through openai's "temporary
+escape hatch" for legacy httpx clients, which keeps httpx's own request,
+response and exception classes and which OpenAI says may be discontinued.
+`_chatgpt_client` passes no client, so production runs on httpx2. The mock
+is on httpx2's MockTransport now, and a new test holds the two stacks equal.
+`provider_errors` reads exception names, and an httpx2 transport error
+classifies exactly as httpx's does (five classes, measured).
+
+Re-checked rather than copied: google-genai 2.32.0's `Schema` has the same
+25 fields and `ThinkingConfig.thinking_budget`, and it still makes one
+attempt on a 503 with no `retry_options` (against a mock). ddgs needs
+neither HTTP stack (`pip show`); only google-genai still requires httpx.
+
+**Not verified:** a live call to Anthropic, OpenAI, Gemini or the ChatGPT
+plan on the new pins, since no key is set here. The Gemini half is batch
+208's reason for deferring google-genai; the conformance file is its
+evidence, as it was for 2.29.0.
+
+### Verified
+
+- **The probe, on the exact pins:** all seventeen scenarios match the old
+  SDKs except the intended one, a temperature on ANTHROPIC now dropped with
+  its WARNING. Its scripts were scratch, not committed.
+- **Tests:** six new, and three changed: `test_call_model_passes_temperature_when_provided`
+  lost its Anthropic half, `test_sampling_dropped_for_models_that_reject_it`
+  asks through a gateway (ANTHROPIC no longer reads the set), and
+  `_real_plan` mocks httpx2. Eight mutations, each red on its assertion,
+  with the worktree byte-identical afterwards: no ANTHROPIC drop, no
+  refusal, a refusal for every provider, a cached refusal, the plan mock
+  back on httpx, a 5.x name removed, the set unread, the file unnamed.
+- **Full suite on the new pins** (a venv built from `requirements.txt` and
+  `requirements-test.txt`): 8803 passed, 79 skipped in 1:48 with
+  `AGENT_WORKSPACE` unset, as CI runs. The run with it set failed only
+  `test_a_crlf_checkout_stays_crlf`, which fails whenever the worktree's
+  `config.yaml` is CRLF under `core.autocrlf`; it passes once the copy
+  matches the index's LF, and the diff is the same nine lines either way.
+- ruff clean; bandit 0 new against the baseline (47 live, all baselined)
+  and the count check found none grew; pip-audit clean on all three
+  requirements files; gitleaks on an export of the tracked files: no leaks.
+- **Version**, by `scripts/version.py bump`: `0.3.5-b.1.sdk-bump.rdbdd626130cf`.

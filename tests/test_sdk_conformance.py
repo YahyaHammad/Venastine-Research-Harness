@@ -142,7 +142,7 @@ def test_every_genai_keyword_is_a_field_on_the_pinned_class():
     to all of them.
 
     Green today: the Google translation is conformant against
-    google-genai==2.29.0. That is worth pinning rather than assuming, because
+    google-genai==2.32.0 (2.29.0 until batch 234). That is worth pinning rather than assuming, because
     §9's Google implementation is verified nowhere else in the suite. Since
     batch 172 the walk also covers `Part(thought_signature=...)` (§82), and
     no keyword is exempt: `thinking_budget` was, while the 1.0.0 pin lacked
@@ -978,8 +978,15 @@ def test_the_GOOGLE_usage_read_against_a_REAL_nullable_usage_object(
 #
 # CG21 chose the openai SDK on four properties of the pinned 2.45.0, checked
 # by reading its source in batch 186 and measured on the plan route in
-# slice 2a. Each is held here against the REAL package, with httpx's own
-# MockTransport standing in for OpenAI: no network, no credential.
+# slice 2a. Each is held here against the REAL package, with a MockTransport
+# standing in for OpenAI: no network, no credential.
+#
+# HTTPX2's MockTransport since batch 234, because openai 3.x is built on
+# httpx2 and `_chatgpt_client` hands it no client of its own. These tests
+# kept passing on 3.x with an httpx client, through the SDK's "temporary
+# escape hatch" for legacy httpx clients -- a path production never takes,
+# with httpx's own request, response and exception classes, and one OpenAI
+# says may be discontinued. The last test below holds the two together.
 
 _PLAN_EVENTS = (
     {"type": "response.created",
@@ -1020,7 +1027,9 @@ def _real_plan(monkeypatch, *answers):
     monkeypatch.setattr(chatgpt_auth, "status", lambda: chatgpt_auth.Status(
         signed_in=True, plan_usage=True, registered=True, expires_at=None))
     with real_package("openai", "httpx"):
-        import httpx
+        # httpx2 is not one of the root conftest's fakes, so this is the
+        # same module the real openai just imported.
+        import httpx2
         import openai
 
         import core.client as client
@@ -1031,8 +1040,8 @@ def _real_plan(monkeypatch, *answers):
             seen.append(request)
             status, content = queue.pop(0)
             if isinstance(content, dict):
-                return httpx.Response(status, json=content)
-            return httpx.Response(status, content=content)
+                return httpx2.Response(status, json=content)
+            return httpx2.Response(status, content=content)
 
         def key():
             keys.append(f"at-{len(keys) + 1}")
@@ -1040,7 +1049,7 @@ def _real_plan(monkeypatch, *answers):
 
         sdk = openai.OpenAI(
             base_url=chatgpt_auth.RESOURCE, api_key=key, max_retries=0,
-            http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+            http_client=httpx2.Client(transport=httpx2.MockTransport(handler)))
         yield sdk, seen, keys, client
 
 
@@ -1145,3 +1154,27 @@ def test_the_REAL_sdk_holds_the_token_it_sent_for_the_401_refresh(
     assert replaced == ["at-1"]
     assert [r.headers["authorization"] for r in seen] == [
         "Bearer at-1", "Bearer at-2"]
+
+
+def test_the_plan_mock_runs_on_the_http_stack_production_uses(monkeypatch):
+    """Batch 234. `_real_plan` is only evidence while its client is the kind
+    `_chatgpt_client` gets by default. openai 3.x accepts a legacy httpx
+    client too and keeps httpx's classes on it, so a mock left on httpx
+    stays green on a path production never takes."""
+    from core import chatgpt_auth
+
+    with _real_plan(monkeypatch) as (sdk, _, _, _):
+        import openai
+
+        default = openai.OpenAI(base_url=chatgpt_auth.RESOURCE,
+                                api_key="unused", max_retries=0)
+
+        def stack(sdk_client):
+            # The SDK wraps its default client in a subclass of its own, so
+            # the HTTP library is read off the class's ancestry.
+            return next(k.__module__.split(".")[0]
+                        for k in type(sdk_client._client).__mro__
+                        if k.__module__.split(".")[0] in ("httpx", "httpx2"))
+
+        mocked, production = stack(sdk), stack(default)
+    assert mocked == production, (mocked, production)

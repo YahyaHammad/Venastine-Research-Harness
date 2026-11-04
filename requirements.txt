@@ -7,10 +7,24 @@
 # only reachable consumer is behind read/write/edit, which are globally
 # denied. `pip install -e ".[documents]"` brings them back.
 
-anthropic==0.116.0
-ddgs==9.14.4
+# Batch 234, from Dependabot's group (PR #271): anthropic 0.116.0 -> 2.1.0
+# and openai 2.45.0 -> 3.36.0, each the newest release at least two weeks
+# old, the owner's rule from batches 172 and 208 (the PR proposed 2.3.0 and
+# 3.41.0). Both move their HTTP stack to httpx2. anthropic 2.0 also sends
+# `anthropic-version: 2026-10-21` and the key as `Authorization: Bearer`;
+# that API version refuses a temperature on every model, and 1.0 took the
+# parameter out of `messages.stream()`, so core/client.py drops one for
+# ANTHROPIC (ROADMAP_v3 A82). An empty key, which 0.116.0 refused as a
+# TypeError, became a retried "Connection error." (httpx2 refuses the
+# header `Bearer `), so api_initialization refuses it first. Measured with
+# core/client.py's own calls against a local mock on both pin sets;
+# test_sdk_conformance.py re-checks the shapes. What to re-measure when
+# these move: that the stream, the effort query and the error types still
+# match, since the suite fakes both packages everywhere else.
+anthropic==2.1.0
+ddgs==9.16.0
 httpx==0.28.1
-openai==2.45.0
+openai==3.36.0
 # ROADMAP_v3 §82 (GS1), batch 172: 1.0.0 -> 2.29.0, the owner's choice.
 # Gemini 3 refuses a request whose current turn holds a function call
 # without the thought signature it came with; 1.0.0's Part had no field
@@ -20,8 +34,10 @@ openai==2.45.0
 # ThinkingConfig.thinking_budget, which core/client.py checks for at
 # runtime, so Google reasoning effort is ON now (ROADMAP_v2 §16), and
 # §9's Google implementation was retested live against it. Its
-# transport is httpx now, not requests.
-google-genai==2.29.0
+# transport is httpx now, not requests. 2.32.0 since batch 234, the newest
+# release at least two weeks old; test_sdk_conformance.py is the evidence,
+# with no live Gemini call (no key on this machine).
+google-genai==2.32.0
 # Batch 208, from Dependabot's group, the owner's choice of which: the
 # packages below are ones the suite runs for real rather than faking, so
 # a green suite is evidence about them, and each release was at least two
@@ -38,7 +54,8 @@ google-genai==2.29.0
 # reaches pillow.
 pydantic==2.14.1
 sympy==1.14.0
-sqlmodel==0.0.39
+# 0.0.48 since batch 234: test_storage_e2e.py runs it for real.
+sqlmodel==0.0.48
 python-dotenv==1.2.4
 pyyaml==6.0.3
 # config.yaml, via config_schema.py. TWO YAML PARSERS IN ONE TREE IS
@@ -116,8 +133,10 @@ rich>=14.2,<16
 # .is_error, was camelCase), timeouts are float seconds (was timedelta),
 # the exception is MCPError (was McpError), streamablehttp_client is
 # removed, and httpx/httpx-sse are replaced by httpx2 -- which is why
-# there are now two HTTP stacks installed. httpx stays; anthropic, openai
-# and ddgs all still need it.
+# there are now two HTTP stacks installed. httpx stays: the harness imports
+# it itself (fetch_url, arxiv, scholar, /connect, the hosted sign-in) and
+# google-genai needs it. Since batch 234 anthropic and openai are on httpx2
+# too, and ddgs needs neither (measured with `pip show` in a fresh venv).
 # EXACT, not the `>=2.0,<3` range this used to carry (batch 32, CI run
 # 32778904550). D22's upper bound did its job -- no major migration -- but a
 # MINOR still changed observable behaviour underneath it: 2.1.0 stopped
