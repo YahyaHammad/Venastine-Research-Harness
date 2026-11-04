@@ -1867,7 +1867,8 @@ def test_a_thread_id_is_stored_in_a_spelling_str_does_not_produce(
         "and compares the row ids as they come, which is correct only "
         "while this holds -- it is pinned here instead of being branched "
         "on, because no build of this project has written anything else "
-        "(sqlmodel==0.0.39 since the pin was introduced)")
+        "(sqlmodel 0.0.39 from the pin's introduction, and 0.0.48 since "
+        "batch 234, held here on each)")
     assert str(thread_id) not in stored, (
         "the database holds the dashed spelling too -- which would make "
         "the literal comparison tier 1 used until batch 154 correct")

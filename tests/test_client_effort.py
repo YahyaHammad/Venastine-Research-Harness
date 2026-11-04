@@ -52,10 +52,13 @@ def _clear_effort_cache():
 def test_sampling_dropped_for_models_that_reject_it(caplog):
     """The exact shape of the ensemble defect: a model in the reject set
     must not receive temperature, and the drop must be logged rather than
-    silent."""
+    silent.
+
+    Asked through a gateway since batch 234: ANTHROPIC drops a temperature
+    on every model now, so asking there would pass without the set."""
     model = next(iter(config.MODELS_REJECTING_SAMPLING_PARAMS))
     with caplog.at_level(logging.WARNING, logger="core.client"):
-        assert _sampling_kwargs("ANTHROPIC", model, 1.0) == {}
+        assert _sampling_kwargs("GATEWAY", model, 1.0) == {}
     assert any("Dropping temperature" in r.message for r in caplog.records)
 
 
@@ -95,6 +98,29 @@ def test_the_geminis_that_ignore_it_are_in_the_set():
     for model in ("gemini-3.6-flash", "gemini-3.5-flash-lite"):
         assert model in config.MODELS_REJECTING_SAMPLING_PARAMS
         assert _sampling_kwargs("GOOGLE", model, 0.7) == {}
+
+
+def test_anthropic_drops_it_on_every_model(caplog):
+    """Batch 234 (A82, amended). anthropic 2.x sends API version 2026-10-21,
+    which refuses a temperature on every model, and 1.0 took the parameter
+    out of `messages.stream()`, so passing one is a TypeError before
+    anything is sent (measured). A model the set does not list is the case
+    the set could never cover."""
+    assert "claude-sonnet-4-6" not in config.MODELS_REJECTING_SAMPLING_PARAMS
+    with caplog.at_level(logging.WARNING, logger="core.client"):
+        assert _sampling_kwargs("ANTHROPIC", "claude-sonnet-4-6", 0.2) == {}
+    assert any("2026-10-21" in r.message for r in caplog.records)
+
+
+def test_the_5x_claude_models_are_listed_for_a_gateway():
+    """Batch 234. ANTHROPIC no longer consults the set, so its claude names
+    are for Claude reached by its bare name through an OpenAI-compatible
+    gateway, which sends whatever it is given. The 5.x generation was
+    missing: each rejects a temperature, or any non-default one."""
+    for model in ("claude-fable-5-1", "claude-haiku-5-5", "claude-mythos-5-1",
+                  "claude-opus-5-5", "claude-sonnet-5-5"):
+        assert model in config.MODELS_REJECTING_SAMPLING_PARAMS
+        assert _sampling_kwargs("GATEWAY", model, 0.7) == {}
 
 
 def test_no_temperature_means_no_key_at_all():

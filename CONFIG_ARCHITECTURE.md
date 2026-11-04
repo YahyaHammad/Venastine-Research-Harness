@@ -231,8 +231,9 @@ Batch 91. Nothing retried a model call before this, and the SDKs cover less
 than they appear to: openai and anthropic retry a request that fails BEFORE
 its stream opens (408/409/429/5xx, connection errors, twice each), but an
 error sent inside a stream that opened with 200 is raised straight up by
-both, and google-genai retries nothing at all unless told to (1.0.0, and
-2.29.0 since batch 172: with no `retry_options` it makes one attempt).
+both, and google-genai retries nothing at all unless told to (1.0.0,
+2.29.0 since batch 172, and 2.32.0 since batch 234, measured on a 503:
+with no `retry_options` it makes one attempt).
 OpenRouter reports an
 overloaded upstream exactly that way -- "The service is temporarily
 unavailable", "Upstream idle timeout exceeded" -- which failed four nested
@@ -394,6 +395,14 @@ the same and then refuse them with a 400, so a new Gemini belongs here when
 it ships. OpenAI's reasoning models are NOT listed: core/client.py drops a
 temperature on OPENAI whenever a reasoning effort other than "none" is
 sent, which is OpenAI's documented rule and needs no names.
+
+ON ANTHROPIC THE LIST IS NOT CONSULTED, since batch 234 (A82, amended).
+anthropic 2.x sends API version 2026-10-21, which refuses all three
+parameters on every model, even at the default, so core/client.py drops a
+temperature there on every model. The claude names stay, and the five
+5.x-generation ones were added (Fable 5.1, Mythos 5.1, Opus 5.5, Sonnet
+5.5, Haiku 5.5), for Claude reached by its bare name through an
+OpenAI-compatible gateway, which still sends whatever it is given.
 
 ## Critic-model routing (ROADMAP §11)
 
@@ -656,7 +665,7 @@ SDK's "decide dynamically" sentinel.
 
 Live since batch 172 (ROADMAP_v3 §82). Until then this map was never sent:
 the google-genai pin, 1.0.0, had no `thinking_budget`, so Google reported
-no levels. The 2.29.0 pin has it. Measured on Gemini 3: every budget here,
+no levels. The pin has it since 2.29.0 (2.32.0 since batch 234). Measured on Gemini 3: every budget here,
 and 0, was accepted by gemini-3.1-flash-lite. Gemini 3's native control
 is `thinking_level`; this map sends budgets, which it still takes. A Gemini
 model with no `model_effort_levels` entry gets `default_effort_levels` and a

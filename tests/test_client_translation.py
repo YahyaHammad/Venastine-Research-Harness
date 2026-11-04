@@ -796,13 +796,8 @@ def _stream_openai(captured):
 
 def test_call_model_passes_temperature_when_provided():
     """When temperature is explicitly given, it must appear in the API
-    call kwargs for all three providers."""
-    # Anthropic
-    captured = {}
-    client = _stream_anthropic(captured)
-    _call(client, "ANTHROPIC", "m", [], "sys", [], temperature=0.7)
-    assert captured["temperature"] == 0.7
-
+    call kwargs for the providers that still take one. Anthropic was the
+    third until batch 234: the test below."""
     # OpenAI
     captured2 = {}
     client2 = _stream_openai(captured2)
@@ -832,6 +827,18 @@ def test_openai_is_sent_no_temperature_while_it_reasons():
     _call(_stream_openai(captured), "OPENAI", "gpt-5.1", [], "sys", [],
           temperature=0.7, effort="none")
     assert captured["temperature"] == 0.7
+
+
+def test_anthropic_is_sent_no_temperature_on_any_model():
+    """Batch 234 (A82, amended), at the wire: anthropic 2.x's
+    `messages.stream()` has no `temperature` parameter, so one in the
+    kwargs is a TypeError before any request, and API version 2026-10-21
+    refuses it on every model. A model the reject set does not list."""
+    captured = {}
+    _call(_stream_anthropic(captured), "ANTHROPIC", "claude-sonnet-4-6", [],
+          "sys", [], temperature=0.7)
+    assert captured["model"] == "claude-sonnet-4-6"
+    assert "temperature" not in captured
 
 
 def test_a_gemini_that_ignores_temperature_is_sent_none():

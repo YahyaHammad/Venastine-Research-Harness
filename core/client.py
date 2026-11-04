@@ -75,6 +75,15 @@ def api_initialization(provider_name: str):
         from google import genai
         client = genai.Client(api_key=entry["API_KEY"])
     elif provider_name == "ANTHROPIC":
+        # Batch 234. Refused HERE, before a client exists, because the SDK
+        # no longer says what is wrong: 2.x sends the key as `Bearer <key>`,
+        # httpx2 refuses `Bearer ` as an illegal header before any request,
+        # and the SDK wraps that in APIConnectionError -- which
+        # provider_errors retries as a network blip. 0.116.0 refused the
+        # empty key itself, so no configuration that worked stops working.
+        # Nothing is cached, so adding the key takes effect on the next call.
+        if not entry.get("API_KEY"):
+            raise ValueError(credentials.empty_key_refusal(provider_name))
         from anthropic import Anthropic
         client = Anthropic(api_key=entry["API_KEY"])
         # Add further proprietary API formats here
@@ -351,15 +360,16 @@ def _token_count(usage_obj, field: str) -> Optional[int]:
     pinned SDKs and holds None, so the default never fires and the None
     travels into `core/loop.py`'s `usage_in + usage_out`. Measured per SDK
     (batch 147), because the three reasons are different and only one of
-    them is visible in a type annotation:
+    them is visible in a type annotation. test_sdk_conformance.py holds each
+    on the pin; the versions below are batch 234's:
 
-      google-genai 2.29.0  every field of (as on 1.0.0 before it)
+      google-genai 2.32.0  every field of (as on 1.0.0 before it)
                            GenerateContentResponseUsageMetadata is
                            Optional[int] = None, and a bare instance is
                            TRUTHY -- so `if usage_meta:` passes and then
                            every read is None.
-      anthropic 0.116.0    Usage.input_tokens and CompletionUsage.
-      openai 2.45.0        prompt_tokens are annotated `int` and REQUIRED,
+      anthropic 2.1.0      Usage.input_tokens and CompletionUsage.
+      openai 3.36.0        prompt_tokens are annotated `int` and REQUIRED,
                            which says what the server promises rather than
                            what the object holds: both SDKs parse wire JSON
                            through pydantic's construct(), which skips
@@ -517,9 +527,10 @@ def _reduce_for_google(node, accepted: set):
     `docs/ARCHITECTURE.md` 4.7 said the raw dict "auto-converts to
     `types.Schema`". It does not; it validates, and refuses.
 
-    Since batch 172 (§82) the pin is 2.29.0, whose `Schema` HAS
-    `additional_properties` -- and the Gemini API refuses it, so it is
-    still dropped: `accepted` is the verified set, not the SDK's.
+    Since batch 172 (§82) the pin's `Schema` HAS `additional_properties`
+    (2.29.0 then, 2.32.0 since batch 234, the same 25 fields) -- and the
+    Gemini API refuses it, so it is still dropped: `accepted` is the
+    verified set, not the SDK's.
     """
     if isinstance(node, list):
         return [_reduce_for_google(item, accepted) for item in node]
@@ -1260,6 +1271,14 @@ def _sampling_kwargs(provider_name: str, model: str, temperature,
     later Gemini will: no error, no effect, which is the one failure here
     worse than a 400. Those are named in the set below like the rest.
 
+    ON ANTHROPIC, EVERY MODEL, SINCE BATCH 234 (A82, amended). anthropic 2.x
+    sends API version 2026-10-21, which refuses `temperature`, `top_p` and
+    `top_k` with a 400 on every model, even at the default; and 1.0 took
+    them out of `messages.stream()`, so passing one is a TypeError before
+    anything is sent (measured). The set's Claude names stay for Claude
+    reached through an OpenAI-compatible gateway, where they are still the
+    only thing that can drop it.
+
     Dropping the parameter is logged at WARNING rather than done silently.
 
     THIS FUNCTION NOW HAS NO CALLER THAT DEPENDS ON IT, and the warning is
@@ -1285,6 +1304,11 @@ def _sampling_kwargs(provider_name: str, model: str, temperature,
         logger.warning(
             "Dropping temperature=%s: the ChatGPT plan's route refuses "
             "sampling parameters.", temperature)
+        return {}
+    if provider_name == "ANTHROPIC":
+        logger.warning(
+            "Dropping temperature=%s: Anthropic's API version 2026-10-21 "
+            "refuses sampling parameters on every model.", temperature)
         return {}
     if provider_name == "OPENAI" and effort and effort != "none":
         # §87. Sent no effort at all, a reasoning model still reasons at
@@ -1519,8 +1543,8 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
 # rather than one adapter each, because openai.types.Model is declared
 # `extra="allow"` -- a field the SDK does not model survives on the parsed
 # object and reaches `.model_extra`. Verified against the pinned openai
-# 2.45.0 in test_sdk_conformance.py, because that permissiveness is the
-# whole reason this is one function.
+# (2.45.0 when written, 3.36.0 since batch 234) in test_sdk_conformance.py,
+# because that permissiveness is the whole reason this is one function.
 #
 #   context_window      Groq
 #   context_length      Together, OpenRouter, Cohere (native /v1 only)
@@ -2199,8 +2223,8 @@ def call_model_stream(
             # ThinkingEvent(type="thinking", thinking=<delta>) -- which is
             # why this reads two attribute names rather than unpacking
             # content_block_delta by hand. Verified against the pinned
-            # anthropic==0.116.0 rather than assumed (D22), and pinned in
-            # tests/test_sdk_conformance.py.
+            # anthropic (0.116.0, and 2.1.0 since batch 234) rather than
+            # assumed (D22), and pinned in tests/test_sdk_conformance.py.
             #
             # Every other event kind is ignored on purpose: `text` is the
             # accumulated answer read off get_final_message() below, not

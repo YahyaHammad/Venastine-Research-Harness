@@ -229,6 +229,23 @@ def missing_key_message(provider_name: str) -> str:
             f"needs none.")
 
 
+def empty_key_refusal(provider_name: str) -> str:
+    """What a SEND says when a provider that cannot go keyless has no key.
+
+    missing_key_message is the launch and /model WARNING, and its "unless it
+    is a local endpoint" is true there. This is the refusal at the moment a
+    client would be built, for a provider with no local-endpoint case at all
+    (batch 234: ANTHROPIC). anthropic 0.116.0 refused an empty key itself
+    with a TypeError naming the problem; 2.x builds `Authorization: Bearer `,
+    httpx2 refuses that header before anything is sent, and the SDK reports
+    it as "Connection error." -- which core/provider_errors.py rightly
+    treats as transient, so it was retried as a network blip.
+    """
+    return (f"{provider_name} has no API_KEY in {LLM_PROVIDERS_FILE}, and its "
+            f"SDK cannot send a request without one. Add the key there, or "
+            f"with /connect {provider_name.lower()} in the TUI.")
+
+
 def missing_credential_message(provider_name: str,
                                entry: dict) -> "str | None":
     """What to say when `provider_name` has nothing to authenticate with, or

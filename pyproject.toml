@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "venastine-research-harness"
-version = "0.3.5"
+version = "0.3.5b1+sdk.bump.rdbdd626130cf"
 description = "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -77,7 +77,7 @@ Issues = "https://github.com/YahyaHammad/Venastine-Research-Harness/issues"
 # the repo imports it, and the only installed distribution requiring it is
 # onnxruntime, which arrives through markitdown. Left behind it would pin a
 # transitive dependency of a package no longer installed by default.
-documents = ["markitdown==0.1.6", "protobuf==7.35.1"]
+documents = ["markitdown==0.1.9", "protobuf==7.36.2"]
 
 # Optional in the code too, and documented as such at
 # core/reasoning/output_writer.py:185 -- the PDF path is guarded by

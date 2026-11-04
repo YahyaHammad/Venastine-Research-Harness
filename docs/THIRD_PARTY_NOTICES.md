@@ -2,11 +2,11 @@
 
 This project is licensed under the **Apache License 2.0** — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE) (Copyright 2026 Yahya Hammad).
 
-The dependencies listed below are **not** part of the project's own source but are required at install/runtime. All are permissive and **Apache-2.0 compatible**; the assessment was made on 2026-08-27. This file records it so a scanner or reviewer does not have to re-derive it.
+The dependencies listed below are **not** part of the project's own source but are required at install/runtime. All are permissive and **Apache-2.0 compatible**; the assessment was made on 2026-08-27, and re-read from each package's own metadata for batch 234's pins on 2026-11-04, when `anthropic` 2.0 moved from MIT to Apache-2.0. This file records it so a scanner or reviewer does not have to re-derive it.
 
 > **Scope.** Two things are covered here: the project's **declared direct** dependencies — the pins in `requirements.txt` and the extras in `pyproject.toml` — and, under *Non-code third-party material* below, the third-party **text** the repository reproduces.
 >
-> The transitive dependency closure is *not* enumerated: `sympy` pulls `mpmath`, `sqlmodel` pulls SQLAlchemy, and `mcp==2.3.0` brings `httpx2` (see the note beside the `mcp` pin in `requirements.txt`). Until batch 212 `matplotlib` was here too, pulling numpy, kiwisolver, fonttools and pillow; the confidence chart is drawn as SVG with the standard library now, and none of them is installed. For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
+> The transitive dependency closure is *not* enumerated: `sympy` pulls `mpmath`, `sqlmodel` pulls SQLAlchemy, and `mcp==2.3.0` brings `httpx2` (BSD-3-Clause), as `anthropic` and `openai` do since batch 234 (see the note beside the `mcp` pin in `requirements.txt`). Until batch 212 `matplotlib` was here too, pulling numpy, kiwisolver, fonttools and pillow; the confidence chart is drawn as SVG with the standard library now, and none of them is installed. For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
 
 > Versions shown are the pins from `requirements.txt` / `pyproject.toml` at the time this file was created. Where a range is used (e.g. `rich>=14.2,<16`) the exact resolved version will vary.
 
@@ -14,14 +14,14 @@ The dependencies listed below are **not** part of the project's own source but a
 
 | Package | Version (as pinned) | Primary License | Apache 2.0 Compatible | Source |
 |---|---|---|---|---|
-| anthropic | `==0.116.0` | MIT | Yes | https://pypi.org/project/anthropic/ |
-| ddgs | `==9.14.4` | MIT | Yes | https://pypi.org/project/ddgs/ |
+| anthropic | `==2.1.0` | Apache-2.0 (MIT through 0.x; 2.0 relicensed) | Yes | https://pypi.org/project/anthropic/ |
+| ddgs | `==9.16.0` | MIT | Yes | https://pypi.org/project/ddgs/ |
 | httpx | `==0.28.1` | BSD-3-Clause | Yes | https://pypi.org/project/httpx/ |
-| openai | `==2.45.0` | Apache-2.0 | Yes | https://pypi.org/project/openai/ |
-| google-genai | `==2.29.0` | Apache-2.0 | Yes | https://pypi.org/project/google-genai/ |
+| openai | `==3.36.0` | Apache-2.0 | Yes | https://pypi.org/project/openai/ |
+| google-genai | `==2.32.0` | Apache-2.0 | Yes | https://pypi.org/project/google-genai/ |
 | pydantic | `==2.14.1` | MIT | Yes | https://pypi.org/project/pydantic/ |
 | sympy | `==1.14.0` | BSD-3-Clause | Yes | https://pypi.org/project/sympy/ |
-| sqlmodel | `==0.0.39` | MIT | Yes | https://pypi.org/project/sqlmodel/ |
+| sqlmodel | `==0.0.48` | MIT | Yes | https://pypi.org/project/sqlmodel/ |
 | python-dotenv | `==1.2.4` | BSD-3-Clause | Yes | https://pypi.org/project/python-dotenv/ |
 | pyyaml | `==6.0.3` | MIT | Yes | https://pypi.org/project/PyYAML/ |
 | ruamel.yaml | `==0.19.1` | MIT | Yes | https://pypi.org/project/ruamel.yaml/ |
@@ -54,8 +54,8 @@ The dependencies listed below are **not** part of the project's own source but a
 
 | Package | Version (as pinned) | Primary License | Apache 2.0 Compatible | Notes |
 |---|---|---|---|---|
-| markitdown | `==0.1.6` (extra `documents`) | MIT | Yes | Permissive; only reachable behind `read`/`write`/`edit` (globally denied). |
-| protobuf | `==7.35.1` (extra `documents`) | BSD-3-Clause / Apache-2.0 | Yes | Permissive; transitive via `markitdown`→`onnxruntime`. |
+| markitdown | `==0.1.9` (extra `documents`) | MIT | Yes | Permissive; only reachable behind `read`/`write`/`edit` (globally denied). |
+| protobuf | `==7.36.2` (extra `documents`) | BSD-3-Clause / Apache-2.0 | Yes | Permissive; transitive via `markitdown`→`onnxruntime`. |
 | markdown | unpinned (extra `pdf`) | BSD-3-Clause | Yes | Permissive |
 | weasyprint | unpinned (extra `pdf`) | BSD-3-Clause (package) | Yes (with caveats) | Package itself BSD-3-Clause; transitive deps include LGPL (e.g. `pango`/`cairo` via system libs). See weasyprint docs. |
 
