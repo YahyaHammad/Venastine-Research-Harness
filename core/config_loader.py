@@ -298,6 +298,20 @@ class AgentDef:
     # be refused is not advertised in the first place).
     spawn_targets: Optional[list] = None
 
+    @property
+    def pins_model(self) -> bool:
+        """Whether this file names EITHER half of its model pair.
+
+        One predicate, because three readers ask it and have to agree:
+        the subagent spawn, which takes the `/submodel` pair only for an
+        agent that pins neither half (ROADMAP_v3 §57, SM6); the note a
+        `/model` switch owes an active agent that pins; and `/submodel`'s
+        list of the agents it does not reach. A half pin opts out WHOLE:
+        a model name means nothing against the wrong provider, so filling
+        the missing half from `/submodel` would build a pair nobody chose.
+        """
+        return bool(self.model or self.provider)
+
 
 def _user_config_dir() -> str:
     # Call-time resolution so tests can redirect it without touching the

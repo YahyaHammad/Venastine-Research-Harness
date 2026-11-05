@@ -401,6 +401,36 @@ class TestUsingThePlan:
         assert opened == [chatgpt_auth.USAGE_URL]
 
     @pytest.mark.asyncio
+    async def test_a_submodel_follows_the_link_rather_than_displacing_it(
+            self, providers_file, openai):
+        """ROADMAP_v3 §57 (SM10). The submodel's words END the header, so
+        the plan's words would no longer end it and a check on the line's
+        last words would drop the link. It stays beside the plan's words,
+        still clicks, and the subagents part follows it."""
+        from textual.widgets._header import HeaderTitle
+
+        from core import pipeline_models
+
+        app = _app()
+        async with app.run_test(size=(200, 30)) as pilot:
+            await _signed_in(app, pilot, openai)
+            opened = []
+            app._transcript.open_url = opened.append
+            pipeline_models.remember("subagent", "ANTHROPIC",
+                                     "claude-haiku-5-5")
+            app.provider_name, app.model = "CHATGPT", "gpt-6.1-sol"
+            app.refresh_status()
+            await pilot.pause()
+            y = app.query_one(HeaderTitle).region.y
+            row = "".join(segment.text for segment
+                          in app.screen._compositor.render_strips()[y])
+            assert ("CHATGPT | gpt-6.1-sol | Using ChatGPT plan · Manage "
+                    "usage · subagents: ANTHROPIC | claude-haiku-5-5") in row
+            await pilot.click(offset=(row.index("Manage usage") + 3, y))
+            await pilot.pause()
+        assert opened == [chatgpt_auth.USAGE_URL]
+
+    @pytest.mark.asyncio
     async def test_no_other_provider_gets_the_indicator_or_the_link(
             self, providers_file):
         app = _app()

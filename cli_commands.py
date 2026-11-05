@@ -453,6 +453,21 @@ def _cmd_model(session: ChatSession, args: str) -> None:
         _revalidate_effort(session)
 
 
+def _cmd_submodel(session: ChatSession, args: str) -> None:
+    """Choose the model spawned subagents run on (ROADMAP_v3 §57, SM11).
+
+    `core.connect.submodel_command` decides and says it, for both shells.
+    REMEMBERED, unlike this shell's /model, and not inconsistently: the
+    pair lives in core/pipeline_models.py's store, which a spawn reads in
+    either shell, so a choice made in the TUI already reaches this shell's
+    children. The command is how this shell sees it and clears it.
+    """
+    from core import connect
+
+    for _kind, text in connect.submodel_command(args, session.provider_name):
+        _out(text)
+
+
 def _revalidate_effort(session: ChatSession) -> None:
     """Effort is per-model: a level the old model took may be refused
     outright by the new one, and every turn would then fail with a
@@ -810,6 +825,7 @@ def register_cli_commands() -> None:
         bind("ref", _cmd_ref),
         bind("resume", _cmd_resume),
         bind("skill", _cmd_skill),
+        bind("submodel", _cmd_submodel),
         bind("summary", _cmd_summary),
         bind("threads", _cmd_threads),
     ):
