@@ -226,12 +226,45 @@ def request_payload(params: dict, context=None) -> dict:
             "candidates": manager.candidate_approvals(child)}
 
 
+def _child_pair(agent, parent_run) -> tuple:
+    """`(model, provider)` a spawned child runs on.
+
+    THREE TIERS, read top to bottom (ROADMAP_v3 §57, SM2):
+
+      * The agent's OWN pin, which is its identity: an agent that names a
+        model for being a different model must get it. A HALF pin keeps
+        today's rule exactly -- the named half, the other from the parent
+        run -- and opts the agent out of `/submodel` WHOLE (SM6), because
+        a pinned model name against the submodel's provider is a pair
+        nobody chose.
+      * `/submodel`'s pair, for an agent that pins neither half. It beats
+        the parent run's pair at every depth (SM7): it is the model for
+        subagents as a class, and a parent's pin is that parent's identity
+        rather than its children's. Read at SPAWN time, so a choice made
+        between turns reaches the next spawn without a restart.
+      * The parent run's pair, then the harness default -- what every
+        spawn got before §57, and still what one gets with nothing set.
+    """
+    from core import pipeline_models
+    from core.loop import DEFAULT_PROVIDER
+
+    if not agent.pins_model:
+        chosen = pipeline_models.resolve("subagent")
+        if chosen is not None:
+            return chosen["model"], chosen["provider_name"]
+    model = agent.model or (parent_run.model if parent_run else None) \
+        or config.MODEL_NAME
+    provider = agent.provider \
+        or (parent_run.provider_name if parent_run else None) \
+        or DEFAULT_PROVIDER
+    return model, provider
+
+
 def run(params: dict, parent_context=None, parent_run=None,
         response_channel=None, signoff=None, activity=None,
         memory=None, call_id=None, cancel=None) -> dict:
     from agents.manager import manager
     from core.loop import (
-        DEFAULT_PROVIDER,
         DEFAULT_SYSTEM_PROMPT,
         RunAgentLoop,
         with_persona,
@@ -274,13 +307,12 @@ def run(params: dict, parent_context=None, parent_run=None,
     # asked -- a headless run, where the child gets no grant anyway.
     granted = set(signoff) if signoff else set()
 
-    # Inherit the parent run's identity only where the agent definition
-    # is silent -- an agent's declared model/provider is its identity.
-    model = agent.model or (parent_run.model if parent_run else None) \
-        or config.MODEL_NAME
-    provider = agent.provider \
-        or (parent_run.provider_name if parent_run else None) \
-        or DEFAULT_PROVIDER
+    model, provider = _child_pair(agent, parent_run)
+    # The parent's level, unvalidated here on purpose: a child on its own
+    # pin or on the /submodel pair may be a model that refuses it, and
+    # core.client.effort_for drops a level the receiving model does not
+    # list at the send, with a warning. One validator at the wire rather
+    # than a guess at each site that can change the model.
     effort = parent_run.effort if parent_run else None
 
     # Batch 59. THE SPAN AND THE PASS-DOWN ARE ONE CHANGE, and the

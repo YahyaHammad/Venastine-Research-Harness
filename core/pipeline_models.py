@@ -1,7 +1,7 @@
 """
 core/pipeline_models.py
 
-The two pipeline model roles that are not the session model, remembered.
+The model roles that are not the session model, remembered.
 
 ROADMAP_v2 §45 (SQ7). A research run reaches for three models: the
 generator (the session pair, `/model`), the CRITIC that grounds and
@@ -19,10 +19,10 @@ import — WS6's argument for `core/model_windows.py`, unchanged, and §25's
 lesson about a capability the pipeline could not reach. It is equally not
 `core/session.py`, whose contract is that nothing there reaches disk.
 
-TWO ROLES IN ONE FILE, so both writers read-modify-write. RM4's shape and
-RM4's reason: a writer serialising only its own role would silently drop
-the other's, each correct in its own test. They are one file rather than
-two modules because they are the same KIND of fact — which model plays
+EVERY ROLE IN ONE FILE, so every writer reads, modifies and writes. RM4's
+shape and RM4's reason: a writer serialising only its own role would
+silently drop the others', each correct in its own test. They are one file
+rather than a module each because they are the same KIND of fact — which model plays
 which part in a run — and `model_windows.py` is next door as the example
 of when a second file is right instead (it holds a different kind of fact,
 keyed on a pair rather than naming one).
@@ -40,6 +40,17 @@ this harness's embedding calls — claim text and fetched page text — at a
 provider of its choosing. `embedder_model` and `critic_model` are
 therefore rejected there BY NAME, like `ensemble_models`, and this
 user-tier store is the route instead.
+
+A THIRD ROLE SINCE ROADMAP_v3 §57: `subagent`, set by `/submodel` in
+either shell. It is the model a SPAWNED child runs on when its own file
+pins neither half of a pair (SM6), at every depth and whatever its parent
+runs on (SM7) -- so a cheap child no longer has to run on its parent's
+expensive model. It is the same kind of fact as the other two, which part
+a model plays, and so it shares their file and their read-modify-write.
+It has NO `config.yaml` tier (SM5): `resolve` answers from this store or
+not at all, which is why its `_FALLBACK_ATTR` entry is None rather than a
+constant nobody sets. Nothing else reads it: the compactor, the pipeline
+reviewer and the initializer keep the session model (SM8).
 """
 
 import logging
@@ -61,10 +72,12 @@ STORE_VERSION = 1
 # stored: a typo'd `/embeder` writing a key nothing reads would look like
 # it worked and change nothing, which is the failure mode this whole
 # module exists to remove for CRITIC_MODEL.
-ROLES = ("critic", "embedder")
+ROLES = ("critic", "embedder", "subagent")
 
-# Which config.py constant answers when the store is silent.
-_FALLBACK_ATTR = {"critic": "CRITIC_MODEL", "embedder": "EMBEDDER_MODEL"}
+# Which config.py constant answers when the store is silent. None means
+# nothing does: `subagent` is remembered or unset (§57, SM5).
+_FALLBACK_ATTR = {"critic": "CRITIC_MODEL", "embedder": "EMBEDDER_MODEL",
+                  "subagent": None}
 
 
 def store_path() -> str:
@@ -137,7 +150,8 @@ def resolve(role: str) -> Optional[dict]:
     chosen = remembered(role)
     if chosen is not None:
         return chosen
-    fallback = getattr(config, _FALLBACK_ATTR[role], None)
+    attr = _FALLBACK_ATTR[role]
+    fallback = getattr(config, attr, None) if attr else None
     return fallback if _valid(fallback) else None
 
 

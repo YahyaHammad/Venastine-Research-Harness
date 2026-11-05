@@ -29971,3 +29971,66 @@ evidence, as it was for 2.29.0.
   and the count check found none grew; pip-audit clean on all three
   requirements files; gitleaks on an export of the tracked files: no leaks.
 - **Version**, by `scripts/version.py bump`: `0.3.5-b.1.sdk-bump.rdbdd626130cf`.
+
+## Batch 235 -- `/submodel`: one model for the spawned subagents (2026-11-05)
+
+**The owner's choice:** ROADMAP_v3 §57, from the unbuilt sections batch 122
+recorded, picked as the smallest because SM1 had already found its per-agent
+half built. What was new was `/submodel` and its four open questions.
+
+**Measured before asking.** A spawn resolved `agent.model or parent_run.model
+or config.MODEL_NAME`, and the provider the same way, each half on its own.
+So three more questions came out of the code rather than the record: what a
+HALF pin gets, whether a child of a pinned parent keeps inheriting that pin,
+and whether the CLI binds the command now that §89 gives both shells one
+catalog. Also measured: a child inherits the parent's effort level and
+`core.client.effort_for` already drops a level the receiving model refuses,
+at the send; and `deploy/hosted/supervisor.py` gives each hosted session its
+own `HOME`, so a remembered pair is per visitor and shared mode needs no
+refusal.
+
+**The owner's answers**, each the recommended option, locked as SM5-SM11:
+remembered in `core/pipeline_models.py`'s user-tier store as a third role,
+`subagent`, with no `config.yaml` key (SM5); a pin of either half opts an agent
+out whole (SM6); the submodel beats the parent run's pair at every depth
+(SM7); spawned subagents only, with the compactor, the pipeline reviewer and
+the initializer named as unreached (SM8); a missing key warns (SM9); the TUI's
+header names the pair while one is set, and the banner and the CLI's opening
+lines say it too (SM10); both shells bind it (SM11).
+
+**Built.** `agents/subagent_tool._child_pair` reads the three tiers at spawn
+time. `AgentDef.pins_model` is the one "pins either half" predicate, now also
+behind `/model`'s note about an active agent's pin. `core.connect.submodel_command`
+parses, refuses, stores and reports for both shells, taking its pair through
+`model_switch` so the plan's refusals hold and name `/submodel`. The store is
+the setting, so a failed write says spawns are unchanged rather than
+announcing a pair. The header's subagents part follows the plan's words, and
+`format_title` keeps Manage usage beside those words instead of checking the
+line's last ones.
+
+**Found, recorded and not changed** (§57's gap register): the pipeline
+reviewer never reads `agent.model`, so a `model:` line in a user-tier
+`pipeline-reviewer.md` is silently ignored; and `/critic` stores a ChatGPT-plan
+pair with a warning where `/model` refuses it, because it parses through the
+TUI's own helper rather than `model_switch`.
+
+### Verified
+
+- **Tests:** 25 new -- 24 in `tests/test_submodel.py`, driving the real spawn
+  with only the conversation it starts replaced, and one in
+  `tests/test_chatgpt_tui.py` clicking Manage usage with a submodel set.
+  Fifteen mutations, each red on its assertion, with the five mutated files
+  byte-identical afterwards: no submodel tier, a half pin taking it, the parent
+  beating it, a config tier, a writer dropping the other roles, `/model`'s
+  name in the plan refusal, a failed write announced, an unspawnable pin
+  listed, no busy refusal, no header part, the link checking the line's end,
+  no TUI banner line, no CLI opening line, a missing key refused, and a set
+  that says nothing of its reach.
+- **Full suite** (the batch 234 venv, built from `requirements.txt` and
+  `requirements-test.txt`): 8828 passed, 79 skipped in 1:48 with
+  `AGENT_WORKSPACE` unset, as CI runs, and the worktree's `config.yaml`
+  matched to the index's LF first.
+- ruff clean; bandit 0 new against the baseline (47 live, all baselined);
+  gitleaks on an export of the tracked and new files: no leaks. pip-audit
+  not re-run: no requirements file changed.
+- **Version**, by `scripts/version.py bump`: `0.3.6-b.1.submodel.r2eb70e59c2d0`.

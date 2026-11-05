@@ -1542,6 +1542,13 @@ class VenastineApp(App):
         pair = (self._unconnected_hint()
                 or f"{self.provider_name} | {self.model}{remembered}")
         self._transcript.write_system(f"{pair} | theme {self._theme_name}")
+        # ROADMAP_v3 §57 (SM10), and #138's rule above once more: spawned
+        # subagents coming up on a model no config file names must not have
+        # to be guessed at either. The submodel is only ever remembered.
+        sub = model_connect.submodel_label()
+        if sub:
+            self._transcript.write_system(
+                f"Subagents: {sub} (remembered; /submodel off clears it)")
 
     # -- the turn meter (batch 61) ------------------------------------------
 
@@ -1745,6 +1752,12 @@ class VenastineApp(App):
 
         ROADMAP_v3 §83 (CG8, CG19): on the ChatGPT plan the line says so,
         in OpenAI's words, and `format_title` adds the Manage usage click.
+
+        ROADMAP_v3 §57 (SM10): while a submodel is set the line ends with
+        `· subagents: PROVIDER | model`, and says nothing about it
+        otherwise. LAST, after the plan's words, so those keep describing
+        the pair they follow; `format_title` puts Manage usage back beside
+        them.
         """
         pair = f"{self.provider_name} | {self.model}"
         if self.provider_name == "CHATGPT":
@@ -1757,6 +1770,9 @@ class VenastineApp(App):
                 pair += " | Plan access not granted | use /connect or add API key"
             else:
                 pair += f" | {_USING_PLAN}"
+        sub = model_connect.submodel_label()
+        if sub:
+            pair += f"{_SUBAGENTS_SEPARATOR}{sub}"
         self.sub_title = self._unconnected_hint() or pair
 
     def format_title(self, title: str, sub_title: str) -> Content:
@@ -1770,11 +1786,16 @@ class VenastineApp(App):
         (batch 58). Measured headless on Textual 8.2.8: a click on the words
         runs the action and does not toggle the header's tall mode.
         """
-        content = super().format_title(title, sub_title)
-        if not sub_title.endswith(_USING_PLAN):
-            return content
-        return Content.assemble(content, (" · ", "dim"),
-                                Content.from_markup(_MANAGE_USAGE_MARKUP))
+        # §57 (SM10): a submodel's words follow the plan's, so the click is
+        # placed after the PLAN's words rather than at the end of the line,
+        # and the subagents part follows it as plain text.
+        head, sep, tail = sub_title.partition(_SUBAGENTS_SEPARATOR)
+        if not head.endswith(_USING_PLAN):
+            return super().format_title(title, sub_title)
+        content = Content.assemble(super().format_title(title, head),
+                                   (" · ", "dim"),
+                                   Content.from_markup(_MANAGE_USAGE_MARKUP))
+        return Content.assemble(content, sep + tail) if sep else content
 
     def action_manage_usage(self) -> None:
         """Open ChatGPT's usage page (CG8): the header's Manage usage."""
@@ -6651,6 +6672,26 @@ def _cmd_embedder(app: VenastineApp, args: str) -> None:
     app.start_embedder_probe(provider, model)
 
 
+def _cmd_submodel(app: VenastineApp, args: str) -> None:
+    """Choose the model spawned subagents run on (ROADMAP_v3 §57).
+
+    What it says and stores is `core.connect.submodel_command`'s, which the
+    CLI's handler prints too (SM11); this adds only the TUI's two parts.
+    The BUSY REFUSAL, for /critic's reason in a sharper form: a spawn
+    reads the pair when it starts, so a change made mid-turn would put the
+    rest of that turn's children on a model the turn did not begin with.
+    And the HEADER, which names the pair while one is set (SM10).
+    """
+    if args.strip() and app.refuse_if_occupied("change the submodel"):
+        return
+    for kind, text in model_connect.submodel_command(args, app.provider_name):
+        if kind == "error":
+            app._transcript.write_error(text)
+        else:
+            app._transcript.write_system(text)
+    app.refresh_status()
+
+
 # ---------------------------------------------------------------------------
 # ---- /config (batch 84) ---------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -7626,6 +7667,9 @@ _CHATGPT_SIGNED_OUT = model_connect.CHATGPT_SIGNED_OUT
 # header's link runs (CG19). Constants: nothing else reaches that markup.
 _USING_PLAN = "Using ChatGPT plan"
 _MANAGE_USAGE_MARKUP = "[@click=app.manage_usage]Manage usage[/]"
+# ROADMAP_v3 §57 (SM10). Where the header's subagents part starts: written
+# by refresh_status and split on by format_title, so one constant.
+_SUBAGENTS_SEPARATOR = " · subagents: "
 # CG1's sentence is core.chatgpt_auth.LOCAL_ONLY since batch 195, so the
 # launch warning in credentials.py can say it too.
 # The paste prompt's dismissal when the sign-in closes it itself -- the
@@ -8213,6 +8257,7 @@ def register_builtin_commands() -> None:
         bind("disconnect", _cmd_disconnect, complete=_disconnect_rows),
         bind("critic", _cmd_critic),
         bind("embedder", _cmd_embedder),
+        bind("submodel", _cmd_submodel),
         bind("research", _cmd_research),
         bind("compact", _cmd_compact),
         bind("window", _cmd_window),

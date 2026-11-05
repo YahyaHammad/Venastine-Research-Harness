@@ -632,6 +632,14 @@ def run_chat(
     print("Venastine Research Harness — chat mode.")
     print(f"Provider: {provider_name} | Model: {model} | "
           f"Effort: {effort or 'auto'}")
+    # ROADMAP_v3 §57 (SM10). A remembered submodel puts this shell's spawned
+    # subagents on a model no flag or config file names, so it is said
+    # where the session's own pair is.
+    from core import connect
+
+    submodel = connect.submodel_label()
+    if submodel:
+        print(f"Subagents: {submodel} (remembered; /submodel off clears it)")
     if session.thread_id:
         print(f"Resuming thread: {session.thread_id}")
         # §27 AC4/T5. --thread had the same gap as the TUI picker: the

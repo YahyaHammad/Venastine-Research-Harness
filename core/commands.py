@@ -134,6 +134,10 @@ _SPECS = (
                 absent={CLI: "not yet; run venastine --secrets status."}),
     CommandSpec("skill", "activate a skill for this session",
                 "[name|off <name>|clear]"),
+    # ROADMAP_v3 §57: both shells (SM11), since the pair it stores reaches
+    # either shell's spawns.
+    CommandSpec("submodel", "run spawned subagents on another model",
+                "[[PROVIDER] name|off]"),
     CommandSpec("summary", "distil this conversation without folding it"),
     CommandSpec("theme", "switch colour theme", "[name]",
                 absent={CLI: "a line-based terminal has no colour theme to "

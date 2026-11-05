@@ -38,7 +38,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§54. `@` names a file, and the tree is read once** — **(BUILT in batch 204)** (project paths and folders complete in the existing panel; names guide the agent to read, without loading contents)
 - **§55. The whole command, and what it printed** — **(BUILT in batch 125)** (a shell call shows a 140-character digest and its output is never rendered at all, so what the agent ran and what came back are both off screen)
 - **§56. A decision model as the shell classifier** — **(NOT BUILT: requested batch 122, specified, not designed)** (the gate decides from a word list and a token scan, so every judgement it cannot express as a rule costs an approval prompt, and the rules cannot be tuned per user)
-- **§57. One model for the subagents** — **(NOT BUILT: requested batch 122, specified, not designed)** (an agent definition can pin a model and nothing can set one for the subagents as a class, so a cheap child runs on the parent's expensive model)
+- **§57. One model for the subagents** — **(BUILT in batch 235)** (an agent definition can pin a model and nothing can set one for the subagents as a class, so a cheap child runs on the parent's expensive model)
 - **§58. Who the agent is when you ask it** — **(BUILT in batch 203)** (a short harness identity composed at turn time for ordinary chat, active agents and spawned subagents, naming their effective model/provider; internal compaction, review and research prompts stay task-specific; PR1–PR6)
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
@@ -1329,7 +1329,7 @@ cheaper model than the main agent, and for per-agent model and provider selectio
 So the per-agent half of the request exists. What is new is `/submodel` and the question of what
 happens when a provider is down.
 
-### Decisions (SM1-SM4)
+### Decisions (SM1-SM11)
 
 | # | Decision |
 |---|---|
@@ -1337,8 +1337,15 @@ happens when a provider is down.
 | **SM2** | **Precedence: an agent's own pin, then `/submodel`, then the session model.** (Owner decision.) It is the rule already written at every one of those three call sites, and the alternative would mean a session command silently downgrading an agent that was pinned to a strong model for a stated reason |
 | **SM3** | **`/submodel` names the agents it does not reach**, exactly as `/model` already does for the active agent. A command whose effect is invisible for the agents that pin their own is the silent-no-op shape this project keeps closing |
 | **SM4** | **No automatic cross-provider failover.** A run that answers on a model the transcript does not name is the drift class this record is full of, and the existing behaviour -- retry the transient, then fail with the provider's own reason -- is both honest and already built. A user whose provider is down switches with `/model`, which takes effect on the next turn |
+| **SM5** | **REMEMBERED, in the user-tier store only.** (Owner decision, batch 235.) A third role, `subagent`, in `core/pipeline_models.py` beside `critic` and `embedder`: never `settings.json`, for E2's reason (a cloned project must not choose the provider a child's task is sent to), and NO `config.yaml` key -- the pair is remembered or unset, so it can only come from a command someone typed. In `core/` because a spawn reads it in either shell; `/submodel off` clears it |
+| **SM6** | **A pin of EITHER half opts an agent out WHOLE.** (Owner decision.) A half-pinned agent keeps exactly the pre-§57 rule -- its named half, the other from the parent run -- and is named among the agents `/submodel` does not reach. Filling the missing half from the submodel would follow SM2 field by field and build a pair nobody chose: a model name means nothing against the wrong provider, which is `pipeline_models`' half-record rule |
+| **SM7** | **`/submodel` beats the parent run's pair, at every depth.** (Owner decision.) It is the model for subagents as a class, and a parent agent's pin is that parent's identity, not its children's. So SM2's third tier reads "what the spawning run is on", and an unpinned grandchild takes the submodel from its own read |
+| **SM8** | **Spawned subagents only.** (Owner decision.) The compactor, the pipeline reviewer and `/init`'s initializer keep the session model, and every report names them as unreached. A compaction summary stands in for the turns it replaces from then on, and the critic already has its own route (`/critic`) |
+| **SM9** | **A provider with no key WARNS and is kept.** (Owner decision.) `/model`'s and `/critic`'s rule for their reason: a local OpenAI-compatible endpoint takes no key and the ChatGPT plan has none. The plan's REFUSALS do apply -- `/submodel` takes its pair through `core.connect.model_switch`, as `/model` does, because a subagent's turn is a chat turn on another pair |
+| **SM10** | **The TUI's header names the pair while one is set**, as `· subagents: PROVIDER \| model` after the session's pair, and says nothing otherwise. (Owner decision.) The session banner and the CLI's opening lines say it too, by #138's rule: a launch whose children run on a model no config file names must not have to be guessed at. The sidebar's agent panel stays as it is: eighteen columns, already indented by depth |
+| **SM11** | **Both shells bind `/submodel`.** (Owner decision.) The pair reaches either shell's spawns, so each shell can show it and clear it. What the command does and says is `core.connect.submodel_command`'s, which both print -- the CLI's `/model` stays unremembered, and that is not inconsistent: this pair was never the session's |
 
-### What must be settled before this is built
+### Questions recorded before implementation (settled in batch 235 below)
 
 - Whether `/submodel` is remembered across launches. `/model` is (RM3), in the user-tier store beside
   `settings.json`, never in it.
@@ -1347,6 +1354,54 @@ happens when a provider is down.
 - Whether `/submodel` also applies to the compactor and the pipeline reviewer, which are agents that
   run without being spawned by a chat turn.
 - Whether the sidebar's agent panel shows the submodel.
+
+Measuring the code before asking added three more, now SM6, SM7 and SM11: what a HALF pin gets
+(`agent.model` and `agent.provider` resolve separately), whether a child of a pinned parent inherits
+that pin or takes the submodel, and whether the CLI binds the command.
+
+### Built and measured (batch 235, 2026-11-05)
+
+`agents/subagent_tool._child_pair` is the spawn's three tiers in order: the agent's own pin, the
+`subagent` role from `pipeline_models.resolve`, then the parent run's pair and the harness default.
+The role is read at SPAWN time, so a choice made between turns reaches the next spawn without a
+restart. `AgentDef.pins_model` is the one predicate for "pins either half", read by the spawn, by
+`/submodel`'s reach sentence and by the note a `/model` switch owes an active agent that pins.
+`core.connect.submodel_command` parses, refuses, stores and reports for both shells; the TUI adds
+the busy refusal (a spawn reads the pair when it starts, so a change mid-turn would split one turn's
+children across two models) and the header. **The store is the setting**: there is no session copy,
+so a write that failed says spawns are unchanged rather than announcing a pair nothing will use.
+
+Three facts measured on the way, none needing code:
+
+- **Effort is already safe.** A child inherits the parent's level, and `core.client.effort_for` drops
+  a level the receiving model does not list, at the send and with a warning. A submodel that refuses
+  the parent's effort costs a warning line, not a 400.
+- **A hosted session's store is its own.** `deploy/hosted/supervisor.py` gives every session its own
+  `HOME`, so one visitor's `/submodel` cannot reach another's spawns and shared mode needs no refusal.
+- **SM1's "three places" was a floor.** The initializer (`project_init/generator.py`) honours a pin
+  too, and `core/loop.py`'s agent turn is where both shells' `/agent` resolves it since §89. The
+  pipeline reviewer is the exception: `core/reasoning/review.py` runs on the research run's pair and
+  never reads `agent.model`, so a `model:` line in a user-tier `pipeline-reviewer.md` is silently
+  ignored. Recorded rather than changed here -- SM8 keeps the reviewer on the session model either
+  way, and honouring that pin is a decision about the reviewer, not about `/submodel`.
+
+`tests/test_submodel.py` drives the real spawn with only the conversation it starts replaced, both
+shells' command and the TUI's header and banner; `tests/test_chatgpt_tui.py` pins the plan's Manage
+usage link staying beside the plan's words when the subagents part follows them. Fifteen mutations
+-- each tier removed or reordered, a half pin taking the submodel, a config tier, a writer dropping the
+other roles, each report line and the busy refusal -- each failed its tests on an assertion.
+
+### Gap register
+
+- **The reviewer ignores an agent pin** (above). The silent-no-op shape, on a builtin a user would
+  have to override to meet it.
+- **`/critic` WARNS where `/model` refuses the ChatGPT plan.** It parses through the TUI's
+  `_pipeline_role_args`, not `model_switch`, so `/critic CHATGPT <name>` while signed out, or on a
+  hosted deployment, is stored with `missing_credential_message`'s warning, and the next run's
+  critic passes fail on it. `/submodel` does not share the gap; `/critic` was left as it was, being
+  §45's.
+
+**§57 is complete.**
 
 ---
 

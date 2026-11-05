@@ -288,9 +288,13 @@ def connected_providers() -> set:
 
 MODEL_USAGE = "Usage: /model <name>, or /model <PROVIDER> <name>."
 
-CHATGPT_SIGNED_OUT = (
-    "The ChatGPT plan is not signed in, so it cannot answer. /connect "
-    "chatgpt signs in; then /model CHATGPT <name>.")
+
+def _chatgpt_signed_out(command: str) -> str:
+    return ("The ChatGPT plan is not signed in, so it cannot answer. /connect "
+            f"chatgpt signs in; then /{command} CHATGPT <name>.")
+
+
+CHATGPT_SIGNED_OUT = _chatgpt_signed_out("model")
 
 
 def configured_providers(providers: dict) -> str:
@@ -304,24 +308,31 @@ def configured_providers(providers: dict) -> str:
     return ", ".join(named) if named else "none (add a key to providers.json)"
 
 
-def model_switch(args: str, current_provider: str) -> tuple:
+def model_switch(args: str, current_provider: str,
+                 command: str = "model") -> tuple:
     """`(provider, model, providers, error)` for `/model`'s argument.
 
     `/model <name>` keeps `current_provider`; `/model <PROVIDER> <name>`
     switches both. `error` is the sentence a refusal shows, and the other
     three are None with it. `providers` is the file as read after any
     entry this wrote, for the caller's missing-key warning.
+
+    `command` is `submodel` for `/submodel` (ROADMAP_v3 §57), which takes
+    the same pairs and refuses the same ones: a subagent's turn is a chat
+    turn on another pair, so the plan's refusals hold for it exactly. Only
+    the sentences that name a command change.
     """
     from core import chatgpt_auth
     from security import hosted
 
+    usage = MODEL_USAGE if command == "model" else SUBMODEL_USAGE
     parts = args.split()
     if len(parts) == 1:
         provider, model = current_provider, parts[0]
     elif len(parts) == 2:
         provider, model = parts[0].upper(), parts[1]
     else:
-        return None, None, None, MODEL_USAGE
+        return None, None, None, usage
 
     # CG1: a hosted deployment never reaches the plan, signed in or not, so
     # the switch refuses with the reason -- not with "/connect chatgpt
@@ -332,7 +343,7 @@ def model_switch(args: str, current_provider: str) -> tuple:
     # 2b. While it is signed out a switch would fail the next turn rather
     # than this command, so this refuses and says how to sign in (CG20).
     if provider == "CHATGPT" and not chatgpt_auth.status().signed_in:
-        return None, None, None, CHATGPT_SIGNED_OUT
+        return None, None, None, _chatgpt_signed_out(command)
     providers = credentials.load_provider_data()
     if provider == "CHATGPT" and provider not in providers:
         # A sign-in made before slice 2b wrote no entry; it is written now.
@@ -360,12 +371,118 @@ def agent_pin_note(agent, provider: str, model: str) -> Optional[str]:
     that agent is active -- the failure shape this project keeps
     producing.
     """
-    if agent is None or not (agent.model or agent.provider):
+    if agent is None or not agent.pins_model:
         return None
     return (f"Note: agent {agent.name!r} pins "
             f"{agent.provider or provider} | {agent.model or model} for "
             f"chat turns, so this applies to /research and to turns after "
             f"/agent default.")
+
+
+# ---------------------------------------------------------------------------
+# ---- /submodel (ROADMAP_v3 §57) ---------------------------------------------
+# ---------------------------------------------------------------------------
+# The model a spawned subagent runs on, for either shell (SM11). Everything
+# the command SAYS is decided here and both shells only print it, for
+# model_switch's reason above: two copies of what a command reports are two
+# copies that come to disagree. The pair itself lives in
+# core/pipeline_models.py as the `subagent` role, and the spawn reads it in
+# agents/subagent_tool.py.
+
+SUBMODEL_USAGE = ("Usage: /submodel <name>, or /submodel <PROVIDER> <name>, "
+                  "or /submodel off.")
+
+#: The runs `/submodel` never reaches, whatever it is set to (SM8). Said by
+#: every report, because a choice whose reach is invisible is the silent
+#: no-op SM3 exists to close.
+SUBMODEL_UNREACHED = ("the compactor, the pipeline reviewer and /init's "
+                      "initializer, which run on the session model")
+
+#: What `off` is spelled as. `/critic off`'s spellings, so the three role
+#: commands take the same words.
+_OFF = ("off", "clear", "auto", "none")
+
+
+def submodel_pinned_agents() -> list:
+    """The spawnable agents `/submodel` does not reach: any that pins
+    either half of its own pair (SM6). Sorted, for a stable sentence."""
+    from agents.manager import manager
+
+    return sorted(name for name, agent in manager.all().items()
+                  if agent.spawnable is True and agent.pins_model)
+
+
+def _submodel_reach() -> str:
+    pinned = submodel_pinned_agents()
+    agents = (f"the agents that pin their own model ({', '.join(pinned)}), "
+              f"or " if pinned else "")
+    return f"It does not reach {agents}{SUBMODEL_UNREACHED}."
+
+
+def submodel_label() -> Optional[str]:
+    """`PROVIDER | model` while a submodel is set, else None. What the TUI's
+    header and either shell's opening lines show (SM10)."""
+    from core import pipeline_models
+
+    pair = pipeline_models.resolve("subagent")
+    if pair is None:
+        return None
+    return f"{pair['provider_name']} | {pair['model']}"
+
+
+def submodel_command(args: str, current_provider: str) -> list:
+    """What `/submodel <args>` does and says: `[(kind, text)]`, where kind
+    is "system" or "error", in the order to print them.
+
+    THE STORE IS THE SETTING. There is no session copy for a spawn to read
+    instead, so a write that failed changed nothing, and this says so
+    rather than announcing a pair the next spawn will not use. The failure
+    itself WARNED inside `pipeline_models._write`.
+
+    A provider with no key WARNS and is kept (SM9), `/model`'s rule for
+    `/model`'s reason: a local OpenAI-compatible endpoint takes none and
+    the ChatGPT plan has none at all.
+    """
+    from core import pipeline_models
+
+    text = args.strip()
+    if not text:
+        label = submodel_label()
+        if label:
+            lines = [("system", f"Subagents: {label} (remembered). A spawned "
+                                f"agent that pins no model of its own runs "
+                                f"on it.")]
+        else:
+            lines = [("system", "No submodel set: a spawned subagent runs on "
+                                "the same model as the run that spawns it.")]
+        return lines + [("system", _submodel_reach()),
+                        ("system", SUBMODEL_USAGE)]
+
+    if text.lower() in _OFF:
+        outcome = pipeline_models.forget("subagent")
+        if outcome == "failed":
+            return [("error", "The remembered submodel could not be "
+                              "cleared, so spawns still use it.")]
+        if outcome == "absent":
+            return [("system", "No submodel was set.")]
+        return [("system", "Submodel cleared: a spawned subagent runs on the "
+                           "same model as the run that spawns it again.")]
+
+    provider, model, providers, error = model_switch(
+        text, current_provider, command="submodel")
+    if error:
+        return [("error", error)]
+    if not pipeline_models.remember("subagent", provider, model):
+        return [("error", f"{provider} | {model} could not be saved, so "
+                          f"spawns are unchanged.")]
+    lines = [("system", f"Subagents will run on {provider} | {model} from "
+                        f"the next spawn, in this launch and later ones, "
+                        f"until /submodel off.")]
+    missing = credentials.missing_credential_message(
+        provider, providers[provider])
+    if missing:
+        lines.append(("error", missing))
+    return lines + [("system", _submodel_reach())]
 
 
 # ---------------------------------------------------------------------------
