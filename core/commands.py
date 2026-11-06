@@ -100,7 +100,13 @@ _SPECS = (
     CommandSpec("effort", "switch reasoning effort", "[level|auto]"),
     CommandSpec("embedder", "choose the model that scores source similarity",
                 "[[PROVIDER] name|off]", absent={CLI: _IN_THE_TUI}),
-    CommandSpec("forget", "delete one durable memory", "<id>"),
+    # ROADMAP_v3 §59: the id is optional in the TUI, where /forget alone
+    # opens a picker. The CLI's handler still asks for it, and says so.
+    # 49 characters with its name and usage, inside the slash panel's 50 at
+    # 80x24 (54 less SUGGEST_CONT): past 50 the entry wraps to two rows,
+    # which moves the window test_the_window_can_drop_one_and_gain_two
+    # measures.
+    CommandSpec("forget", "pick memories to delete, or by id", "[id]"),
     CommandSpec("goal", "set the thread's persistent objective",
                 "[text|clear]"),
     CommandSpec("grill-me", "surface what still needs a decision"),

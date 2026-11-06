@@ -314,6 +314,11 @@ class HarnessConfig(_Model):
     subagent_max_depth: NonNegativeInt
     subagent_max_parallel: PositiveInt
 
+    # -- The active agent (ROADMAP_v3 section 59) --------------------------
+    # Names, not AgentDefs: the user and project tiers are discovered after
+    # this file is read, so a name is checked when shift+tab is pressed.
+    agent_cycle: list[NonEmptyStr]
+
     # -- Deep research pipeline -------------------------------------------
     max_pipeline_retries: NonNegativeInt
     max_json_retries: NonNegativeInt

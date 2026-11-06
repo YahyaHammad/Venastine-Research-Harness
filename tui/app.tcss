@@ -273,6 +273,10 @@ SubagentSignoffScreen {
     align: center middle;
 }
 
+MemoryPickerScreen {
+    align: center middle;
+}
+
 ConfirmScreen {
     align: center middle;
 }
@@ -513,7 +517,11 @@ ClaimsScreen {
    floor, and the title, the two-sentence help, the bar and this list
    have to share them -- at 14 the confirm button was off the bottom
    with twenty tools offered. */
-#grant-list {
+/* ROADMAP_v3 §59's memory picker shares the grant list's 8, for the same
+   18 rows: a longer list scrolls inside the dialog instead of pushing
+   Forget and Cancel off the bottom. */
+#grant-list,
+#forget-list {
     height: auto;
     max-height: 8;
     margin-bottom: 1;

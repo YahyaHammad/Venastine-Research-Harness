@@ -211,16 +211,19 @@ def test_the_tui_forgets_by_id(fake_storage):
     assert app.errors == []
 
 
-def test_forget_with_no_argument_explains_itself(fake_storage):
-    """Asserted on "Usage:" and not on "/memories", which BOTH branches
-    mention -- dropping the empty check falls through to the malformed-id
-    message, which is a different and more confusing answer to "I typed
-    /forget and pressed enter"."""
+def test_forget_with_nothing_to_pick_says_so(fake_storage):
+    """ROADMAP_v3 §59: `/forget` alone opens a picker now, and with no
+    memories there is nothing to open it over. Asserted as no ERROR as well
+    as the sentence -- dropping the empty check falls through to the
+    malformed-id message, which is a different and more confusing answer to
+    "I typed /forget and pressed enter". tests/test_pick_instead_of_typing.py
+    drives the picker itself."""
     app = _App()
 
     _cmd_forget(app, "  ")
 
-    assert app.errors and app.errors[0].startswith("Usage: /forget")
+    assert app.errors == []
+    assert any("No durable memories visible" in line for line in app.system)
 
 
 def test_forget_refuses_a_substring_rather_than_guessing(fake_storage):

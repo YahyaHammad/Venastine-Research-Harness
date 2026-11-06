@@ -3671,6 +3671,7 @@ def _modal_cases():
         ClaimsScreen,
         ConfirmScreen,
         GrantPickerScreen,
+        MemoryPickerScreen,
         NoticeScreen,
         ProjectKindScreen,
         QuestionScreen,
@@ -3719,6 +3720,9 @@ def _modal_cases():
          "#permission-dialog"),
         ("notice", lambda: NoticeScreen("Title", "Body text."),
          "#permission-dialog"),
+        ("memory-picker",
+         lambda: MemoryPickerScreen([("(project) uses pnpm", "id-1")]),
+         "#grant-dialog"),
     ]
 
 
@@ -3896,6 +3900,7 @@ def _overflowing_modal_cases():
         ClaimsScreen,
         ConfirmScreen,
         GrantPickerScreen,
+        MemoryPickerScreen,
         QuestionScreen,
         ReviewScreen,
         SecretScreen,
@@ -3955,6 +3960,11 @@ def _overflowing_modal_cases():
                               f"If no page opened: {_SIGN_IN_URL}",
                               confirm_label="Connect"),
          "#permission-dialog"),
+        # ROADMAP_v3 §59: forty memories at the picker's longest row.
+        ("memory-picker-long",
+         lambda: MemoryPickerScreen([(("(project) " + "x" * 160)[:160],
+                                      f"id-{i}") for i in range(40)]),
+         "#grant-dialog"),
     ]
 
 
@@ -4131,6 +4141,7 @@ def _focus_cases():
     from tui.screens import (
         ConfirmScreen,
         GrantPickerScreen,
+        MemoryPickerScreen,
         ProjectKindScreen,
         ReviewScreen,
         SubagentSignoffScreen,
@@ -4152,6 +4163,12 @@ def _focus_cases():
         ("grant", lambda: GrantPickerScreen([("web_search", "Search.")]),
          None),
         ("project-kind", lambda: ProjectKindScreen(), None),
+        # ROADMAP_v3 §59. It has a Cancel, and focus still starts on the
+        # LIST: Enter there only ticks, and the decline that guards the
+        # deletion is the confirm that follows, focused on No.
+        ("memory-picker",
+         lambda: MemoryPickerScreen([("(project) uses pnpm", "id-1")]),
+         None),
     ]
 
 

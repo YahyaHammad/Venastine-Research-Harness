@@ -496,6 +496,64 @@ class SubagentSignoffScreen(ModalScreen[object]):
         self.dismiss(None)
 
 
+class MemoryPickerScreen(ModalScreen[object]):
+    """Tick the durable memories to forget (ROADMAP_v3 §59, UI1).
+
+    `/forget` with no id opens this, so removing a memory no longer means
+    reading a uuid out of the transcript and typing it back. Dismisses with
+    the set of ticked ids, or None for Escape and Cancel. The caller asks
+    for confirmation before anything is deleted (UI4); this screen only
+    picks.
+
+    `options` is `(label, id)` pairs, labelled by `memories/tui_commands.py`
+    so this screen does not need to know a memory row's shape. Every row
+    starts UNTICKED, GrantPickerScreen's rule: the convenient action must
+    not be the destructive one.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, options: list):
+        super().__init__()
+        self._options = list(options)
+
+    def compose(self) -> ComposeResult:
+        # Text(...): a memory is text a model proposed, so it must not be
+        # read as Rich markup (RA1's rule for anything this project did
+        # not write itself).
+        rows = [Selection(Text(label), memory_id, False)
+                for label, memory_id in self._options]
+        yield Vertical(
+            Label("Forget which memories?", id="grant-title"),
+            Static(
+                "Space ticks a memory. Tab to Forget selected and press "
+                "Enter; you confirm before anything is deleted.\nEscape "
+                "cancels. /forget <id> still removes one by id.",
+                id="grant-help"),
+            SelectionList(*rows, id="forget-list"),
+            Horizontal(
+                Button("Forget selected", variant="error", id="forget-ok"),
+                Button("Cancel", variant="primary", id="forget-cancel"),
+                id="grant-buttons"),
+            id="grant-dialog",
+        )
+
+    def on_mount(self) -> None:
+        # The list, so Space works at once. Not a button: Enter on the
+        # affirmative one is what PermissionScreen.on_mount guards against,
+        # and on the list Enter only ticks.
+        self.query_one("#forget-list", SelectionList).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "forget-cancel":
+            self.dismiss(None)
+            return
+        self.dismiss(set(self.query_one("#forget-list", SelectionList).selected))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class QuestionScreen(ModalScreen[object]):
     """Ask the user the model's question (§23 slice 2, AC2).
 

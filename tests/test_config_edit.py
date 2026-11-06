@@ -683,9 +683,9 @@ class TestTheFileAndTheSessionAreTwoThings:
         every container row read `pending restart` from launch."""
         containers = [row for row in config_edit.catalogue()
                       if row.kind == "container"]
-        assert len(containers) == 19, (
-            "17 value containers plus the two permission tables, which "
-            "batch 87 gave rows of their own")
+        assert len(containers) == 20, (
+            "18 value containers plus the two permission tables, which "
+            "batch 87 gave rows of their own (agent_cycle, §59, is the 18th)")
         assert not [row.name for row in containers if row.pending]
 
     def test_an_environment_override_is_not_pending(self, monkeypatch):

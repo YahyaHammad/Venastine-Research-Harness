@@ -666,7 +666,10 @@ def _cmd_memories(session: ChatSession, args: str) -> None:
 def _cmd_forget(session: ChatSession, args: str) -> None:
     raw = args.strip()
     if not raw:
-        _out("Usage: /forget <id>. Run /memories to see the ids.")
+        # ROADMAP_v3 §59. The TUI's /forget alone opens a picker; a line
+        # terminal has none, so this shell still needs the id and says why.
+        _out("Usage: /forget <id>. Run /memories to see the ids. "
+             "(In the TUI, /forget alone picks from a list.)")
         return
     forget_memory(raw, "/memories")
 

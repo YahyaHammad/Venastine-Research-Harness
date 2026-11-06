@@ -30242,3 +30242,114 @@ The branch touches two workflow files, so the owner pushes it.
   once merged, and arms only when the key exists. `publish.yml`'s OIDC
   exchange needs the trusted publisher on npmjs.com.
 - **Version**, by `scripts/version.py bump`: `0.3.8-b.1.release-workflow.rd5bb43c19f1d`.
+
+## Batch 238 -- pick it instead of typing it (2026-11-06)
+
+**ROADMAP_v3 §59, UI1-UI8.** The owner asked for one of the open roadmap
+sections and picked §59 from the four: removing memories by ticking them
+rather than copying uuids back, and shift+tab to switch the active agent. Its
+merge is also the first real run of batch 237's `release.yml`.
+
+### Measured before asking
+
+- **Textual's `Screen` binds shift+tab to `app.focus_previous`** (textual
+  8.2.8), so an ordinary app binding never fires. `priority=True` would beat
+  it, and would also fire under every modal, whose buttons use shift+tab
+  between them. That decided where the key could live.
+- **The prompt stays enabled during a turn**, and is disabled only while a
+  stored thread is on screen. A turn reads `app.active_agent` once, when it
+  starts (`agent_turn`), so a switch mid-turn changes the next turn only, as
+  `/agent` always has.
+- **Two picker shapes already existed**: `GrantPickerScreen` and
+  `SubagentSignoffScreen`, each a `SelectionList` with every row unticked.
+- **`release.yml`'s first run**, on #277's own merge, had no
+  `RELEASE_DEPLOY_KEY`. It planned 0.3.9, made the commit and the tag on the
+  runner, passed the prepublish check, and pushed nothing.
+
+### The owner's choices
+
+All four were the recommended option, recorded as UI5-UI8 in §59:
+- the roster is `config.yaml`'s `agent_cycle`;
+- `default` is always the first stop;
+- a picker row is scope, category and text, with no filter;
+- shift+tab is bound on the prompt only, which amends UI2.
+
+### Built
+
+- **`agent_cycle`** in `config.yaml`, shipped as `[plan, build]`, with its
+  schema field (an empty name is refused at load) and its
+  `CONFIG_ARCHITECTURE.md` entry. The names are checked when the key is
+  pressed, because the user and project tiers are found later. A name no tier
+  provides is skipped and named once per session.
+- **`agents/tui_commands.py`**: `cycle_stops`, `can_cycle` and `cycle_agent`,
+  beside `/agent`. Both routes switch through one `_switch_to`, so they say,
+  re-check and repaint the same way. An agent the roster does not list steps
+  to the default. `/agent` with no argument names the cycle.
+- **`PromptInput`'s shift+tab** declines with None when the roster has nothing
+  beside the default, so reverse focus gets the key, as before. The app hands
+  the press to the agent commands, so the widget imports nothing from
+  `agents/`.
+- **`MemoryPickerScreen`** in `tui/screens.py`: rows unticked, text as `Text`,
+  focus on the list, Forget selected and Cancel. `/forget` alone opens it, and
+  a `ConfirmScreen` follows, focused on No and listing each memory whole.
+  Every way out that deletes nothing says "Nothing forgotten." A row another
+  session deleted meanwhile is named. `/memories`, the picker and the confirm
+  share one `_describe`.
+- **`/forget <id>`** is unchanged in both shells. The catalog's usage is
+  `[id]`; the CLI still needs the id and says the TUI picks from a list.
+
+### Caught on the way
+
+The modal census in `tests/test_tui.py` failed the first draft twice, as it
+is meant to: the screen had no `align` rule and opened in the corner, and a
+14-row list pushed both buttons off the 24-row floor at forty memories. The
+picker now shares the grant list's 8 rows and scrolls.
+
+The full suite caught a third. The first catalog summary for `/forget` was
+longer than the old one, so its slash-panel entry wrapped to two rows, and
+`test_the_window_can_drop_one_and_gain_two` saw the window lose `/forget`. The
+budget is the panel's 54 columns less the 4-column `SUGGEST_CONT`, so 50, and
+"pick memories to delete, or by id" with its name and usage is 49. Measured
+with a probe in a scratch export. The first probe read the panel's width
+without the continuation indent and said 54, which is why the second summary
+failed too.
+
+### Not changed
+
+- **A switch mid-turn repaints the panel's root row early**, for the turn
+  that is still running. `/agent` has done this since batch 59; recorded in
+  §59's gap register.
+- **The CLI has no picker.** D12 keeps it a line terminal.
+
+### Verified
+
+- **Tests:** 43 new. 33 in `tests/test_pick_instead_of_typing.py`, 9 in
+  `test_tui.py`'s modal census (the picker's rows in the styled, overflow and
+  focus tables) and 1 schema refusal in `test_config_loader.py`.
+  `test_forget_with_no_argument_explains_itself` became
+  `test_forget_with_nothing_to_pick_says_so`, and the guard log follows it.
+  The container count in `test_config_edit.py` went from 19 to 20, and
+  AGENTS.md's parametrised floor from 3 x 24 to 3 x 26.
+- **Mutations:** 30 on an export of the working tree, each red on its
+  assertion, and a reworded comment as a green control. Only the named node
+  ids ran, so the census rows did not drag all of `test_tui.py` in. Two
+  needed work first:
+  - No test pressed Cancel, so a picker that carried its ticks through Cancel
+    to the confirm would have survived.
+    `test_cancel_forgets_the_ticked_ones_too` is the 33rd test.
+  - A confirm in sorted-uuid order could match newest-first by chance, so
+    that mutation reverses the order instead, and the test asserts the body
+    exactly.
+- **Full suite** (the batch 234 venv): 8913 passed, 79 skipped, with
+  `AGENT_WORKSPACE` unset. The first run had the one slash-panel failure
+  above, and nothing else.
+- **Static checks:**
+  - ruff is clean.
+  - bandit as CI runs it, new files included: 0 new against the baseline,
+    47 live; the count check found none grew.
+  - gitleaks on an export of the tracked and new files: no leaks.
+  - pip-audit not re-run: no requirements file changed.
+- **Version**, by `scripts/version.py branch` then `bump`:
+  `0.3.8-b.1.pick-instead-of-typing.re6694bf76706`. `main` still carries
+  batch 237's beta, because #277's release only rehearsed; this merge's
+  `release.yml` run is what should take `main` to 0.3.9.

@@ -1804,6 +1804,11 @@ _INCOHERENT = [
     ("a negative port", lambda d: d.update(ssh_port=-1), "ssh_port"),
     ("a port past 65535", lambda d: d.update(ssh_port=99999), "ssh_port"),
     ("an empty database path", lambda d: d.update(db_path=""), "db_path"),
+    # ROADMAP_v3 §59. An unknown name is skipped at the key press, because
+    # the user and project tiers are found later; an EMPTY one names nothing
+    # anywhere, so it is refused here.
+    ("an empty agent_cycle name",
+     lambda d: d.update(agent_cycle=["plan", ""]), "agent_cycle"),
 ]
 
 

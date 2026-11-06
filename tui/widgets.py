@@ -1952,6 +1952,14 @@ class PromptInput(TextArea):
         # whoever wants it.
         Binding("tab", "complete", "Complete", show=False),
         Binding("escape", "dismiss_suggestions", "Dismiss", show=False),
+        # ROADMAP_v3 §59 (UI2, UI8). The next agent in config.yaml's
+        # `agent_cycle`, and ONLY here in the prompt. Textual's Screen binds
+        # shift+tab to reverse focus, and a plain app binding loses to it;
+        # binding it on the focused prompt instead leaves reverse focus
+        # working from everywhere else and never reaches a modal, whose
+        # buttons are focused, not the prompt. Gated like tab: with no
+        # roster it declines, and reverse focus gets the key.
+        Binding("shift+tab", "cycle_agent", "Next agent", show=False),
     ]
 
     # CLASS attributes, not set in __init__: `load_text` runs during
@@ -2142,6 +2150,12 @@ class PromptInput(TextArea):
         # nobody (escape) -- which is what both did before batch 55.
         if action in ("complete", "dismiss_suggestions"):
             return True if self._panel_open() else None
+        if action == "cycle_agent":
+            # None for the same reason: decline, so the press reaches the
+            # Screen's focus_previous. getattr because the prompt is also
+            # mounted in harness apps that have no agents at all.
+            available = getattr(self.app, "can_cycle_agent", None)
+            return True if available is not None and available() else None
         return True
 
     # -- actions -------------------------------------------------------------
@@ -2165,6 +2179,9 @@ class PromptInput(TextArea):
     def action_dismiss_suggestions(self) -> None:
         self._dismissed = True
         self.post_message(self.SuggestionsChanged(self, []))
+
+    def action_cycle_agent(self) -> None:
+        self.app.cycle_agent()
 
     def action_cursor_up(self, select: bool = False) -> None:
         # `select` is shift+up, which is a text selection and stays one.
