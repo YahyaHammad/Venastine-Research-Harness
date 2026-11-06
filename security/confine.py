@@ -381,17 +381,29 @@ def _ptrace_parent() -> None:
         raise OSError(code, os.strerror(code))
 
 
+def _read_one(path: str) -> None:
+    """The probe is whether the open is refused. One that is not still
+    closes what it opened, rather than leaving that to the collector."""
+    with open(path, "rb") as fh:
+        fh.read(1)
+
+
+def _create(path: str) -> None:
+    with open(path, "wb"):
+        pass  # creating it is the escape being probed; nothing is written
+
+
 def _escapes(app_root: str) -> dict:
     """Every escape this module claims to prevent, by name."""
     parent = os.getppid()
     planted = os.path.join(app_root, f".confine-probe-{os.getpid()}")
     return {
-        "read /etc/hostname": lambda: open("/etc/hostname", "rb").read(1),
+        "read /etc/hostname": lambda: _read_one("/etc/hostname"),
         "list /tmp": lambda: os.listdir("/tmp"),  # nosec B108 - asserting it is refused
-        "write /tmp": lambda: open(f"/tmp/.confine-probe-{os.getpid()}", "wb"),  # nosec B108 - asserting it is refused
-        "write into the app": lambda: open(planted, "wb"),
+        "write /tmp": lambda: _create(f"/tmp/.confine-probe-{os.getpid()}"),  # nosec B108 - asserting it is refused
+        "write into the app": lambda: _create(planted),
         "read the parent's environment":
-            lambda: open(f"/proc/{parent}/environ", "rb").read(1),
+            lambda: _read_one(f"/proc/{parent}/environ"),
         "open a socket": lambda: __import__("socket").socket().close(),
         "fork": os.fork,
         "start a program": lambda: subprocess.run(["true"], check=False),  # nosec B603 B607 - asserting it is refused

@@ -348,7 +348,7 @@ class Session:
             process.stdin.write(data)
             await process.stdin.drain()
         except (ConnectionError, RuntimeError):
-            pass
+            pass  # the session has exited; _pump_child reads its end of output and ends the relay
 
     async def send_meta(self, meta: dict) -> None:
         await self.write(encode_meta(meta))
@@ -610,7 +610,7 @@ class Session:
             else:
                 process.kill()
         except (ProcessLookupError, PermissionError, OSError):
-            pass
+            pass  # it exited after the check above, so nothing of this session is left to signal
 
 
 # ---------------------------------------------------------------------------

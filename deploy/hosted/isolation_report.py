@@ -49,7 +49,7 @@ def _status() -> dict:
                 key, _, value = line.partition(":")
                 out[key] = value.strip()
     except OSError:
-        pass
+        pass  # no /proc here (not Linux): facts() reports each of these fields as unknown
     return out
 
 

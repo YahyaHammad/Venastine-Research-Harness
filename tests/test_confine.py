@@ -16,6 +16,7 @@ cover that host.
 
 import io
 import json
+import os
 import sys
 from types import SimpleNamespace
 
@@ -208,6 +209,48 @@ class TestTheRefusalWhenUnverified:
         # A verdict never lifts the container tools' refusal.
         if mode == hosted.SHARED:
             assert hosted.SHARED_REFUSED_TOOLS <= hosted.refused_tools()
+
+
+class TestTheSelfTestsFileProbes:
+    """A file probe asks whether the open is refused. One that is allowed
+    -- the verdict that fails a deployment -- still closes the file it
+    opened, rather than leaving it to the collector (CodeQL
+    py/file-not-closed, batch 236). Runs anywhere: `open` is replaced, so
+    nothing is read or written."""
+
+    FILE_PROBES = ("read /etc/hostname", "write /tmp", "write into the app",
+                   "read the parent's environment")
+
+    def test_an_allowed_open_is_closed(self, monkeypatch, tmp_path):
+        opened = []
+
+        class Handle:
+            def __init__(self, path, mode="r"):
+                self.path, self.closed = path, False
+                opened.append(self)
+
+            def read(self, size=-1):
+                return b"x"
+
+            def close(self):
+                self.closed = True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.close()
+
+        monkeypatch.setattr(confine, "open", Handle, raising=False)
+        if not hasattr(os, "fork"):
+            # The table names os.fork, which Windows lacks; it is not called.
+            monkeypatch.setattr(os, "fork", None, raising=False)
+        probes = confine._escapes(str(tmp_path))
+        verdicts = {label: confine._attempt(probes[label])
+                    for label in self.FILE_PROBES}
+        assert verdicts == dict.fromkeys(self.FILE_PROBES, "ALLOWED")
+        assert len(opened) == len(self.FILE_PROBES)
+        assert [h.path for h in opened if not h.closed] == []
 
 
 @needs_walls
