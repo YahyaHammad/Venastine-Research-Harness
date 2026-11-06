@@ -1,0 +1,133 @@
+# ROADMAP_v3 §91 (batch 237, A86-A90): the release a merged pull request gets.
+#
+# The owner's request: bump the patch after every merge, with a way round it
+# for a release that needs a minor or a major number. When a pull request
+# merges into main, scripts/release_after_merge.py decides the next version,
+# commits it on main as "Release X.Y.Z after PR #N" and makes the annotated
+# tag; this file pushes both and publishes the GitHub release. The tag starts
+# publish.yml, which publishes to npm (A89). Every merged pull request gets
+# a release, Dependabot's included (A86).
+#
+# THE LABELS (A87), as the pull request has them when it closes:
+#   release:minor, release:major  that part instead of the patch
+#   release:patch                 the default, said out loud
+#   release:skip                  nothing: the version is yours to set
+# An unknown release:* label, or two parts at once, fails the run and pushes
+# nothing.
+#
+# WHY A DEPLOY KEY (A88). A push made with GITHUB_TOKEN starts no workflow.
+# The release commit would get no CI, so deploy-demo.yml's gate -- every check
+# on main's tip passed -- would wait on it forever, and the tag would never
+# start publish.yml. The pushes therefore use RELEASE_DEPLOY_KEY: the private
+# half of an SSH deploy key with write access, held as a secret of
+# environment `release`, whose deployment branches the owner limits to main.
+# Until that secret exists a run plans the release, says what it would have
+# released, and pushes nothing. GITHUB_TOKEN still publishes the GitHub
+# release, which is why the job has contents: write.
+#
+# pull_request_target, not pull_request: it runs this file as main has it,
+# on main's ref, which is what lets the environment's branch rule hold. It
+# NEVER checks out the pull request's head -- only main, after the merge, so
+# the code it runs is code that was merged. Values from the event reach the
+# scripts through env:, never inside run:.
+
+name: release
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+permissions: {}
+
+# One release at a time. GitHub keeps one run pending per group and cancels
+# an older pending one, so merges in quick succession can share a release:
+# each run works from main's tip as it finds it, and a tip already tagged is
+# released by nobody twice.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write   # the GitHub release; the pushes use the deploy key
+
+    steps:
+      - name: Is the release armed?
+        id: armed
+        env:
+          DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+        run: |
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "armed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Release not armed::Environment release has no RELEASE_DEPLOY_KEY secret, so this run plans the release and pushes nothing."
+          else
+            echo "armed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Full history and every tag: version.py refuses a version already in
+      # history or not newer than every release tag, and needs both to say so.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "24"
+
+      - name: Plan the release
+        id: plan
+        env:
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: python scripts/release_after_merge.py plan
+
+      - name: Commit and tag it
+        if: steps.plan.outputs.action == 'release'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          ALLOCATE: ${{ steps.plan.outputs.allocate }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python scripts/release_after_merge.py apply --version "$VERSION" --pr "$PR_NUMBER" --allocate "$ALLOCATE"
+
+      # What publish.yml checks at the tag, checked before anything is pushed,
+      # so a release it would refuse is never tagged on the remote.
+      - name: Prepublish check
+        if: steps.plan.outputs.action == 'release'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: GITHUB_REF_TYPE=tag GITHUB_REF_NAME="v$VERSION" node scripts/prepublish-check.mjs
+
+      # Main first: a tag on a commit main never received would publish a
+      # release no branch contains. A push main refuses (it moved meanwhile)
+      # stops the step before the tag goes anywhere.
+      - name: Push main, then the tag
+        if: steps.plan.outputs.action == 'release' && steps.armed.outputs.armed == 'true'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          git push origin HEAD:main
+          git push origin "v$VERSION"
+
+      - name: Publish the GitHub release
+        if: steps.plan.outputs.action == 'release' && steps.armed.outputs.armed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: gh release create "v$VERSION" --title "v$VERSION" --generate-notes --verify-tag --latest
+
+      - name: Say what a rehearsal left undone
+        if: steps.plan.outputs.action == 'release' && steps.armed.outputs.armed != 'true'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: echo "::notice title=Rehearsal::Would have released v$VERSION. Nothing left this runner; add RELEASE_DEPLOY_KEY to environment release to arm it."

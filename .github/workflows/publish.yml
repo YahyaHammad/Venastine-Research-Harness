@@ -1,27 +1,33 @@
 # Batch 35 -- the npm channel. BUILT AND ARMED (2026-09-04): the tag trigger
 # below went live by deliberate edit, which is the act this file used to hold
-# back. What remains on the maintainer, in order:
+# back. The repository is public, which publishing and provenance both need.
 #
-#   1. PUBLIC REPOSITORY. Publishing to npm makes this source public
-#      regardless of the GitHub repository's visibility, and --provenance
-#      needs a public repo, so the repository goes public first.
-#   2. NPM_TOKEN. The repository secret that authenticates publishing.
-#      Without it the run reports that the channel is unarmed and
-#      downgrades itself to a dry run rather than failing red -- so arming
-#      the trigger while the secret is still missing is safe, and every tag
-#      push before the secret exists is a full rehearsal of the release.
+# TRUSTED PUBLISHING SINCE BATCH 237 (ROADMAP_v3 §91, A89). npm retired
+# token publishing for OIDC: this job holds no npm token at all. npm trusts
+# a run of THIS FILE in this repository, as configured on npmjs.com under the
+# package's Settings -> Trusted publishing (organization or user
+# YahyaHammad, repository Venastine-Research-Harness, workflow filename
+# publish.yml, no environment). The job's `id-token: write` is what lets it
+# prove that, and npm needs CLI 11.5.1 and Node 22.14.0 at the least.
+#
+# ARMING is the repository variable NPM_TRUSTED_PUBLISHING. Until it is `on`
+# the run reports that the channel is unarmed and downgrades itself to a dry
+# run rather than failing red, so every tag before then is a full rehearsal
+# of the release. Set it once the trusted publisher exists on npmjs.com, and
+# push the next tag within two days: npm expires a trusted publisher that has
+# not published once in that time.
 #
 # The dry_run INPUT still defaults to TRUE on workflow_dispatch, so the
 # default manual run packs and validates and uploads nothing; a real publish
-# by hand unchecks the box. A TAG PUSH carries no input and means it: with
-# NPM_TOKEN set it publishes for real, and a published npm version can never
-# be replaced -- only deprecated.
+# by hand unchecks the box. A TAG PUSH carries no input and means it: armed,
+# it publishes for real, and a published npm version can never be replaced
+# -- only deprecated. release.yml pushes such a tag after every merged pull
+# request (A86).
 #
-# NOTE ON PROVENANCE: `npm publish --provenance` attests the tarball to this
-# repository and commit, which is the answer to "how do I know the npm folder
-# is the GitHub folder". It requires a PUBLIC repository, so it will only
-# work once the repo is public -- which is the same precondition as
-# publishing at all.
+# NOTE ON PROVENANCE: trusted publishing attests the tarball to this
+# repository and commit without a flag, which is the answer to "how do I know
+# the npm folder is the GitHub folder". It needs a public repository and a
+# GitHub-hosted runner.
 
 name: publish (npm)
 
@@ -35,17 +41,17 @@ on:
         required: true
 
   # ARMED 2026-09-04. A pushed `v*` tag runs this workflow without a
-  # dry_run input: with NPM_TOKEN set it publishes, without the secret it
-  # rehearses. Tag the release commit (`git tag v0.1.0 && git push origin
-  # v0.1.0`) only when both preconditions above hold, and only a commit
+  # dry_run input: armed, it publishes; unarmed, it rehearses. release.yml
+  # tags each merge's release commit; a tag pushed by hand must name a commit
   # whose package.json and pyproject.toml already say that version: the
   # prepublish check refuses any other tag (A78).
   push:
     tags:
       - "v*"
 
-# Least privilege. `id-token: write` exists only so provenance can be minted;
-# nothing here writes to the repository.
+# Least privilege. `id-token: write` is the OIDC token npm's trusted
+# publishing accepts in place of a secret, and mints the provenance; nothing
+# here writes to the repository.
 permissions:
   contents: read
   id-token: write
@@ -64,8 +70,13 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing needs npm 11.5.1 or later; the npm a Node release
+      # bundles is whatever it shipped with, so the CLI is pinned here.
+      - name: Use an npm that publishes through OIDC
+        run: npm install -g npm@11.21.1
 
       # The tarball is Python source, so the suite is what says it is
       # publishable. Mirrors tests.yml deliberately -- same pin, same
@@ -152,26 +163,32 @@ jobs:
       - name: Prepublish check
         run: node scripts/prepublish-check.mjs
 
+      # A89: the repository variable, not a secret -- trusted publishing has
+      # no secret to look for. `on` says the trusted publisher exists on
+      # npmjs.com; anything else rehearses.
       - name: Is the channel armed?
         id: armed
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TRUSTED: ${{ vars.NPM_TRUSTED_PUBLISHING }}
         run: |
-          if [ -z "$NPM_TOKEN" ]; then
+          if [ "$TRUSTED" != "on" ]; then
             echo "armed=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Channel not armed::No NPM_TOKEN secret is configured, so this run cannot publish. Falling back to a dry run."
+            echo "::notice title=Channel not armed::The repository variable NPM_TRUSTED_PUBLISHING is not on, so this run cannot publish. Falling back to a dry run."
           else
             echo "armed=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Publish (dry run)
         if: ${{ inputs.dry_run || steps.armed.outputs.armed != 'true' }}
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          ARMED: ${{ steps.armed.outputs.armed }}
         run: |
           npm publish --dry-run
-          echo "::notice title=Nothing was uploaded::dry_run=${{ inputs.dry_run }}, armed=${{ steps.armed.outputs.armed }}"
+          echo "::notice title=Nothing was uploaded::dry_run=$DRY_RUN, armed=$ARMED"
 
+      # No token in the environment: npm exchanges the job's OIDC token for a
+      # short-lived publish credential, and adds the provenance on its own.
       - name: Publish
         if: ${{ !inputs.dry_run && steps.armed.outputs.armed == 'true' }}
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public

@@ -2728,11 +2728,13 @@ def test_the_gate_judges_only_a_push_to_main_from_this_repository():
         assert clause in condition, f"the gate's `if:` lost {clause!r}"
 
 
-@pytest.mark.parametrize("name", ["deploy-demo.yml", "copyright-year.yml"])
+@pytest.mark.parametrize("name", ["deploy-demo.yml", "copyright-year.yml",
+                                  "release.yml", "publish.yml"])
 def test_no_expression_is_pasted_into_a_shell_line(name):
-    """A branch name is chosen by whoever pushed it. Values reach these
-    workflows' scripts through `env:`, where the shell cannot read them as
-    code."""
+    """A branch name is chosen by whoever pushed it, and a label by whoever
+    can triage (release.yml reads the pull request's, ROADMAP_v3 §91).
+    Values reach these workflows' scripts through `env:`, where the shell
+    cannot read them as code."""
     for job_name, job in _workflow_yaml(name)["jobs"].items():
         for step in job.get("steps", []):
             assert "${{" not in step.get("run", ""), (
@@ -2850,7 +2852,9 @@ def test_license_and_notice_carry_the_same_copyright():
     assert len(set(lines.values())) == 1, lines
 
 
-def test_the_copyright_job_is_the_only_workflow_that_writes():
+def test_only_the_copyright_and_release_jobs_write():
+    """release.yml's `contents: write` is for the GitHub release alone; its
+    pushes go through the deploy key (ROADMAP_v3 §91, A88)."""
     doc = _workflow_yaml("copyright-year.yml")
     crons = [entry["cron"] for entry in _on(doc)["schedule"]]
     assert crons == ["59 23 31 12 *", "7 6 1 1 *"], (
@@ -2858,7 +2862,7 @@ def test_the_copyright_job_is_the_only_workflow_that_writes():
         "catch-up for a delayed or dropped first one")
     writers = sorted(name for name, text in _workflow_text().items()
                      if "contents: write" in text)
-    assert writers == ["copyright-year.yml"], writers
+    assert writers == ["copyright-year.yml", "release.yml"], writers
 
 
 def test_the_launcher_never_sets_the_two_variables_that_would_break_it():

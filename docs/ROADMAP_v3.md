@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
 - **§90. Disagreement routed to a check, not deducted** - **(BUILT in batch 232)** (on an ensemble run, cross-candidate disagreement was a 0.15 penalty nothing else read, and it could not be worked off: at 1 of 3 it took a partially grounded claim from MEDIUM to LOW, the loop re-scored it under the same penalty every round, and D2 published it UNVERIFIED. D1 now sends a factual claim at most half the candidates asserted to the 6a/6b loop to be checked, 6a is told the count, and the penalty is retired; issue #12, A85)
 - **§89. One command catalog, and the CLI's slash commands** - **(BUILT in batch 231)** (the CLI had no command layer, so `/help` at its prompt was a billed chat turn and every feature that wanted the CLI shipped a launch flag. One catalog in `core/commands.py` now declares every command once and both shells bind handlers to it; the CLI gets 18 commands, among them `/call`, the CLI's route to item 45's call and session views, and a `/` line that names nothing is refused; A84)
 - **§88. Input typed before a question, and the launcher's stdin** - **(BUILT in batch 230)** (`ask()` drained the queue, which holds only what the pump already took, so half a line typed before a question became the front of its answer -- measured "sta" + "fresh" on both platforms -- and on Windows a line typed before the first question answered it. The terminal's own buffer is flushed first now, with an Escape for a Windows read in progress; and the npm launcher pauses and unrefs stdin after its consent question, measured harmless both ways; A83)
@@ -2860,6 +2861,92 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §91. A release for every merge, and npm without a token
+
+**Requested and built in batch 237.** After each of the last four merges the
+owner asked for the patch to be bumped, then for the tag and the release, and
+then asked for that to happen by itself, with a way round it for a release
+that needs a minor or a major number. The owner also asked to move npm to
+trusted publishing: the `NPM_TOKEN` secret `publish.yml` waited for was never
+added, because npm retired token publishing for OIDC, so every tag since
+batch 35 had only rehearsed.
+
+**Measured first.**
+- `main`'s ruleset refuses deletion and force pushes and nothing else, so a
+  workflow may push a fast-forward commit to it.
+- A push made with `GITHUB_TOKEN` starts no workflow; §80 recorded it for
+  the copyright commit. A release commit pushed that way would get no CI
+  run, and §79's gate counts only the tip's own push runs, so the demo would
+  wait on every release forever. A tag pushed that way would never start
+  `publish.yml`.
+- npm's page on trusted publishers (read 2026-11-06): npm CLI 11.5.1 and
+  Node 22.14.0 at the least, `id-token: write`, a GitHub-hosted runner, and
+  provenance with no flag. The publisher is configured on npmjs.com by
+  workflow filename, and expires unless it publishes within two days.
+  `publish.yml` ran Node 20.
+- Only one Dependabot pull request had ever been merged (#187). The package's
+  `repository.url` already names this repository, which npm checks.
+
+**The owner's choices**, each the recommended option: the workflow bumps,
+tags and releases; every merged pull request gets a release, Dependabot's
+included; a label changes or skips the bump; and npm rehearses until a
+repository variable arms it.
+
+**Built.**
+- `scripts/release_after_merge.py` decides and does what can be tested away
+  from GitHub. `plan` reads the labels, `main`'s version and the tags, and
+  says release, skip or refuse. `apply` sets the version through
+  `scripts/version.py`, which keeps every refusal it had, commits the two
+  fields as "Release X.Y.Z after PR #N" as `github-actions[bot]`, and makes
+  the annotated tag.
+- `.github/workflows/release.yml` runs it on `pull_request_target` when a
+  pull request merges into `main`. It checks out `main`, never the pull
+  request's head. It runs the prepublish check for the new tag before
+  anything leaves the runner, pushes `main` and then the tag with the deploy
+  key, and publishes the GitHub release with generated notes.
+- `publish.yml` holds no npm token. It runs Node 24 and pins npm 11.21.1, and
+  it is armed by the repository variable `NPM_TRUSTED_PUBLISHING`.
+
+**What the owner sets up**, none of which this repository can do for itself:
+1. A deploy key with write access, as the secret `RELEASE_DEPLOY_KEY` of
+   environment `release`, with that environment's deployment branches limited
+   to `main`.
+2. The three labels `release:minor`, `release:major` and `release:skip`.
+3. The trusted publisher on npmjs.com, then the variable
+   `NPM_TRUSTED_PUBLISHING=on`.
+
+### What §91 deliberately does not change
+
+**The copyright commit.** `copyright-year.yml` still pushes with
+`GITHUB_TOKEN`, so its yearly commit still gets no CI and no deploy (§80).
+The deploy key could carry that push too; it was not asked for.
+
+**What a release waits for.** It does not wait for the merge commit's CI.
+The pull request's checks passed before the owner merged it, the tag's push
+runs CI again on the release commit, and `publish.yml` runs the suite, the
+secret scan and the prepublish check before it uploads anything. A GitHub
+release can therefore exist for a version npm refused; npm's copy is the one
+that cannot be replaced.
+
+**`npm stage publish`.** npm recommends limiting a trusted publisher to
+staged publishes. `publish.yml` publishes directly, as it always has.
+
+**Merges in quick succession.** GitHub keeps one pending run per concurrency
+group and cancels an older pending one, so a run can release two merges at
+once under the labels of the later one.
+
+### Design Decisions Record — §91 (A86-A90)
+
+| id | decision |
+|---|---|
+| **A86** | **Every pull request merged into `main` gets a release**, Dependabot's included: the next version committed on `main` as "Release X.Y.Z after PR #N", the annotated tag `vX.Y.Z`, and the GitHub release, which `.github/workflows/release.yml` makes on `pull_request_target` from `main`'s tip and never from the pull request's head. The version is one part above the newer of `main`'s base version and the newest clean `v*` tag. A clean version on `main` that is newer than every tag was allocated and never released, so a patch release takes it as it is. A tip that already carries a release tag is not released again. The owner's choices: bump, tag and release; every merged pull request. Changes AGENTS.md's "Release allocation is explicit": `scripts/version.py` still allocates nothing, and this workflow is what allocates |
+| **A87** | **Labels change the part per pull request**: `release:minor` and `release:major` bump that part instead of the patch, `release:patch` is the default said out loud, and `release:skip` does nothing and leaves the version to the owner. Skip wins over any part. Labels are matched without regard to case, as GitHub matches them. Two parts at once, or a `release:*` label it does not know, refuse: the run fails and nothing is pushed. The owner chose labels over a repository switch, so there is nothing to turn back on afterwards |
+| **A88** | **The pushes use a deploy key; `GITHUB_TOKEN` publishes only the GitHub release.** A push made with `GITHUB_TOKEN` starts no workflow, so the release commit would get no CI and §79's gate would never deploy it, and the tag would never start `publish.yml`. The key is `RELEASE_DEPLOY_KEY`, a secret of environment `release` limited to `main`, and `pull_request_target` is what puts the run on `main`'s ref so that rule holds. Without the secret a run plans, says what it would have released, and pushes nothing. `main` is pushed before the tag, and the prepublish check runs before either. This job and `copyright-year.yml` are the workflows with `contents: write`, which amends LY3's "the only workflow" |
+| **A89** | **npm publishes through trusted publishing (OIDC), and no token exists.** `publish.yml` runs Node 24 and pins npm 11.21.1, above npm's floor of 11.5.1 and Node 22.14.0. It holds no `NPM_TOKEN` or `NODE_AUTH_TOKEN`, and provenance comes without the flag. It is armed by the repository variable `NPM_TRUSTED_PUBLISHING=on`, set once the trusted publisher exists on npmjs.com for workflow `publish.yml`; until then every run rehearses, as the missing secret made it before. The owner's choice: rehearse until armed. Supersedes the `NPM_TOKEN` arming of batch 35 |
+| **A90** | **The decisions live in a script with tests; the workflow only runs it and pushes.** Labels and versions reach `scripts/release_after_merge.py` through `env:` and never inside `run:`, and its messages quote a label with `ascii()`, so neither a label nor a branch name is read as shell or as a workflow command. Its tests cover the version arithmetic, a commit and tag made in a real repository, and the workflow's shape: the trigger, checking out `main`, the environment, every write behind the arming, and the prepublish check before the push |
+
 ---
 
 ## §90. Disagreement routed to a check, not deducted

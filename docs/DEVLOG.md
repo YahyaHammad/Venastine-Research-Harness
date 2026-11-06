@@ -30106,3 +30106,139 @@ run next scans `main` after this branch merges. The next run is Monday
   the count check found none grew; gitleaks on an export of the tracked
   files: no leaks. pip-audit not re-run: no requirements file changed.
 - **Version**, by `scripts/version.py bump`: `0.3.7-b.1.code-scanning.rf20662208f33`.
+
+## Batch 237 -- a release for every merge, and npm without a token (2026-11-06)
+
+**ROADMAP_v3 §91, A86-A90.** The owner asked for a workflow that bumps the
+patch after a pull request merges, with a way to set it aside when the next
+release needs a minor or major number. They also asked to move npm to
+trusted publishing: they never added `NPM_TOKEN` because npm retired token
+publishing for OIDC, so every tag since batch 35 had only rehearsed.
+
+### Measured before asking
+
+- **`main`'s ruleset** refuses deletion and force pushes, nothing else, so a
+  workflow may push a fast-forward. Branch protection and the Actions
+  permission settings answer 403 to this token.
+- **A `GITHUB_TOKEN` push starts no workflow.** The deploy gate counts only
+  the tip's own push runs. So a release commit pushed that way would hold
+  the demo's deploy forever, and a tag pushed that way would never start
+  `publish.yml`. This is what decided the deploy key.
+- **npm's trusted-publishers page**, read through a fetch agent:
+  - npm CLI 11.5.1 and Node 22.14.0 at the least, `id-token: write`, and a
+    GitHub-hosted runner.
+  - Provenance needs no flag.
+  - The publisher is configured by workflow filename and must publish within
+    two days of being created.
+  - `publish.yml` ran Node 20.
+- **Other facts:** one Dependabot pull request had ever been merged (#187),
+  and `package.json`'s `repository.url` already matches.
+
+### The owner's choices
+
+All four were the recommended option: bump, tag and release; labels per pull
+request; every merged pull request; rehearse until armed. The deploy key was
+stated as the plan beside the questions, with a GitHub App as the
+alternative, and was not questioned.
+
+### Built
+
+- **`scripts/release_after_merge.py`:**
+  - `plan` turns the labels, `main`'s version and the tags into release,
+    skip or refuse. The next version is one part above the newer of `main`'s
+    base and the newest clean tag.
+  - A clean version on `main` that is newer than every tag is released as it
+    is, so a run that stopped after its push recovers on the next merge.
+  - A tip already tagged releases nothing.
+  - An unknown `release:*` label or two parts refuse.
+  - `apply` sets the version through `scripts/version.py`, which keeps every
+    refusal it had. It refuses a dirty checkout, and a write that touched
+    anything but the two version fields, counting staged and untracked
+    files. It then commits as `github-actions[bot]` and makes the annotated
+    tag.
+- **`.github/workflows/release.yml`:**
+  - Runs on `pull_request_target`, closed and merged into `main`, in
+    environment `release`.
+  - Checks out `main` with `RELEASE_DEPLOY_KEY` and never the pull request's
+    head.
+  - Plans, applies, then runs the prepublish check for the new tag before
+    anything is pushed.
+  - Pushes `main`, then the tag, then publishes the GitHub release with
+    generated notes.
+  - Without the key it plans and says so, and pushes nothing.
+- **`publish.yml`:**
+  - Holds no npm token.
+  - Runs Node 24 and pins npm 11.21.1, from 2026-10-15.
+  - Armed by the repository variable `NPM_TRUSTED_PUBLISHING=on`.
+  - The one expression that sat inside a `run:` line now arrives through
+    `env:`, so the file joins the no-expression test.
+- **Docs:**
+  - AGENTS.md's versioning section says a merge now releases itself, so an
+    agent no longer allocates a merge's version by hand.
+  - The Distribution section describes trusted publishing.
+  - `release.yml` joins the copyright job as a workflow with
+    `contents: write`, amending LY3's "the only workflow".
+  - `version.py`'s docstring says the same.
+
+### Not changed
+
+- `copyright-year.yml` still pushes with `GITHUB_TOKEN`, so its yearly
+  commit still gets no CI (§80).
+- A release does not wait for the merge commit's CI. `publish.yml` runs the
+  suite, gitleaks and the prepublish check before it uploads anything.
+- npm's suggested staged publishing was not adopted.
+
+### What the owner sets up
+
+1. An SSH deploy key with write access, the private half as the secret
+   `RELEASE_DEPLOY_KEY` of environment `release`, with deployment branches
+   limited to `main`.
+2. The labels `release:minor`, `release:major` and `release:skip`.
+3. The trusted publisher on npmjs.com (YahyaHammad /
+   Venastine-Research-Harness / `publish.yml`, no environment), then the
+   variable `NPM_TRUSTED_PUBLISHING=on`, then a tag within two days.
+
+The branch touches two workflow files, so the owner pushes it.
+
+### Verified
+
+- **Tests:** 40 new.
+  - 38 in `tests/test_release_after_merge.py`: the version arithmetic, the
+    refusals, a commit and an annotated tag in a real repository, the plan's
+    outputs, and both workflows' shape.
+  - 2 in `test_docs_consistency.py`, where `release.yml` and `publish.yml`
+    join the no-expression test.
+  - The copyright job's writer test now names both writers. It was renamed,
+    and the guard log follows it.
+- **Mutations:** 22 on an export of the working tree, each red on its
+  assertion, and a reworded message as a green control. Two catches along
+  the way:
+  - The first changed-files guard used `git diff --name-only`, which misses
+    staged and untracked files. Writing its test found it. The guard now
+    reads `git status --porcelain`, and a mutation back to `git diff` is one
+    of the 22.
+  - The runner carried from batch 236 read a FAILED line only up to its
+    first space, which would have scored parametrized ids with spaces as
+    survivors. This one reads the line up to its " - ".
+- **End to end on a scratch clone** of this repository with its real tags,
+  this branch merged onto `main`:
+  - No label planned 0.3.9, `release:minor` 0.4.0, and `release:skip`
+    skipped. A misspelt `release:mjaor` refused with exit 1.
+  - `apply` made "Release 0.3.9 after PR #277" as `github-actions[bot]`,
+    changing two files, and an annotated `v0.3.9`.
+  - The prepublish check passed for `v0.3.9` as a tag.
+  - A second plan on that tip skipped.
+- **WSL:** `test_release_after_merge.py` and `test_versioning.py`, 54
+  passed, on a POSIX git as the runner has.
+- **Full suite** (the batch 234 venv): 8870 passed, 79 skipped in 1:54 with `AGENT_WORKSPACE`
+  unset.
+- **Static checks:**
+  - ruff is clean.
+  - bandit: 0 new against the baseline once the test file's three subprocess
+    lines carried their `nosec` reasons; the count check found none grew.
+  - gitleaks on an export of the tracked and new files: no leaks.
+  - pip-audit not re-run: no requirements file changed.
+- **Not verifiable here:** a real run. `release.yml` runs only from `main`
+  once merged, and arms only when the key exists. `publish.yml`'s OIDC
+  exchange needs the trusted publisher on npmjs.com.
+- **Version**, by `scripts/version.py bump`: `0.3.8-b.1.release-workflow.rd5bb43c19f1d`.
