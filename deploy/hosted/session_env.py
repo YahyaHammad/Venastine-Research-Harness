@@ -90,7 +90,7 @@ def ensure(lock: Path = LOCK, env_dir: Path | None = None, *,
         if python.exists() and marker.read_text(encoding="utf-8").strip() == digest:
             return python
     except OSError:
-        pass
+        pass  # no marker yet, or one that cannot be read: the environment is built below
 
     base = os.environ if base_env is None else base_env
     env = {name: base[name] for name in _PASSTHROUGH if name in base}

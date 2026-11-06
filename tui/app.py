@@ -8159,10 +8159,10 @@ def _cmd_disconnect(app: "VenastineApp", args: str) -> None:
             app.run_worker(work, thread=True, exit_on_error=False,
                            name="disconnect")
             return
-        import credentials
         from core.client import forget_client
+        from credentials import forget_key
 
-        kept = credentials.forget_key(provider)
+        kept = forget_key(provider)
         forget_client(provider)
         if kept is None:
             err(f"{provider} had no stored key to remove.")

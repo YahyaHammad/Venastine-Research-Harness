@@ -472,6 +472,15 @@ class TestHuggingFace:
         with pytest.raises(deploy.DeployError, match="failed 4 times"):
             deploy.retry("x", lambda: 1 / 0, sleep=slept.append)
 
+    def test_no_attempt_at_all_is_refused_rather_than_answered(self):
+        """Falling off the loop's end handed back None as if `fn` had
+        answered, without calling it (CodeQL py/mixed-returns, batch 236)."""
+        calls = []
+        with pytest.raises(ValueError, match="at least one attempt, not 0"):
+            deploy.retry("x", lambda: calls.append(1) or "ok", attempts=0,
+                         sleep=lambda seconds: None)
+        assert calls == []
+
     def test_the_upload_deletes_what_the_bundle_does_not_carry(self, tmp_path):
         seen = {}
         space = object.__new__(deploy.HfSpace)

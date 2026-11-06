@@ -208,6 +208,11 @@ def retry(label: str, fn, attempts: int = 4, sleep=time.sleep):
             if attempt == attempts:
                 raise DeployError(f"{label} failed {attempts} times") from None
             sleep(2 * attempt)
+    # Every pass above returns or raises, so this is reached only when there
+    # was no pass at all: falling off the end would hand back None as if fn
+    # had answered, without fn ever being called.
+    raise ValueError(f"{label}: retry needs at least one attempt, "
+                     f"not {attempts}")
 
 
 # ---------------------------------------------------------------------------

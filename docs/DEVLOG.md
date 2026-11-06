@@ -30034,3 +30034,75 @@ TUI's own helper rather than `model_switch`.
   gitleaks on an export of the tracked and new files: no leaks. pip-audit
   not re-run: no requirements file changed.
 - **Version**, by `scripts/version.py bump`: `0.3.6-b.1.submodel.r2eb70e59c2d0`.
+
+## Batch 236 -- every open code scanning alert triaged again (2026-11-06)
+
+**The owner's request:** check every open code scanning alert, fix the
+legitimate ones and dismiss the false positives -- batch 170's request again.
+Twenty-five were open, all on `main`, all from the weekly security-and-quality
+run of 2026-11-02 on 3afcae1 (v0.3.4), and none was a security alert. On
+v0.3.7's tag the push-time security analysis raised eleven, all
+`py/clear-text-logging-sensitive-data` and all dismissed as false positives
+in earlier batches. Eight are fixed here and seventeen were dismissed, each
+with its reason; batch 170's rulings decided the form of both.
+
+### Fixed in code
+
+- **Four empty `except` blocks say why**, on the `pass` line, the form the
+  owner chose in batch 170 over dismissal: the supervisor's write to a
+  session that has exited and its signal to one that exited after the check,
+  a session environment whose marker is missing or unreadable, and an
+  isolation report on a host with no `/proc`. No behaviour changed. (#70-#73)
+- **The confinement self-test's file probes close what they open.** A probe
+  asks whether an open is refused; one that was allowed -- the verdict that
+  fails a deployment -- left its file to the collector. `_read_one` and
+  `_create` open with `with`, and the two write probes, which CodeQL did not
+  flag, had the same leak and use `_create`. (#74, #75)
+- **`deploy_demo.retry` no longer falls off its end.** Every pass of its loop
+  returns or raises, but with no pass at all -- `attempts` below one -- it
+  handed back None as if the call had answered, without making it. It now
+  raises ValueError. No caller passes anything but the default four. (#77)
+- **`/disconnect`'s key removal imports `forget_key` by name**, as the file's
+  nine other imports from `credentials` do; it was the one `import
+  credentials` in `tui/app.py`. (#92)
+
+### Dismissed
+
+- **False positive, six:** an `await` of a task just cancelled, which waits for
+  it to finish unwinding (#69); `_ineligible_explained`, read by the function
+  that declares it global, the shape of batch 170's #17 and #19 (#76); and
+  four strings wrapped across lines inside a list (#78-#81).
+- **Won't fix, eleven:** ten cyclic imports among `credentials`,
+  `core.chatgpt_auth`, `core.connect` and `core.client`, each closed by a
+  function-level import. At the scanned commit and on this branch, no module
+  in them imports another at load in a cycle, and each of the four imports
+  first in a fresh interpreter. And `ctypes` imported both ways in
+  `scripts/install.py`, for the reason batch 170 gave for `main.py`:
+  `wintypes` is a submodule `import ctypes` does not load. (#82-#91, #93)
+
+Each comment was checked against the code at the scanned commit, and the
+script that sent them refused anything over 280 characters, anything not
+ASCII, and any alert no longer open; it sent all seventeen.
+
+**Not closed here:** the eight alerts fixed in code close when the weekly
+run next scans `main` after this branch merges. The next run is Monday
+2026-11-09 at 05:00 UTC, and `codeql.yml` has no manual trigger.
+
+### Verified
+
+- **Tests:** 2 new. `test_confine.py` replaces `open` and checks an allowed
+  probe closes its file, so it runs off Linux too; `test_deploy_demo.py`
+  checks `retry` refuses no attempt without calling the function. Seven
+  mutations on an export of the working tree, each red on its assertion, and
+  a reworded comment as a green control: each of the four probes and both
+  helpers put back to an unclosed open (five rows), `retry` falling off its
+  end, and `/disconnect` forgetting nothing, which three `TestDisconnecting`
+  tests caught.
+- **WSL:** `test_confine.py`, 120 passed, including the real confined
+  self-test that drives the new helpers behind the walls.
+- **Full suite** (the batch 234 venv): 8830 passed, 79 skipped in 2:08 with
+  `AGENT_WORKSPACE` unset, as CI runs.
+- ruff clean; bandit 0 new against the baseline (47 live, all baselined) and
+  the count check found none grew; gitleaks on an export of the tracked
+  files: no leaks. pip-audit not re-run: no requirements file changed.
+- **Version**, by `scripts/version.py bump`: `0.3.7-b.1.code-scanning.rf20662208f33`.
