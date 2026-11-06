@@ -40,7 +40,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§56. A decision model as the shell classifier** — **(NOT BUILT: requested batch 122, specified, not designed)** (the gate decides from a word list and a token scan, so every judgement it cannot express as a rule costs an approval prompt, and the rules cannot be tuned per user)
 - **§57. One model for the subagents** — **(BUILT in batch 235)** (an agent definition can pin a model and nothing can set one for the subagents as a class, so a cheap child runs on the parent's expensive model)
 - **§58. Who the agent is when you ask it** — **(BUILT in batch 203)** (a short harness identity composed at turn time for ordinary chat, active agents and spawned subagents, naming their effective model/provider; internal compaction, review and research prompts stay task-specific; PR1–PR6)
-- **§59. Pick it instead of typing it** — **(NOT BUILT: requested batch 122, specified, not designed)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
+- **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
 - **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
@@ -1509,14 +1509,49 @@ exactly-typed string with a selection, and both reuse a widget that already exis
 | **UI3** | **The cycle walks a SHORT ORDERED roster, not `manager.names()`.** Twelve-plus stops is a list, not a cycle, and the thing the request describes is moving between two or three working modes. What the roster is and where it is configured is open; that it is not the full catalogue is not |
 | **UI4** | **The modal confirms, and `/forget <id>` does not start to.** A new requirement rather than a preserved one: today the uuid is the confirmation, and UI1 exists to take that away. Ticking five rows and pressing enter is one keystroke away from deleting five durable memories with no second thought, where the command it replaces cost a careful copy each. The command keeps its current behaviour, because nothing about it changed |
 
-### What must be settled before this is built
+### Settled with the owner (batch 238, UI5-UI8)
 
-- UI3's roster: a config list, the agents the user has used this session, or a declared field on
-  `AgentDef`.
-- Whether the cycle includes "default" as a stop, and where it sits in the order.
-- Whether the memory modal shows scope and category as columns, and whether it can filter.
-- Whether `shift+tab` is bound at the app level with `priority=True` -- which is what `ctrl+c`
-  needs in order to beat the focused text box -- and what that does under a modal.
+The four questions above were put to the owner with the code they depend on, and each answer was
+the recommended option.
+
+| # | Decision |
+|---|---|
+| **UI5** | **The roster is `config.yaml`'s `agent_cycle`**, shipped as `[plan, build]`. A plain value in the one harness-tier location, which is what `config.yaml` holds. Not a frontmatter field, which would let a project's agent add itself to the user's cycle and take its order from tier and file name. Not the agents used this session either, because then the key would do nothing until `/agent` had been typed. The names are checked when the key is pressed, because the user and project tiers are only known at runtime. A name no tier provides is skipped and named once per session; an empty name is refused at load, because it names nothing anywhere |
+| **UI6** | **`default` is always the first stop and is never listed.** The cycle is default, then the roster in order, then back to default. A roster cannot strand a user in an agent, and the plain harness is never more than a few presses away. A `default` entry is ignored, and an agent `/agent` chose that the roster does not list steps to the default |
+| **UI7** | **A picker row is `(scope) [category] text`, newest first, with no filter**, the same words `/memories` prints after the id. One line per row, cut at 160 characters; the confirm shows each ticked memory whole. A long list scrolls inside the dialog's 8 rows, and `/forget <id>` stays for scripts and very long lists. A filter box would have been a new widget pattern: no modal here filters a `SelectionList` |
+| **UI8** | **shift+tab is bound on the prompt, not the app**, and this amends UI2: reverse focus is spent only where the prompt has focus. Measured against textual 8.2.8: `Screen` binds shift+tab to `app.focus_previous`, so an ordinary app binding never fires, and `priority=True` would fire under every modal, whose buttons use shift+tab between them. On `PromptInput`, beside tab's completion, the key never reaches a modal or the thread view (the prompt is disabled there), and from the transcript it is still reverse focus. `check_action` returns None when the roster has nothing beside the default, so the press falls through to reverse focus |
+
+### Built and measured (batch 238, 2026-11-06)
+
+- **The cycle** is `agents/tui_commands.py`'s `cycle_stops`, `can_cycle` and `cycle_agent`, beside
+  `/agent`. Both go through one `_switch_to`, so a switch says, re-checks the active skills and
+  repaints the panel the same way whichever route made it. A turn already running keeps its agent:
+  `agent_turn` reads `app.active_agent` once, when the turn begins. `/agent` with no argument now
+  names the cycle, which is where a user who never read this finds the key.
+- **The key** is `PromptInput`'s `shift+tab` binding (UI8). The app's `can_cycle_agent` and
+  `cycle_agent` hand it to the agent commands, so `tui/widgets.py` imports nothing from `agents/`.
+- **The picker** is `tui/screens.py`'s `MemoryPickerScreen`: every row unticked, the text as `Text`
+  rather than markup, focus on the list, Forget selected and Cancel, Escape cancels. It shares the
+  grant dialog and its 8-row list, and has its own `align` rule. `memories/tui_commands.py` labels
+  the rows through one `_describe`, which `/memories` now uses too, opens the picker from `/forget`
+  alone, and follows it with a `ConfirmScreen` titled with the count, listing each memory whole,
+  focused on No. Escape, Cancel, nothing ticked and No all say "Nothing forgotten." A row another
+  session deleted while the picker was open is named rather than silently left out of the count.
+- **`/forget <id>`** is unchanged in both shells. The catalog's usage is `[id]`, and the CLI, which
+  has no picker, still asks for the id and says the TUI picks from a list.
+
+The modal census in `tests/test_tui.py` found the two layout defects the first draft had: no
+`align` rule, so the dialog opened in the corner, and a 14-row list that pushed both buttons off
+the 24-row floor at forty memories. The full suite found a third: the first `/forget` summary wrapped its slash-panel entry to two rows, which moved the window `test_the_window_can_drop_one_and_gain_two` measures. The summary is now 49 characters of the panel's 50. Thirty mutations -- the default stop, the skips, the wrap, the switch path, the key's gate and binding, a ticked row, markup, focus, Cancel, the confirm and its order, a vanished row, the label, both CSS rules, the CLI's sentence, the catalog and the schema -- each failed its tests on an assertion.
+
+### Gap register
+
+- **A switch while a turn runs repaints the panel's root row early.** The turn keeps the agent it
+  started with, but `refresh_agent_panel` draws the root as the active agent, so the row names the
+  next turn's agent while this one finishes. `/agent` has done the same since batch 59; shift+tab
+  makes it one key press away instead of a typed command.
+- **The CLI has no picker.** D12 keeps the CLI a permanent fallback, and a line terminal has no
+  multi-select. Its `/forget` still needs the id and says where the picker is.
 
 ---
 

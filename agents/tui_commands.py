@@ -24,17 +24,18 @@ def _cmd_agent(app, args: str) -> None:
     until /agent default or another switch."""
     if not args:
         current = app.active_agent.name if app.active_agent else "default"
+        stops, _ = cycle_stops()
+        cycle = (" shift+tab in the prompt steps through "
+                 f"{' → '.join(_stop_name(stop) for stop in stops)}."
+                 if len(stops) > 1 else "")
         app._transcript.write_system(
             f"Active agent: {current}. "
             f"Available: {', '.join(manager.names()) or 'none'}. "
-            "/agent <name> to switch, /agent default to clear."
+            f"/agent <name> to switch, /agent default to clear.{cycle}"
         )
         return
     if args == "default":
-        app.active_agent = None
-        app._transcript.write_system("Active agent cleared — default harness.")
-        _note_skills_under_new_context(app)
-        _refresh_agent_panel(app)
+        _switch_to(app, None)
         return
     agent = manager.get(args)
     if agent is None:
@@ -43,11 +44,102 @@ def _cmd_agent(app, args: str) -> None:
             f"Available: {', '.join(manager.names()) or 'none'}."
         )
         return
+    _switch_to(app, agent)
+
+
+def _switch_to(app, agent) -> None:
+    """Make `agent` the active one, or clear it with None.
+
+    ONE path for /agent and for shift+tab (ROADMAP_v3 §59), so the two
+    cannot differ in what a switch says, re-checks or repaints. A turn
+    already running keeps the agent it started with: `agent_turn` reads
+    `app.active_agent` once, when the turn begins.
+    """
     app.active_agent = agent
-    app._transcript.write_system(
-        f"Active agent: {agent.name} — {agent.description}")
+    if agent is None:
+        app._transcript.write_system("Active agent cleared — default harness.")
+    else:
+        app._transcript.write_system(
+            f"Active agent: {agent.name} — {agent.description}")
     _note_skills_under_new_context(app)
     _refresh_agent_panel(app)
+
+
+# ---------------------------------------------------------------------------
+# ---- shift+tab: the agent cycle (ROADMAP_v3 §59, UI2 / UI3) ----------------
+# ---------------------------------------------------------------------------
+
+DEFAULT_STOP = "default"
+
+
+def _stop_name(stop) -> str:
+    return DEFAULT_STOP if stop is None else stop.name
+
+
+def cycle_stops() -> tuple[list, list]:
+    """The stops shift+tab walks, and the configured names it had to skip.
+
+    The first stop is ALWAYS None, the plain harness (UI6), and the rest
+    are `config.AGENT_CYCLE` in its own order. A "default" entry and a
+    repeated name add nothing. A name no tier provides is skipped, because
+    the user and project tiers are only known at runtime; the caller says
+    so. Read at call time, so a test or a /config edit is seen at once.
+    """
+    import config
+
+    stops, missing, seen = [None], [], {DEFAULT_STOP}
+    for name in config.AGENT_CYCLE:
+        if name in seen:
+            continue
+        seen.add(name)
+        agent = manager.get(name)
+        if agent is None:
+            missing.append(name)
+        else:
+            stops.append(agent)
+    return stops, missing
+
+
+def can_cycle() -> bool:
+    """Whether shift+tab means "next agent" right now: at least one agent
+    beside the default. When it does not, the prompt declines the key and
+    Textual's reverse focus gets it, as before §59."""
+    stops, _ = cycle_stops()
+    return len(stops) > 1
+
+
+def cycle_agent(app) -> None:
+    """shift+tab in the prompt: switch to the next stop.
+
+    From an agent the roster does not list (one picked with /agent), the
+    next stop is the first one, the default. A cycle has one start, and
+    that is the stop a user can always find again.
+    """
+    stops, missing = cycle_stops()
+    _note_missing(app, missing)
+    if len(stops) < 2:
+        return
+    names = [_stop_name(stop) for stop in stops]
+    current = _stop_name(app.active_agent)
+    following = (names.index(current) + 1) % len(stops) \
+        if current in names else 0
+    _switch_to(app, stops[following])
+
+
+def _note_missing(app, missing: list) -> None:
+    """Name each skipped roster entry once per session, not once per press.
+    Kept on the app, so a new session starts with a clean slate."""
+    noted = getattr(app, "_agent_cycle_noted", None)
+    if noted is None:
+        noted = set()
+        app._agent_cycle_noted = noted
+    for name in missing:
+        if name in noted:
+            continue
+        noted.add(name)
+        app._transcript.write_system(
+            f"agent_cycle in config.yaml names {name!r}, which no agent tier "
+            "provides here, so shift+tab skips it.")
 
 
 def _refresh_agent_panel(app) -> None:

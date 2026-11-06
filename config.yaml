@@ -79,6 +79,19 @@ subagent_max_depth: 2
 subagent_max_parallel: 3
 
 # ======================================================================
+# The active agent
+# ======================================================================
+
+# The agents shift+tab steps through in the TUI's prompt, in this order.
+# The plain harness ("default") is always the first stop and is not
+# listed. A name no agent tier provides is skipped and named once. An
+# empty list gives shift+tab back to moving focus. /agent <name> reaches
+# every agent, listed here or not.
+agent_cycle:
+  - plan
+  - build
+
+# ======================================================================
 # Deep research pipeline
 # ======================================================================
 

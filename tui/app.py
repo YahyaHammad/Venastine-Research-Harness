@@ -52,6 +52,7 @@ import config_edit
 import config_schema
 import config_update
 import storage
+from agents import tui_commands as agent_commands
 from agents.tui_commands import register_agent_commands
 from core import compaction, config_loader, session_wake, shell_sessions
 from core import connect as model_connect
@@ -3642,6 +3643,16 @@ class VenastineApp(App):
         if self._session_panel_widget is not None:
             return self._session_panel_widget
         return self.query_one("#session-panel", SessionPanel)
+
+    def can_cycle_agent(self) -> bool:
+        """Whether shift+tab in the prompt means "next agent" (§59 UI2).
+        The prompt asks this from `check_action`; the answer lives with
+        /agent in `agents/tui_commands.py`."""
+        return agent_commands.can_cycle()
+
+    def cycle_agent(self) -> None:
+        """shift+tab in the prompt: the next stop of `agent_cycle`."""
+        agent_commands.cycle_agent(self)
 
     def refresh_agent_panel(self) -> None:
         """Redraw the panel from the two facts that make it up: the

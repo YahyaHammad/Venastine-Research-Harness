@@ -24,38 +24,61 @@ from memories.manager import manager
 from tui.commands import bind
 from tui.commands import registry as commands
 
+#: Longest memory text one picker row shows (ROADMAP_v3 §59). The confirm
+#: that follows shows each ticked memory whole, so this cuts only the list.
+PICKER_ROW_CHARS = 160
+
+
+def _describe(row) -> str:
+    """`(project) [category] text`: what /memories prints after the id, and
+    what the picker and its confirm show. One function, so the three
+    surfaces name a memory the same way."""
+    marker = "global" if row["scope"] == "global" else "project"
+    category = f" [{row['category']}]" if row.get("category") else ""
+    return f"({marker}){category} {row['content']}"
+
+
+def _picker_label(row) -> str:
+    """One line: whitespace collapsed, cut at PICKER_ROW_CHARS."""
+    text = " ".join(_describe(row).split())
+    if len(text) > PICKER_ROW_CHARS:
+        text = text[:PICKER_ROW_CHARS - 1].rstrip() + "…"
+    return text
+
 
 def _cmd_memories(app, args: str) -> None:
     """List what this session can see, with ids for /forget."""
     rows = manager.visible()
     if not rows:
-        where = manager.scope_path() or "no project resolved"
-        app._transcript.write_system(
-            f"No durable memories visible here ({where}).")
+        app._transcript.write_system(_nothing_visible())
         return
     app._transcript.write_system(f"{len(rows)} durable memories:")
     for row in rows:
-        marker = "global" if row["scope"] == "global" else "project"
-        category = f" [{row['category']}]" if row.get("category") else ""
-        app._transcript.write_system(
-            f"  {row['id']}  ({marker}){category} {row['content']}")
+        app._transcript.write_system(f"  {row['id']}  {_describe(row)}")
+
+
+def _nothing_visible() -> str:
+    where = manager.scope_path() or "no project resolved"
+    return f"No durable memories visible here ({where})."
 
 
 def _cmd_forget(app, args: str) -> None:
-    """Delete one memory by id.
+    """Delete memories: pick them with no id (§59), or name one by id.
 
     By ID and not by substring. A substring match that hit two memories
     would have to pick one or refuse, and picking silently deletes
     something the user did not name -- which is the one outcome a removal
-    command must never have.
-    """
-    from storage import forget_memory
+    command must never have. The picker keeps that rule: a row IS an id.
 
+    The by-id form does not confirm, and §59 did not change it (UI4).
+    Copying a uuid back is the deliberation; ticking five rows is not.
+    """
     raw = args.strip()
     if not raw:
-        app._transcript.write_error(
-            "Usage: /forget <id>. Run /memories to see the ids.")
+        _pick_and_forget(app)
         return
+    from storage import forget_memory
+
     try:
         memory_id = UUID(raw)
     except ValueError:
@@ -66,6 +89,63 @@ def _cmd_forget(app, args: str) -> None:
         app._transcript.write_system(f"Forgot {memory_id}.")
     else:
         app._transcript.write_error(f"No memory with id {memory_id}.")
+
+
+def _pick_and_forget(app) -> None:
+    """`/forget` alone: tick memories, confirm, then forget them
+    (ROADMAP_v3 §59, UI1 and UI4).
+
+    The confirm lists every ticked memory WHOLE, with its focus on No.
+    UI4: the picker takes away the friction a typed uuid was, so the
+    second look has to come from somewhere, and a list the user just
+    ticked is the cheapest place to give it.
+    """
+    from tui.screens import ConfirmScreen, MemoryPickerScreen
+
+    rows = manager.visible()
+    if not rows:
+        app._transcript.write_system(_nothing_visible())
+        return
+    by_id = {str(row["id"]): row for row in rows}
+
+    def picked(chosen) -> None:
+        if not chosen:
+            # None is Escape or Cancel; an empty set is Forget with nothing
+            # ticked. Both delete nothing, and both say so.
+            app._transcript.write_system("Nothing forgotten.")
+            return
+        # The picker's order, newest first, not the set's.
+        ids = [memory_id for memory_id in by_id if memory_id in chosen]
+        count = len(ids)
+        title = ("Forget this memory?" if count == 1
+                 else f"Forget these {count} memories?")
+        body = "\n".join(f"- {_describe(by_id[memory_id])}"
+                         for memory_id in ids)
+        app.push_screen(
+            ConfirmScreen(title, body, confirm_label="Forget"),
+            lambda confirmed: _forget_confirmed(app, ids, confirmed))
+
+    app.push_screen(
+        MemoryPickerScreen([(_picker_label(row), memory_id)
+                            for memory_id, row in by_id.items()]),
+        picked)
+
+
+def _forget_confirmed(app, ids: list, confirmed: bool) -> None:
+    from storage import forget_memory
+
+    if not confirmed:
+        app._transcript.write_system("Nothing forgotten.")
+        return
+    gone = [memory_id for memory_id in ids if forget_memory(UUID(memory_id))]
+    if gone:
+        app._transcript.write_system(
+            f"Forgot {len(gone)} memor{'y' if len(gone) == 1 else 'ies'}.")
+    # A row another session deleted while the picker was open. Named,
+    # because "Forgot 3" after ticking 4 would otherwise be a mystery.
+    for memory_id in ids:
+        if memory_id not in gone:
+            app._transcript.write_error(f"No memory with id {memory_id}.")
 
 
 def _cmd_summary(app, args: str) -> None:

@@ -175,6 +175,7 @@ list which is a decision rather than an omission.
 - [Model and loop](#model-and-loop)
 - [Loop control](#loop-control)
 - [Subagents (ROADMAP_v2 §18)](#subagents-roadmap_v2-18)
+- [The active agent (ROADMAP_v3 §59)](#the-active-agent-roadmap_v3-59)
 - [Deep research pipeline](#deep-research-pipeline)
 - [Spend cap (batch 27, #4)](#spend-cap-batch-27-4)
 - [Ensemble mode (ROADMAP §10, as redesigned by its revisit)](#ensemble-mode-roadmap-10-as-redesigned-by-its-revisit)
@@ -279,6 +280,33 @@ Three because that is the case the design keeps citing -- one turn
 spawning `explore` three times -- and because three children at depth 1,
 each able to nest to SUBAGENT_MAX_DEPTH, is a bounded worst case for the
 serialised approval queue and for the SQLite writers.
+
+## The active agent (ROADMAP_v3 §59)
+
+### `agent_cycle`
+
+UI3, UI5 and UI6. The agents shift+tab steps through in the TUI's prompt,
+in order. The cycle is short on purpose. Twelve or more built-in, user and
+project agents would make a list to scroll through, not a cycle, and the
+request was for moving between two or three ways of working.
+
+**`default` is always the first stop and is never listed** (UI6). The
+plain harness is then never more than a few presses away, and no roster can
+strand a user in an agent. A `default` entry is ignored rather than refused:
+the stop is already there.
+
+**Names, checked when the key is pressed.** The user and project tiers are
+discovered after this file is read, so the schema cannot know whether a
+project's agent exists. A name no tier provides is skipped and named in the
+transcript once per session. Refusing the launch over it would make a
+project agent's absence a reason not to start.
+
+**Here and not in an agent's frontmatter** (UI5, the owner's choice). A
+frontmatter flag would let a project's agent add itself to the user's cycle,
+and the order would have to come from tier and file name.
+
+An empty list gives shift+tab back to Textual's reverse focus, which is
+what it did before §59. `/agent <name>` reaches every agent, listed or not.
 
 ## Deep research pipeline
 
