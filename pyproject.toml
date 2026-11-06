@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "venastine-research-harness"
-version = "0.3.7b1+code.scanning.rf20662208f33"
+version = "0.3.8"
 description = "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline."
 readme = "README.md"
 requires-python = ">=3.11"
