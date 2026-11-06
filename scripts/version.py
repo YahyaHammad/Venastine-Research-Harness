@@ -4,8 +4,10 @@
 check validates the pair; set writes a chosen npm spelling to both files.
 branch starts a fresh identity from the main version (or a parent branch's
 base); bump advances only the beta counter on branches, the patch on main.
-Release allocation is explicit: use set with the next unused clean version
-on main, after checking main and the release tags. Nothing commits or tags.
+Nothing here commits or tags. A merge's release is allocated by
+release.yml through scripts/release_after_merge.py (ROADMAP_v3 §91,
+A86), which calls write_version; set is for main after a release:skip merge
+or a run that refused, after checking main and the release tags.
 """
 
 import argparse

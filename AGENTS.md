@@ -64,7 +64,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 8909 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 8949 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -162,8 +162,23 @@ completion, and `python scripts/version.py check` to validate the pair.
 For a merge release, `python scripts/version.py set X.Y.Z` on main writes
 both files. The helper refuses a clean version on another branch, a beta
 on main, and a newly allocated version already found in reachable history.
-It does not fetch remote history, allocate release numbers, commit, or tag:
-the agent still checks current main/tags and closes the batch deliberately.
+It does not fetch remote history, allocate release numbers, commit, or tag.
+
+**A merge releases itself** (ROADMAP_v3 §91, A86–A88, batch 237). When a
+pull request merges into `main`, `.github/workflows/release.yml` runs
+`scripts/release_after_merge.py`: it commits the next version as
+"Release X.Y.Z after PR #N", pushes `main` and then the annotated tag, and
+publishes the GitHub release, and the tag starts the npm publish. The next
+version is the patch above the newer of `main`'s base and the newest `v*`
+tag. Label the pull request `release:minor` or `release:major` for that part
+instead, or `release:skip` to set the version yourself. Two parts, or an
+unknown `release:*` label, fail the run and push nothing. The pushes use the
+deploy key `RELEASE_DEPLOY_KEY`, a secret of environment `release` limited
+to `main`, because a `GITHUB_TOKEN` push starts no CI and the deploy gate
+would wait on the release commit forever. Until that secret exists a run
+only plans. So an agent no longer allocates a merge's version by hand:
+after a merge, check the run did it, and use `set` on `main` only for a
+`release:skip` merge or a run that refused.
 `scripts/version.py` owns the npm-to-Python conversion; do not maintain
 another version mapping. The publish gate rejects branch builds before packing;
 clean releases still require exact file parity and an exactly matching tag.
@@ -261,14 +276,17 @@ Apache-2.0 §4(d) and oblige shipping their `LICENSE`/`NOTICE` files as received
 distribution under §4 where running from a checkout was not, which is why `LICENSE` and `NOTICE` are
 in the allowlist — npm auto-includes the first and **not** the second.
 
-**The publish workflow is armed (2026-09-04).** `.github/workflows/publish.yml` runs on
-`workflow_dispatch` and on pushed `v*` tags. `dry_run` still defaults to true on a manual
-dispatch, and until the `NPM_TOKEN` repository secret exists every run — tags included —
-downgrades itself to a dry run, so arming the trigger while the secret is missing only
-produces rehearsals. A tag push carries no input: with the secret set it publishes for real.
-Publishing makes the source public regardless of the repository's visibility, and a
-published npm version can never be replaced — only deprecated, so the repository goes
-public and the secret is added deliberately, in that order.
+**The publish workflow is armed (2026-09-04), through trusted publishing since batch 237**
+(ROADMAP_v3 §91, A89). `.github/workflows/publish.yml` runs on `workflow_dispatch` and on
+pushed `v*` tags. It holds no npm token: npm retired token publishing for OIDC, and trusts a
+run of `publish.yml` in this repository as configured on npmjs.com under the package's
+Settings → Trusted publishing. It needs npm 11.5.1 and Node 22.14.0 at the least, so the job
+runs Node 24 and pins npm. `dry_run` still defaults to true on a manual dispatch, and until
+the repository variable `NPM_TRUSTED_PUBLISHING` is `on` every run — tags included —
+downgrades itself to a dry run. A tag push carries no input: armed, it publishes for real.
+Set the variable once the trusted publisher exists, and push a tag within two days of
+creating it, or npm expires it. A published npm version can never be replaced — only
+deprecated.
 
 **A tag publishes only the version it names** (ROADMAP_v3 §78, A78, batch 162). On a run from a
 tag, `scripts/prepublish-check.mjs` refuses before it packs anything unless `GITHUB_REF_NAME` is
@@ -317,8 +335,8 @@ run.
 **The copyright year keeps itself** (ROADMAP_v3 §80, batch 169). `.github/workflows/copyright-year.yml`
 runs `scripts/bump_copyright_year.py` at 23:59 UTC on December 31 and again early on January 1, in
 case GitHub delayed or dropped the first run. It writes a range from the first year
-(`Copyright 2026-2027`), to LICENSE's appendix and NOTICE together, and is the only workflow with
-`contents: write`. Its push uses `GITHUB_TOKEN`, which starts no workflow, so that commit gets no CI
+(`Copyright 2026-2027`), to LICENSE's appendix and NOTICE together. It and `release.yml` are
+the only workflows with `contents: write`. Its push uses `GITHUB_TOKEN`, which starts no workflow, so that commit gets no CI
 and no demo deploy. Edit the two copyright lines together or the job refuses.
 
 ## Documentation map
@@ -337,7 +355,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §54, §55, §58, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84, §85, §86, §87, §88, §89 and §90 built; §53, §56, §59 and §60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §57 recorded in batch 122 and designed with the owner and built in batch 235; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A85 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85, A81 in §86, A82 in §87, A83 in §88, A84 in §89, A85 in §90), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM11 from §57, PR1–PR6 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82 and CG1–CG24 from §83). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§52, §54, §55, §58, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84, §85, §86, §87, §88, §89, §90 and §91 built; §53, §56, §59 and §60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §57 recorded in batch 122 and designed with the owner and built in batch 235; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A90 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85, A81 in §86, A82 in §87, A83 in §88, A84 in §89, A85 in §90, A86, A87, A88, A89 and A90 in §91), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO7 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM11 from §57, PR1–PR6 from §58 UI1–UI4 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82 and CG1–CG24 from §83). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
