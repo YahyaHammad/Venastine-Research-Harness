@@ -30585,3 +30585,70 @@ Each fix is a furniture entry or a tidy rule with the site named.
   strengthened, and a green control.
 - **pip-audit** on `requirements.txt`: no known vulnerabilities.
 - **Version:** `0.3.9-b.2.network-byte-limit.r9cd3a68c74e1`.
+
+## Batch 241 -- uv where pip was slow: CI, and the installers when it is there (2026-11-07)
+
+**ROADMAP_v3 §93, UV1-UV7.** On the §53 branch, before its PR, the owner asked
+whether uv would make the CI runners faster than pip, and for the curlable
+installers to use uv when it is available, if that adds no friction. Midway
+they asked whether compiling bytecode could breach LGPL-3's terms; it cannot
+-- pip already compiles every package, the `.pyc` files sit beside each
+library's own source, and nothing is merged or distributed.
+
+### Measured first
+
+- **CI's own timings:** the install step took 18-29 s on every Ubuntu job and
+  49-54 s on Windows; in the pytest job, 14.5 s of 23 was pip's serial
+  unpacking and bytecode compile.
+- **A 4-core Ubuntu box** (WSL under `taskset`, three rounds): pip 14.1-14.3 s
+  warm; uv 0.1 s, but its first collection then paid 2-4 s back; uv with
+  `--compile-bytecode` 2.6-2.7 s and nothing paid back. Empty caches: pip
+  37.0-41.4 s, uv 10.2-13.1 s.
+- **Windows, this machine:** a first install as `install.py` builds it, 255.6
+  and 257.4 s with pip, 39.7 and 48.7 s with uv copying and compiling.
+- **The same set:** pip and uv installed the identical 76 distributions at
+  identical versions.
+- **The link:** uv's default made an installed file's `st_nlink` 2 on Linux and
+  Windows, 1 with `--link-mode copy`. The runtime sits in the protected user
+  tier and `~/.cache/uv` does not, so copying is not optional.
+- **`uv python find`** without `--system` answered with the `.venv` in the
+  current directory, on 0.13.4 and on the owner's 0.12.5.
+
+### Settled with the owner
+
+uv from PyPI in the seven suite jobs, no third-party action and no uv cache
+(UV1); one pin, 0.13.4 (UV2); in the installers, uv when it is on PATH with pip
+as the fallback and `VENASTINE_NO_UV=1` to opt out (UV3, UV5); the npm launcher
+the same (UV7); and the shims asking uv for a Python when PATH has none (UV6).
+UV4, the copy, follows from the measurement.
+
+### Built
+
+- `scripts/install.py`: `install_requirements()`, `--no-uv`, `installer` in
+  the runtime record; `bin/venastine.py`'s doctor prints it.
+- `install.sh`, `install.ps1`: `uv python find` last.
+- `bin/venastine.mjs`: `findUv()`, `installRequirements()`, the doctor's line.
+- `tests.yml`, `compat.yml`, `publish.yml`: uv in the install step.
+
+### Verified
+
+- **Tests:** 22 new in `tests/test_installers.py`, three of them `integration`
+  tests against a real uv; one docs-consistency gate. One existing test moved
+  (the opt-out test's fake takes `uv`).
+- **Real runs:** the integration tests against uv 0.13.4 and 0.12.5 on Windows;
+  `install.sh` and the npm launcher against a fake uv in WSL; `install.ps1`
+  under Windows PowerShell 5.1. No machine here has PowerShell 7, so its run
+  is CI's.
+- **Mutations:** 39, each red on its assertion on every platform it ran on --
+  25 on Windows (the real uv, Windows PowerShell), 35 in WSL with the pinned
+  uv on PATH -- and two green controls. The real-uv rows are the ones only a
+  real uv can see: `--link-mode hardlink` named outright turned only the
+  `st_nlink` test red, on both.
+- **A trap on the way:** the first full run used the system Python, whose
+  SDKs are from July (openai 2.45.0), and failed seven `test_sdk_conformance`
+  tests on an `httpx2` client the old SDK refuses. Nothing in this batch
+  touches them; the suite runs in the venv that holds the pins.
+- **Full suite** there, `AGENT_WORKSPACE` unset: 9081 passed, 88 skipped.
+  ruff clean, bandit 0 new, gitleaks clean with CI's config; the requirement
+  files are unchanged, and uv 0.13.4 has no OSV advisory.
+- **Version:** `0.3.9-b.3.network-byte-limit.r9cd3a68c74e1`.

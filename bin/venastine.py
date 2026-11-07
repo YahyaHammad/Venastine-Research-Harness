@@ -48,7 +48,9 @@ def main(argv=None):
     env = child_env(Path.cwd(), Path.home(), os.environ)
     if argv == ["--venastine-doctor"]:
         version = json.loads((root / "package.json").read_text(encoding="utf-8"))["version"]
-        print(f"venastine {version}\n  commit: {runtime['commit']}\n  package root: {root}\n  python: {python}\n  cwd: {Path.cwd()}")
+        # An install from before ROADMAP_v3 §93 recorded no installer, and was pip's.
+        print(f"venastine {version}\n  commit: {runtime['commit']}\n  package root: {root}\n  python: {python}\n"
+              f"  installed by: {runtime.get('installer', 'pip')}\n  cwd: {Path.cwd()}")
         for name in ("AGENT_PROVIDERS_FILE", "APP_DB_PATH", "AGENT_LOG_FILE"):
             print(f"  {name}: {env.get(name, '(local/default)')}")
         return 0

@@ -13,6 +13,12 @@ main() {
                 break
             fi
         done
+        # Last, a Python only uv knows, such as one it installed. --system
+        # skips a .venv in this directory; nothing is ever downloaded.
+        if [[ -z "$python" && "${VENASTINE_NO_UV:-0}" == 0 ]] && command -v uv >/dev/null 2>&1; then
+            candidate=$(uv python find --system --no-python-downloads '>=3.11' 2>/dev/null) || candidate=''
+            if [[ -n "$candidate" ]] && "$candidate" -c "$probe" 2>/dev/null; then python="$candidate"; fi
+        fi
     fi
     [[ -n "$python" ]] || { echo 'Install Python 3.11+ (including venv), then run this installer again.' >&2; return 1; }
     command -v curl >/dev/null 2>&1 || { echo 'Install curl, then run this installer again.' >&2; return 1; }

@@ -242,11 +242,13 @@ function ask(question) {
 async function ensureRuntime(python, rt, { assumeYes }) {
   if (isReady(rt)) return;
 
+  const uv = findUv();
   const summary =
     'Venastine needs a Python environment (first run).\n' +
     `  python  : ${python.version}  (${python.executable})\n` +
     `  venv    : ${rt.dir}\n` +
-    `  install : ${countRequirements()} packages from requirements.txt\n`;
+    `  install : ${countRequirements()} packages from requirements.txt` +
+    `${uv ? ', with uv' : ''}\n`;
 
   if (!assumeYes) {
     if (!process.stdin.isTTY) {
@@ -265,10 +267,9 @@ async function ensureRuntime(python, rt, { assumeYes }) {
     process.stdout.write(summary);
   }
 
+  let installer;
   try {
-    run(python.executable, ['-m', 'venv', rt.dir]);
-    run(rt.python, ['-m', 'pip', 'install', '--disable-pip-version-check',
-                    '-r', REQUIREMENTS]);
+    installer = installRequirements(python, rt, uv);
   } catch (e) {
     // Leave nothing half-built behind: the next run must start clean rather
     // than inherit a venv that is missing an unknown subset of its packages.
@@ -281,12 +282,56 @@ async function ensureRuntime(python, rt, { assumeYes }) {
     requirementsHash: requirementsHash(),
     python: python.executable,
     pythonVersion: python.version,
+    installer,
     createdAt: new Date().toISOString(),
   }, null, 2));
 }
 
-function run(cmd, args) {
-  const r = spawnSync(cmd, args, { stdio: 'inherit', windowsHide: true });
+/**
+ * uv, when it is on PATH and VENASTINE_NO_UV is unset (ROADMAP_v3 §93), the
+ * same rule scripts/install.py keeps for the GitHub installers.
+ */
+function findUv() {
+  const off = process.env.VENASTINE_NO_UV;
+  if (off && off !== '0') return null;
+  const r = spawnSync('uv', ['--version'], { encoding: 'utf8', windowsHide: true });
+  return r.status === 0 ? 'uv' : null;
+}
+
+/**
+ * COPY, NEVER uv's DEFAULT LINK. On Linux and Windows uv hardlinks each file
+ * out of its cache, which would make the venv's code one inode with a file
+ * under ~/.cache/uv -- writable where ~/.config/venastine is protected.
+ * Bytecode is compiled as pip compiles it, so a first launch compiles nothing.
+ */
+const UV_INSTALL = ['pip', 'install', '--link-mode', 'copy', '--compile-bytecode'];
+
+/**
+ * The venv, then requirements.txt in it: by uv when there is one, by pip
+ * otherwise. `python -m venv` either way, so the venv holds pip as it always
+ * has. A uv that fails -- too old, or blind to a mirror only pip.conf names
+ * -- costs a fresh venv and a pip install, never the launch. uv runs from
+ * the venv's directory so a project's uv settings in cwd are not read.
+ */
+function installRequirements(python, rt, uv) {
+  run(python.executable, ['-m', 'venv', rt.dir]);
+  if (uv) {
+    try {
+      run(uv, [...UV_INSTALL, '--python', rt.python, '-r', REQUIREMENTS], { cwd: rt.dir });
+      return 'uv';
+    } catch (e) {
+      process.stdout.write(`uv could not install them (${e.message}); starting again with pip.\n`);
+      fs.rmSync(rt.dir, { recursive: true, force: true });
+      run(python.executable, ['-m', 'venv', rt.dir]);
+    }
+  }
+  run(rt.python, ['-m', 'pip', 'install', '--disable-pip-version-check',
+                  '-r', REQUIREMENTS]);
+  return 'pip';
+}
+
+function run(cmd, args, options = {}) {
+  const r = spawnSync(cmd, args, { stdio: 'inherit', windowsHide: true, ...options });
   if (r.error) throw r.error;
   if (r.status !== 0) throw new Error(`${path.basename(cmd)} ${args[0]} exited ${r.status}`);
 }
@@ -439,6 +484,16 @@ function configStateSummary() {
   }
 }
 
+/** A stamp from before ROADMAP_v3 §93 names no installer, and was pip's. */
+function installedBy(rt) {
+  if (!isReady(rt)) return `${findUv() ? 'uv' : 'pip'} (on the first run)`;
+  try {
+    return JSON.parse(fs.readFileSync(rt.stamp, 'utf8')).installer || 'pip';
+  } catch {
+    return 'pip';
+  }
+}
+
 function doctor(python, rt) {
   const cwd = process.cwd();
   const env = childEnv();
@@ -450,6 +505,7 @@ function doctor(python, rt) {
     `  python        : ${python.version}  (${python.executable})`,
     `  venv          : ${rt.dir}`,
     `  venv ready    : ${isReady(rt) ? 'yes' : 'no (first run will build it)'}`,
+    `  installed by  : ${installedBy(rt)}`,
     `  cwd           : ${cwd}`,
     `  providers.json: ${env.AGENT_PROVIDERS_FILE
         || (fs.existsSync(localProviders) ? localProviders : '(none found)')}`,

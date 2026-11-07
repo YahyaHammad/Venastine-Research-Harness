@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
 - **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
 - **§90. Disagreement routed to a check, not deducted** - **(BUILT in batch 232)** (on an ensemble run, cross-candidate disagreement was a 0.15 penalty nothing else read, and it could not be worked off: at 1 of 3 it took a partially grounded claim from MEDIUM to LOW, the loop re-scored it under the same penalty every round, and D2 published it UNVERIFIED. D1 now sends a factual claim at most half the candidates asserted to the 6a/6b loop to be checked, 6a is told the count, and the penalty is retired; issue #12, A85)
@@ -2981,6 +2982,83 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §93. uv where pip was slow: CI, and the installers when it is there
+
+**Added and built in batch 241, from the owner's request** -- made on the §53 branch, before its
+PR -- to see whether uv in place of pip would make the CI runners faster, and to have the curlable
+installers use uv "when available (if it wont add extra friction somehow)".
+
+### What was measured (2026-11-07)
+
+- **CI's own timings.** In the last three runs on `main`, the install step took 18-29 s on every
+  Ubuntu job (docs-consistency, pytest, integration, live-ssh, py313-info) and 49-54 s on the
+  Windows job. In the pytest job's log, 14.5 s of its 23 s was pip's serial "Installing collected
+  packages" -- unpacking and compiling bytecode -- after 2 s upgrading pip and 5 s resolving.
+- **The same install on a 4-core Ubuntu box** (WSL, `taskset -c 0-3`, Python 3.11, uv 0.13.4,
+  three rounds, each tool with its own warm cache): pip 14.1-14.3 s; uv 0.1 s, but its first
+  `pytest --collect-only` then took 13.1-15.1 s against pip's 10.8-11.2 s, because uv compiles
+  no bytecode by default; uv with `--compile-bytecode` 2.6-2.7 s, and collection as fast as
+  pip's. With empty caches, the first-install case: pip 37.0-41.4 s, uv 10.2-13.1 s.
+- **Windows, this machine** (Python 3.13): a first install the way `scripts/install.py` builds it
+  took 255.6 s and 257.4 s with pip, and 39.7 s and 48.7 s with uv copying and compiling. Warm,
+  pip took 258-267 s against CI's 49-54 s for the same files, so this machine's per-file cost
+  (antivirus, most likely) is not CI's; uv's ratio held anyway.
+- **The same set.** From CI's two requirement files, pip and uv installed the identical 76
+  distributions at identical versions, listed by the same tool.
+- **The link.** uv's default on Linux and Windows hardlinks each installed file out of its cache:
+  a file installed that way had `st_nlink` 2 on both, and 1 with `--link-mode copy`.
+
+### Decisions (UV1-UV7)
+
+| # | Decision |
+|---|---|
+| **UV1** | **CI installs with uv from PyPI** (owner): `python -m pip install "uv==<pin>"`, then `python -m uv pip install --system --compile-bytecode -r requirements.txt -r requirements-test.txt`, in the seven jobs that install the requirements (tests.yml's four, compat.yml's two, publish.yml's). The pip self-upgrade and setup-python's pip cache are gone; nothing is cached for uv, because the set is all wheels and a uv cache pruned as astral advises for CI keeps only wheels built from source. No third-party action is added |
+| **UV2** | **One uv pin, 0.13.4** (owner), the version `deploy-demo.yml` and the hosted bridge already pinned; 0.13.5 was the newest at least two weeks old, and neither has an OSV advisory. `test_uv_has_one_pin_and_every_suite_job_installs_with_it` holds every `uv==` in the workflows and the bridge's requirements to one version, and every requirements install to UV1's form |
+| **UV3** | **The installers use uv when it is on PATH, with pip as the fallback** (owner). `python -m venv` as before, so the runtime holds pip, then `uv pip install --link-mode copy --compile-bytecode --python <runtime> -r requirements.txt`, run from a directory outside the caller's project so a project's uv settings are not read. `scripts/install.py`'s `install()` takes uv from `main()`, as it takes PATH, so no test can reach a real uv by accident |
+| **UV4** | **Copy, never link.** The runtime lives in `~/.config/venastine/runtime`, which the harness protects from tool writes; a hardlink would make its code one inode with a file under `~/.cache/uv`, which it does not protect, so a sandboxed command in a `$HOME` workspace could rewrite what the harness imports next. Copying cost 0.3-1 s on Linux and under 2 s on Windows. Bytecode is compiled as pip compiles it |
+| **UV5** | **A uv that fails costs a fresh venv and a pip install, never the installation** (owner): an old uv, or a mirror only `pip.conf` names, which uv does not read. `VENASTINE_NO_UV=1` (or `--no-uv`) installs with pip; the output says "with uv", the runtime record and the npm stamp carry `installer`, and both doctors print it |
+| **UV6** | **The shims ask uv for a Python last** (owner): when PATH has no Python 3.11+, `install.sh` and `install.ps1` try `uv python find --system --no-python-downloads '>=3.11'`, and probe what it names as they probe any candidate. `--system` because without it uv answered with the `.venv` in the current directory, measured on 0.13.4 and 0.12.5; nothing is downloaded, so "it does not install Python" stays true. `VENASTINE_PYTHON` and `VENASTINE_NO_UV` both keep uv out of it |
+| **UV7** | **The npm launcher follows UV3-UV5** (owner): the same command, fallback and opt-out, ", with uv" on its consent screen, and `installer` in its venv stamp |
+
+### Built and measured (batch 241, 2026-11-07)
+
+- **`scripts/install.py`**: `install_requirements()` (UV3-UV5), `runtime_python()`, `--no-uv`, and
+  `installer` in `.venastine-runtime.json`; **`bin/venastine.py`**'s doctor prints it.
+- **`install.sh`, `install.ps1`**: UV6.
+- **`bin/venastine.mjs`**: `findUv()`, `installRequirements()`, `installedBy()` for the doctor, and
+  `run()` takes spawn options.
+- **`.github/workflows/tests.yml`, `compat.yml`, `publish.yml`**: UV1. The integration job's
+  separate uv install folded into its install step.
+
+22 tests in `tests/test_installers.py`. Against fakes: the uv command and its working directory,
+both kinds of uv failure, the pip path, both failing, the opt-out, the doctor line, `install.sh`
+with no Python on PATH (uv's answer, a Python on PATH first, the opt-out, uv knowing none, uv naming one that fails the probe),
+`install.ps1` the same way under Windows PowerShell here and `pwsh` on CI's Ubuntu, and the npm
+launcher (the command and its directory, a failing uv, the opt-out, the doctor). Three are
+`integration` tests against a real uv, the one CI pins, on Linux and Windows: a file copied rather
+than linked (`st_nlink` 1, where uv's default made it 2), compiled, with pip still in the venv; a
+uv that refuses to start handing over to pip; and the npm launcher. One docs-consistency gate,
+UV2's. One existing test moved: the opt-out test's fake `install()` takes the new `uv` argument.
+
+### Gap register
+
+- **CI's saving is measured off the runners.** The baseline is CI's own step timings and the
+  comparison a 4-core Ubuntu box; the first runs after this lands are the first on a runner, and
+  uv downloads every wheel there, which a home connection could not stand in for.
+- **`install.ps1` under PowerShell 7 first runs in CI.** Neither machine here has `pwsh`; Windows
+  PowerShell 5.1 ran it locally.
+- **The npm launcher's fake-uv tests run on POSIX only.** Windows spawns a script only through a
+  shell, so the real uv covers that platform, in the integration job.
+- **A uv-managed Python can be uninstalled under the runtime built on it.** UV6 can find one, and
+  `uv python uninstall` then breaks that runtime until the installer is run again. uv names its
+  minor-version link, which survives patch upgrades.
+- **The npm launcher does not ask uv for a Python.** UV6 is the shims', as chosen; the launcher's
+  own search is unchanged.
+- **lint, bandit and pip-audit still use pip.** Each installs one tool, and pip-audit resolves with
+  pip by design.
+
 ---
 
 ## §92. A page read as its text, and a PDF read at all

@@ -13,6 +13,18 @@
             if ($LASTEXITCODE -eq 0 -and $found) { $python = ($found | Select-Object -Last 1).Trim(); break }
         } catch { continue }
     }
+    # Last, a Python only uv knows, such as one it installed. --system skips
+    # a .venv in this directory; nothing is ever downloaded.
+    if (-not $python -and -not $env:VENASTINE_PYTHON -and $env:VENASTINE_NO_UV -in @($null, '', '0') -and
+        (Get-Command uv -ErrorAction SilentlyContinue)) {
+        try {
+            $found = & uv python find --system --no-python-downloads '>=3.11' 2>$null
+            if ($LASTEXITCODE -eq 0 -and $found) {
+                $checked = & ($found | Select-Object -Last 1).Trim() -c $probe 2>$null
+                if ($LASTEXITCODE -eq 0 -and $checked) { $python = ($checked | Select-Object -Last 1).Trim() }
+            }
+        } catch { $python = $null }
+    }
     if (-not $python) { throw 'Install Python 3.11+, or set VENASTINE_PYTHON to its executable, then run this installer again.' }
     $helper = Join-Path ([System.IO.Path]::GetTempPath()) ('venastine-install-' + [guid]::NewGuid().ToString('N') + '.py')
     $oldProtocol = [Net.ServicePointManager]::SecurityProtocol

@@ -361,7 +361,7 @@ def test_another_venastine_earlier_on_path_is_named_and_not_assumed(tmp_path, of
 
 def test_the_opt_out_comes_from_the_flag_or_the_environment(monkeypatch):
     seen = []
-    monkeypatch.setattr(install, "install", lambda ref, root, bin_dir, modify_path: seen.append(modify_path))
+    monkeypatch.setattr(install, "install", lambda ref, root, bin_dir, modify_path, uv: seen.append(modify_path))
     monkeypatch.delenv(install.NO_MODIFY_PATH, raising=False)
     install.main([])
     install.main(["--no-modify-path"])
@@ -370,3 +370,411 @@ def test_the_opt_out_comes_from_the_flag_or_the_environment(monkeypatch):
     monkeypatch.setenv(install.NO_MODIFY_PATH, "0")
     install.main([])
     assert seen == [True, False, False, True]
+
+
+# ROADMAP_v3 §93 (batch 241): uv builds the runtime when it is on PATH. Like
+# PATH, install() takes uv from main() and never looks for it, so nothing
+# above can reach a real uv.
+
+def tiny_wheel(directory, name="tinypkg", version="1.0"):
+    """A real pure-Python wheel, so pip and uv can both install offline."""
+    import base64
+    import hashlib
+    directory.mkdir(parents=True, exist_ok=True)
+    dist = f"{name}-{version}.dist-info"
+    files = {
+        f"{name}/__init__.py": "VALUE = 41\n",
+        f"{dist}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n",
+        f"{dist}/WHEEL": "Wheel-Version: 1.0\nGenerator: venastine-tests\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    record = []
+    for path, text in files.items():
+        digest = base64.urlsafe_b64encode(hashlib.sha256(text.encode()).digest()).rstrip(b"=").decode()
+        record.append(f"{path},sha256={digest},{len(text.encode())}")
+    files[f"{dist}/RECORD"] = "\n".join([*record, f"{dist}/RECORD,,"]) + "\n"
+    wheel = directory / f"{name}-{version}-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for path, text in files.items():
+            archive.writestr(path, text)
+    return wheel
+
+
+def offline_requirements(directory):
+    """A requirements.txt naming only the tiny wheel, found without an index."""
+    tiny_wheel(directory / "wheels")
+    requirements = directory / "requirements.txt"
+    requirements.write_text(f"--no-index\n--find-links {(directory / 'wheels').as_uri()}\ntinypkg==1.0\n",
+                            encoding="utf-8")
+    return requirements
+
+
+def installed_module(runtime):
+    """tinypkg's installed __init__.py, found without importing it."""
+    return next(runtime.glob("**/site-packages/tinypkg/__init__.py"))
+
+
+class TestUvBuildsTheRuntime:
+    """UV3-UV5. Against the fake `run`: what install() asks uv and pip to do."""
+
+    @pytest.fixture
+    def recorded(self, offline, monkeypatch):
+        calls = []
+        fake = install.run
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            fake(argv, **kwargs)
+        monkeypatch.setattr(install, "run", run)
+        return calls
+
+    def test_uv_copies_and_compiles_from_the_download_directory(self, tmp_path, recorded, capsys):
+        root = tmp_path / "install"
+        install.install("main", root, tmp_path / "commands", uv="/opt/uv/bin/uv")
+        record = json.loads((root / "app" / install.RUNTIME).read_text())
+        [(argv, kwargs)] = [(argv, kwargs) for argv, kwargs in recorded if argv[0] == "/opt/uv/bin/uv"]
+        assert argv[:-1] == ["/opt/uv/bin/uv", "pip", "install", "--link-mode", "copy", "--compile-bytecode",
+                             "--python", record["python"], "-r"]
+        download = Path(kwargs["cwd"])
+        assert download.parent == root.resolve() and download.name.startswith("download-")
+        assert Path(argv[-1]) == download / "app" / "requirements.txt"
+        assert not [argv for argv, _ in recorded if argv[1:3] == ["-m", "pip"]]
+        assert record["installer"] == "uv"
+        assert "in an isolated environment with uv..." in capsys.readouterr().out
+
+    @pytest.mark.parametrize("failure", [subprocess.CalledProcessError(2, ["uv"]), FileNotFoundError("uv")],
+                             ids=["uv exits non-zero", "uv cannot start"])
+    def test_a_failing_uv_costs_a_fresh_venv_and_a_pip_install(self, tmp_path, recorded, monkeypatch, capsys, failure):
+        root = tmp_path / "install"
+        previous = install.run
+        def run(argv, **kwargs):
+            if argv[0] == "uv":
+                runtime = Path(argv[argv.index("--python") + 1]).parent.parent
+                (runtime / "half-built").write_text("left by uv", encoding="utf-8")
+                raise failure
+            previous(argv, **kwargs)
+        monkeypatch.setattr(install, "run", run)
+        install.install("main", root, tmp_path / "commands", uv="uv")
+        record = json.loads((root / "app" / install.RUNTIME).read_text())
+        runtime = Path(record["python"]).parent.parent
+        assert not (runtime / "half-built").exists()
+        venvs = [argv for argv, _ in recorded if argv[1:3] == ["-m", "venv"]]
+        assert venvs == [[sys.executable, "-m", "venv", str(runtime)]] * 2
+        [pip] = [argv for argv, _ in recorded if argv[1:3] == ["-m", "pip"]]
+        assert pip[0] == record["python"]
+        assert record["installer"] == "pip"
+        assert "uv could not install them" in capsys.readouterr().out
+
+    def test_without_uv_pip_installs_as_it_always_has(self, tmp_path, recorded, capsys):
+        root = tmp_path / "install"
+        install.install("main", root, tmp_path / "commands")
+        assert [argv[1:4] for argv, _ in recorded if argv[1:3] == ["-m", "pip"]] == [["-m", "pip", "install"]]
+        assert json.loads((root / "app" / install.RUNTIME).read_text())["installer"] == "pip"
+        assert "in an isolated environment..." in capsys.readouterr().out
+
+    def test_when_pip_fails_too_the_active_install_is_untouched(self, tmp_path, offline, monkeypatch):
+        root, commands = tmp_path / "install", tmp_path / "commands"
+        install.install("main", root, commands)
+        (root / "app" / "config.yaml").write_text("my settings", encoding="utf-8")
+        before = next(commands.iterdir()).read_bytes()
+        previous = install.run
+        def run(argv, **kwargs):
+            if argv[0] == "uv" or argv[1:3] == ["-m", "pip"]:
+                raise subprocess.CalledProcessError(1, argv)
+            previous(argv, **kwargs)
+        monkeypatch.setattr(install, "run", run)
+        with pytest.raises(subprocess.CalledProcessError):
+            install.install("main", root, commands, uv="uv")
+        assert (root / "app" / "config.yaml").read_text() == "my settings"
+        assert next(commands.iterdir()).read_bytes() == before
+        assert not (root / ".install.lock").exists()
+
+    def test_main_hands_over_the_uv_on_path_unless_told_not_to(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(install, "install", lambda ref, root, bin_dir, modify_path, uv: seen.append(uv))
+        monkeypatch.setattr(install.shutil, "which", lambda name: f"/found/{name}")
+        monkeypatch.delenv(install.NO_UV, raising=False)
+        install.main([])
+        install.main(["--no-uv"])
+        monkeypatch.setenv(install.NO_UV, "1")
+        install.main([])
+        monkeypatch.setenv(install.NO_UV, "0")
+        install.main([])
+        assert seen == ["/found/uv", None, None, "/found/uv"]
+
+
+@pytest.mark.parametrize("recorded, shown", [({"installer": "uv"}, "uv"), ({}, "pip")],
+                         ids=["recorded", "an install from before"])
+def test_the_doctor_names_what_built_the_runtime(tmp_path, recorded, shown):
+    root = tmp_path / "app"
+    (root / "bin").mkdir(parents=True)
+    shutil.copyfile(REPO / "bin/venastine.py", root / "bin/venastine.py")
+    (root / "package.json").write_text(json.dumps({"version": "1.2.3"}), encoding="utf-8")
+    install.write_json(root / install.RUNTIME, {"python": sys.executable, "commit": "a" * 40, **recorded})
+    result = subprocess.run(  # nosec B603 - local launcher, no shell or network
+        [sys.executable, str(root / "bin/venastine.py"), "--venastine-doctor"],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert f"\n  installed by: {shown}\n" in result.stdout
+
+
+# The shims and the npm launcher, against a fake uv. A fake must be a script,
+# which Windows' spawn without a shell cannot run, so the launcher's Windows
+# path is covered by the real uv in TestTheRealUv instead.
+
+_HELPER = 'import sys; print("HELPER", sys.executable)'
+_FAKE_UV = """#!/bin/sh
+printf '%s|%s\\n' "$PWD" "$*" >> "$FAKE_UV_CALLS"
+case "$1 $2" in
+  "python find") [ -n "$FAKE_UV_PYTHON" ] || exit 2; printf '%s\\n' "$FAKE_UV_PYTHON" ;;
+  "--version ") echo "uv 0.0.0 (fake)" ;;
+  "pip install") echo "left by uv" > half-built; exit "${FAKE_UV_EXIT:-0}" ;;
+esac
+"""
+
+
+def _fake_bin(tmp_path, *tools):
+    """A PATH holding a fake uv and the named real tools, and no Python."""
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    (bin_dir / "uv").write_text(_FAKE_UV, encoding="ascii", newline="\n")
+    (bin_dir / "uv").chmod(0o755)
+    for tool in tools:
+        (bin_dir / tool).symlink_to(shutil.which(tool))
+    return bin_dir
+
+
+def _uv_calls(tmp_path):
+    calls = tmp_path / "uv-calls"
+    return calls.read_text().splitlines() if calls.exists() else []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is the Linux and macOS installer")
+class TestTheShellInstallerAsksUvForAPython:
+    """UV6. install.sh with no Python on PATH asks uv last, never to download."""
+
+    def _run(self, tmp_path, python_on_path=False, **env):
+        bash = shutil.which("bash")
+        bin_dir = _fake_bin(tmp_path, "mktemp", "rm")
+        if python_on_path:
+            (bin_dir / "python3").symlink_to(sys.executable)
+        # A curl that writes the helper instead of downloading it.
+        (bin_dir / "curl").write_text(
+            '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --output ] && out=$2; shift; done\n'
+            'printf \'%s\\n\' "$FAKE_HELPER" > "$out"\n', encoding="ascii", newline="\n")
+        (bin_dir / "curl").chmod(0o755)
+        environment = {"PATH": str(bin_dir), "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
+                       "FAKE_HELPER": _HELPER, "FAKE_UV_CALLS": str(tmp_path / "uv-calls"),
+                       "FAKE_UV_PYTHON": sys.executable, **env}
+        return subprocess.run(  # nosec B603 - the repo's installer against local fakes, no network
+            [bash, str(REPO / "install.sh")], env=environment, capture_output=True, text=True, timeout=60)
+
+    def test_a_python_only_uv_knows_runs_the_helper(self, tmp_path):
+        result = self._run(tmp_path)
+        assert result.returncode == 0, result.stderr
+        assert f"HELPER {sys.executable}" in result.stdout
+        assert [call.split("|")[1] for call in _uv_calls(tmp_path)] == [
+            "python find --system --no-python-downloads >=3.11"]
+
+    def test_a_python_on_path_comes_first(self, tmp_path):
+        result = self._run(tmp_path, python_on_path=True)
+        assert result.returncode == 0, result.stderr
+        assert "HELPER" in result.stdout
+        assert _uv_calls(tmp_path) == []
+
+    # /bin/false is on Linux and macOS alike: uv's answer is probed like any
+    # candidate, and one that fails the probe is no answer.
+    @pytest.mark.parametrize("env", [{"VENASTINE_NO_UV": "1"}, {"FAKE_UV_PYTHON": ""},
+                                     {"FAKE_UV_PYTHON": "/bin/false"}],
+                             ids=["opted out", "uv knows none", "uv names one too old"])
+    def test_otherwise_it_still_asks_for_a_python(self, tmp_path, env):
+        result = self._run(tmp_path, **env)
+        assert result.returncode == 1
+        assert "Install Python 3.11+" in result.stderr
+        assert "HELPER" not in result.stdout
+        if "VENASTINE_NO_UV" in env:
+            assert _uv_calls(tmp_path) == []
+
+
+# A script PowerShell finds on PATH by name, as it would find uv.exe. Windows
+# PowerShell runs it under -ExecutionPolicy Bypass; `exit` sets $LASTEXITCODE.
+_FAKE_UV_PS1 = """Add-Content -LiteralPath $env:FAKE_UV_CALLS -Value ((Get-Location).Path + '|' + ($args -join ' '))
+if ($args[0] -eq 'python' -and $args[1] -eq 'find') {
+    if (-not $env:FAKE_UV_PYTHON) { exit 2 }
+    $env:FAKE_UV_PYTHON
+}
+exit 0
+"""
+
+
+class TestThePowerShellInstallerAsksUvForAPython:
+    """UV6, install.ps1's half: pwsh on Linux CI, Windows PowerShell here.
+    Invoke-WebRequest is shadowed by a function that writes the helper."""
+
+    def _run(self, tmp_path, **env):
+        shell = shutil.which("pwsh") or (shutil.which("powershell") if os.name == "nt" else None)
+        if shell is None:
+            if os.environ.get("GITHUB_ACTIONS"):
+                pytest.fail("no PowerShell on PATH in CI, so install.ps1's uv fallback is untested")
+            pytest.skip("no PowerShell on PATH")
+        if os.name == "nt":
+            bin_dir = tmp_path / "fake-bin"
+            bin_dir.mkdir()
+            (bin_dir / "uv.ps1").write_text(_FAKE_UV_PS1, encoding="ascii")
+            path = os.pathsep.join([str(bin_dir), os.path.join(os.environ["SystemRoot"], "System32")])
+        else:
+            path = str(_fake_bin(tmp_path))
+        environment = {k: v for k, v in os.environ.items() if not k.startswith("VENASTINE_")}
+        environment.update(PATH=path, FAKE_HELPER=_HELPER, FAKE_UV_CALLS=str(tmp_path / "uv-calls"),
+                           FAKE_UV_PYTHON=sys.executable, **env)
+        command = ("function Invoke-WebRequest { param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile) "
+                   "Set-Content -LiteralPath $OutFile -Value $env:FAKE_HELPER -Encoding ascii }; "
+                   f"& '{REPO / 'install.ps1'}'")
+        return subprocess.run(  # nosec B603 - the repo's installer against local fakes, no network
+            [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
+            cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=120)
+
+    def test_a_python_only_uv_knows_runs_the_helper(self, tmp_path):
+        result = self._run(tmp_path)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "HELPER" in result.stdout
+        assert [call.split("|")[1] for call in _uv_calls(tmp_path)] == [
+            "python find --system --no-python-downloads >=3.11"]
+
+    def test_opted_out_it_still_asks_for_a_python(self, tmp_path):
+        result = self._run(tmp_path, VENASTINE_NO_UV="1")
+        assert result.returncode != 0
+        assert "Install Python 3.11+" in result.stdout + result.stderr
+        assert _uv_calls(tmp_path) == []
+
+
+def _node():
+    node = shutil.which("node")
+    if node is None:
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail("node is not on PATH in CI, so the npm launcher's uv path is untested")
+        pytest.skip("node is not on PATH")
+    return node
+
+
+def _launcher_tree(tmp_path, requirements):
+    """bin/venastine.mjs beside a main.py that only says it ran."""
+    package = tmp_path / "package"
+    (package / "bin").mkdir(parents=True)
+    shutil.copyfile(REPO / "bin/venastine.mjs", package / "bin/venastine.mjs")
+    (package / "package.json").write_text(json.dumps({"version": "9.9.9"}), encoding="utf-8")
+    shutil.copyfile(requirements, package / "requirements.txt")
+    (package / "main.py").write_text("print('HARNESS RAN')\n", encoding="utf-8")
+    (package / "config_update.py").write_text("", encoding="utf-8")
+    return package
+
+
+def _run_launcher(tmp_path, package, path, *args, **env):
+    """Run the launcher with HOME in tmp_path; return it and its venv stamps."""
+    home = tmp_path / "home"
+    environment = {k: v for k, v in os.environ.items() if not k.startswith("VENASTINE_")}
+    environment.update(PATH=path, HOME=str(home), USERPROFILE=str(home), VENASTINE_PYTHON=sys.executable, **env)
+    result = subprocess.run(  # nosec B603 - the repo's launcher in a scratch tree, no network
+        [_node(), str(package / "bin/venastine.mjs"), *args], cwd=tmp_path, env=environment,
+        capture_output=True, text=True, timeout=300)
+    return result, list((home / ".config/venastine/runtime").glob("*/venastine-runtime.json"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a fake uv is a script, which Windows spawns only through a "
+                                            "shell; TestTheRealUv runs the real one there")
+class TestTheNpmLauncherBuildsItsVenvWithUv:
+    """UV3-UV5 in bin/venastine.mjs: the same rule in the npm channel."""
+
+    def test_uv_on_path_builds_it_by_copy_with_bytecode(self, tmp_path):
+        package = _launcher_tree(tmp_path, offline_requirements(tmp_path))
+        result, [stamp] = _run_launcher(tmp_path, package, str(_fake_bin(tmp_path)), "--venastine-yes",
+                                        FAKE_UV_CALLS=str(tmp_path / "uv-calls"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "requirements.txt, with uv" in result.stdout and "HARNESS RAN" in result.stdout
+        runtime = Path(os.path.realpath(stamp.parent))
+        calls = [call.split("|", 1) for call in _uv_calls(tmp_path)]
+        assert [args for _, args in calls] == [
+            "--version",
+            f"pip install --link-mode copy --compile-bytecode --python {stamp.parent / 'bin' / 'python'} "
+            f"-r {Path(os.path.realpath(package)) / 'requirements.txt'}"]
+        assert Path(os.path.realpath(calls[1][0])) == runtime
+        assert json.loads(stamp.read_text())["installer"] == "uv"
+
+    def test_a_failing_uv_costs_a_fresh_venv_and_pip_installs_it(self, tmp_path):
+        package = _launcher_tree(tmp_path, offline_requirements(tmp_path))
+        result, [stamp] = _run_launcher(tmp_path, package, str(_fake_bin(tmp_path)), "--venastine-yes",
+                                        FAKE_UV_CALLS=str(tmp_path / "uv-calls"), FAKE_UV_EXIT="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "uv could not install them" in result.stdout and "HARNESS RAN" in result.stdout
+        assert not (stamp.parent / "half-built").exists()
+        assert installed_module(stamp.parent).exists()
+        assert json.loads(stamp.read_text())["installer"] == "pip"
+
+    def test_opted_out_it_never_asks_uv(self, tmp_path):
+        package = _launcher_tree(tmp_path, offline_requirements(tmp_path))
+        result, [stamp] = _run_launcher(tmp_path, package, str(_fake_bin(tmp_path)), "--venastine-yes",
+                                        FAKE_UV_CALLS=str(tmp_path / "uv-calls"), VENASTINE_NO_UV="1")
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "with uv" not in result.stdout
+        assert _uv_calls(tmp_path) == []
+        assert installed_module(stamp.parent).exists()
+        assert json.loads(stamp.read_text())["installer"] == "pip"
+
+    def test_the_doctor_says_which_will_build_it(self, tmp_path):
+        package = _launcher_tree(tmp_path, offline_requirements(tmp_path))
+        path = str(_fake_bin(tmp_path))
+        calls = str(tmp_path / "uv-calls")
+        result, _ = _run_launcher(tmp_path, package, path, "--venastine-doctor", FAKE_UV_CALLS=calls)
+        assert "  installed by  : uv (on the first run)\n" in result.stdout
+        result, _ = _run_launcher(tmp_path, package, path, "--venastine-doctor", FAKE_UV_CALLS=calls,
+                                  VENASTINE_NO_UV="1")
+        assert "  installed by  : pip (on the first run)\n" in result.stdout
+
+
+def _real_uv():
+    uv = shutil.which("uv")
+    if uv is None:
+        if os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail("uv is not on PATH in CI, where every suite job's install step puts it")
+        pytest.skip("uv is not on PATH")
+    return uv
+
+
+@pytest.mark.integration
+class TestTheRealUv:
+    """UV3-UV5 against a real uv -- in CI the one every suite job pins, on
+    Linux and Windows. st_nlink is the point of the first: a hardlink out of
+    uv's cache, its default on both, would make it 2."""
+
+    def test_it_copies_compiles_and_leaves_pip_in_the_venv(self, tmp_path, monkeypatch):
+        uv = _real_uv()
+        monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
+        runtime = tmp_path / "runtime"
+        assert install.install_requirements(runtime, offline_requirements(tmp_path), uv, cwd=tmp_path) == "uv"
+        module = installed_module(runtime)
+        assert module.stat().st_nlink == 1
+        # Looked for before anything imports it, which would compile it.
+        assert list((module.parent / "__pycache__").glob("__init__.*.pyc"))
+        python = str(install.runtime_python(runtime))
+        value = subprocess.run(  # nosec B603 - the venv just built, no shell
+            [python, "-c", "import tinypkg; print(tinypkg.VALUE)"], capture_output=True, text=True, check=True)
+        assert value.stdout.strip() == "41"
+        subprocess.run([python, "-m", "pip", "--version"], capture_output=True, check=True)  # nosec B603
+
+    def test_a_uv_that_refuses_to_start_hands_over_to_pip(self, tmp_path, monkeypatch, capfd):
+        uv = _real_uv()
+        # uv exits 2 parsing it, before anything else; pip reads no UV_* variable.
+        monkeypatch.setenv("UV_CONCURRENT_DOWNLOADS", "bogus")
+        runtime = tmp_path / "runtime"
+        assert install.install_requirements(runtime, offline_requirements(tmp_path), uv, cwd=tmp_path) == "pip"
+        assert installed_module(runtime).exists()
+        assert "starting again with pip" in capfd.readouterr().out
+
+    def test_the_npm_launcher_builds_its_venv_with_it(self, tmp_path):
+        uv = _real_uv()
+        package = _launcher_tree(tmp_path, offline_requirements(tmp_path))
+        path = os.pathsep.join([os.path.dirname(uv), os.environ.get("PATH", "")])
+        result, [stamp] = _run_launcher(tmp_path, package, path, "--venastine-yes",
+                                        UV_CACHE_DIR=str(tmp_path / "uv-cache"))
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "HARNESS RAN" in result.stdout
+        assert json.loads(stamp.read_text())["installer"] == "uv"
+        assert installed_module(stamp.parent).stat().st_nlink == 1

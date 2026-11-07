@@ -46,6 +46,10 @@ You can also download and inspect the scripts before running them. They
 download the shared Python installer completely, then execute it. It resolves
 `main` to a full commit ID, downloads that source archive, and installs the
 runtime dependencies in an isolated environment. It does not install Python.
+When `uv` is on your PATH, it installs them — copying files rather than linking
+them out of its cache — and pip does otherwise, or if uv fails. With no Python
+3.11+ on your PATH, the scripts also ask uv for one it already has, and never
+download one.
 
 The source lives under `~/.local/share/venastine/app`, with a `venastine`
 command in `~/.local/bin` (`venastine.cmd` on Windows). When that directory is
@@ -75,7 +79,8 @@ never replaced.
 
 Choose a branch, tag, or full commit ID with `VENASTINE_REF`; choose locations
 with `VENASTINE_INSTALL_DIR` and `VENASTINE_BIN_DIR`, or a Python executable
-with `VENASTINE_PYTHON`; `VENASTINE_NO_MODIFY_PATH=1` leaves PATH alone. Set
+with `VENASTINE_PYTHON`; `VENASTINE_NO_MODIFY_PATH=1` leaves PATH alone, and
+`VENASTINE_NO_UV=1` installs with pip even when uv is on your PATH. Set
 these before running either command. The default
 ref is `main`; older refs without `bin/venastine.py` cannot use this installer.
 The installer itself is downloaded from `main`, even when selecting another
@@ -106,7 +111,7 @@ venastine --tui
 ```
 
 
-**npm handles the setup for you.** It delivers the harness as a folder of source — there is no bundled binary — and Python still runs it, so the only prerequisite you provide is an interpreter on PATH. Everything after that happens on first launch: the launcher finds a suitable Python, tells you which one and what it is about to install, and builds an isolated environment with the pinned dependencies once you agree. It asks every time it would install something, never installs during `npm install` itself, and refuses rather than proceeding when there is no terminal to ask in.
+**npm handles the setup for you.** It delivers the harness as a folder of source — there is no bundled binary — and Python still runs it, so the only prerequisite you provide is an interpreter on PATH. Everything after that happens on first launch: the launcher finds a suitable Python, tells you which one and what it is about to install, and builds an isolated environment with the pinned dependencies once you agree — with uv when it is on your PATH, as the GitHub installers do. It asks every time it would install something, never installs during `npm install` itself, and refuses rather than proceeding when there is no terminal to ask in.
 
 Two things differ from a clone, both to make a command you run from anywhere behave sensibly:
 
@@ -1010,7 +1015,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 9149 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Four further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, the fourth runs an external program through the host fallback shell (`pytest -m integration`).
+Run the test suite with `pytest` — 9169 tests, fully offline, no API keys needed. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
 
 ## Documentation
 
