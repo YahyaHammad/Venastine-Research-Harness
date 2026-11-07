@@ -1,14 +1,27 @@
 # Third-Party Notices
 
-This project is licensed under the **Apache License 2.0** — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE) (Copyright 2026 Yahya Hammad).
+This project is licensed under the **Apache License 2.0** — see [LICENSE](../LICENSE) and [NOTICE](../NOTICE) (Copyright 2026 Yahya Hammad).
 
-The dependencies listed below are **not** part of the project's own source but are required at install/runtime. All are permissive and **Apache-2.0 compatible**; the assessment was made on 2026-08-27, and re-read from each package's own metadata for batch 234's pins on 2026-11-04, when `anthropic` 2.0 moved from MIT to Apache-2.0. This file records it so a scanner or reviewer does not have to re-derive it.
+The tables record the declared core, test, optional, build and hosted dependencies.
+Their project-level licenses are permissive; this is not a license assessment of
+all transitive packages or embedded native libraries. Declarations and the
+license corrections below were checked on 2026-11-07 against the manifests,
+PyPI release metadata and the relevant wheel license files.
 
-> **Scope.** Two things are covered here: the project's **declared direct** dependencies — the pins in `requirements.txt` and the extras in `pyproject.toml` — and, under *Non-code third-party material* below, the third-party **text** the repository reproduces.
->
-> The transitive dependency closure is *not* enumerated: `sympy` pulls `mpmath`, `sqlmodel` pulls SQLAlchemy, and `mcp==2.3.0` brings `httpx2` (BSD-3-Clause), as `anthropic` and `openai` do since batch 234 (see the note beside the `mcp` pin in `requirements.txt`). Until batch 212 `matplotlib` was here too, pulling numpy, kiwisolver, fonttools and pillow; the confidence chart is drawn as SVG with the standard library now, and none of them is installed. For the full closure, run `pip-licenses` against a resolved environment — see *How to regenerate* below.
+> **Distribution scope.** Git source archives, the GitHub installers and npm
+> carry first-party source and notices; Python dependencies are fetched separately.
+> The hosted terminal **does deliver third-party JavaScript and CSS** to browsers.
+> Its notices accompany the JavaScript response and are linked from the terminal.
+> A built ModelScope container contains installed dependencies and Debian packages;
+> distributing that image requires a separate review of the exact image layers.
 
-> Versions shown are the pins from `requirements.txt` / `pyproject.toml` at the time this file was created. Where a range is used (e.g. `rich>=14.2,<16`) the exact resolved version will vary.
+> **Transitive dependencies.** These tables are not a full resolved inventory.
+> For example, HTTP clients bring certifi (MPL-2.0), hosted installs bring tqdm
+> (MPL-2.0 AND MIT) and Gradio brings orjson (MPL-2.0 AND (Apache-2.0 OR MIT)).
+> `httpx2` (BSD-3-Clause) and SQLAlchemy (MIT) are imported directly by the
+> harness but supplied transitively by the SDKs/MCP and SQLModel, respectively.
+> Versions selected by ranges can change; use the exact installed artifacts
+> when reviewing a redistributed environment.
 
 ## Runtime / core dependencies
 
@@ -31,12 +44,18 @@ The dependencies listed below are **not** part of the project's own source but a
 | google-re2 | `==1.1.20251105` | BSD-3-Clause | Yes | https://pypi.org/project/google-re2/ |
 | cryptography | `>=50.0.0,<52` | Apache-2.0 OR BSD-3-Clause | Yes | https://pypi.org/project/cryptography/ |
 | PyJWT | `>=2.15.0,<3` | MIT | Yes | https://pypi.org/project/PyJWT/ |
+| defusedxml | `==0.7.1` | PSF-2.0 | Yes | https://pypi.org/project/defusedxml/ |
+| pypdf | `==6.21.4` | BSD-3-Clause | Yes | https://pypi.org/project/pypdf/ |
 
-`google-re2` (added 2026-09-15, ROADMAP_v3 §49) and `cryptography` (added 2026-09-24, ROADMAP_v3 §49 slice 5a) are the dependencies above that ship **compiled native code**. Taking `google-re2` first: its wheels carry the RE2 C++ library (BSD-3-Clause) and, as RE2 depends on it, Abseil (Apache-2.0). The paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing — so no inbound `NOTICE` obligation arises. Where no wheel exists (musl/Alpine, glibc older than 2.28), pip builds the source distribution locally, which is the user's build rather than a distribution by this project.
+`google-re2` and `cryptography` ship compiled native code. RE2's wheels
+include the RE2 C++ library (BSD-3-Clause) and Abseil (Apache-2.0).
+Cryptography's wheels include a Rust extension and OpenSSL (Apache-2.0).
+The source installers fetch these wheels onto the user's machine; a distributor
+of an installed environment must inspect their bundled notices separately.
+Declaring cryptography did not introduce it to the install closure: Google
+Auth already required it through Google Gen AI.
 
-`cryptography` was **already in the install closure** before it was declared — `google-genai==1.0.0` → `google-auth>=2.14.1` → `cryptography>=38.0.3`, with no extra marker (re-measured on the 2.29.0 pin in batch 172: `google-auth>=2.56.0` → `cryptography>=38.0.3`, still unmarked) — so declaring it added no package to an install and no licence surface that was not already present; it made an existing transitive dependency into a pinned direct one, because the harness-held secret store (ROADMAP_v3 §49 slice 5a, SS57) rests on it. Its wheels carry a **Rust** extension and a statically linked **OpenSSL** (Apache-2.0); the dual licence above is the project's own, and the paragraph under *What this means* holds for it unchanged — pip fetches the wheel onto the user's machine and this project redistributes nothing, so no inbound `NOTICE` obligation arises. Wheels exist for CPython 3.7+ on Windows (x64, x86), macOS (arm64, x86_64) and manylinux/musllinux (x86_64, aarch64); where none does, pip builds the sdist locally and needs a Rust toolchain, which is the user's build rather than a distribution by this project.
-
-`pillow` was declared on 2026-10-28 (batch 201), as a floor under what `matplotlib` pulled in, and removed with `matplotlib` in batch 212: nothing the harness installs reaches it now. The hosted demo's Gradio bridge still installs it, in an environment of its own (`deploy/hosted/requirements.txt`).
+`pillow` was declared on 2026-10-28 (batch 201), as a floor under what `matplotlib` pulled in, and removed with `matplotlib` in batch 212: the default harness install no longer reaches it; optional document/PDF dependencies can still bring it. The hosted demo's Gradio bridge still installs it, in an environment of its own (`deploy/hosted/requirements.txt`).
 
 ## Test dependencies (not used by end users during runtime, only for CI and developer testing)
 
@@ -46,24 +65,39 @@ The dependencies listed below are **not** part of the project's own source but a
 | pytest-mock | `>=3.14` | MIT | Yes |
 | pytest-asyncio | `>=1.0` | Apache-2.0 | Yes |
 | pytest-xdist | `>=3.6` | MIT | Yes |
+| starlette | `>=0.40` | BSD-3-Clause | Yes |
 | execnet | transitive (via `pytest-xdist`) | MIT | Yes |
 
-`execnet` is listed although nothing declares it: it is `pytest-xdist`'s only dependency and the process that actually runs each worker, so a reader auditing what a `pip install -r requirements.txt` puts on the machine would otherwise have to go and find it. Both are permissive, so the no-copyleft claim under *What this means* is unchanged.
+`execnet` is listed although nothing declares it: it is `pytest-xdist`'s only dependency and the process that actually runs each worker, so a reader auditing what a `pip install -r requirements-test.txt` puts on the machine would otherwise have to go and find it. It belongs to the test environment rather than the default runtime.
 
 ## Optional dependencies (`pyproject.toml` extras)
 
 | Package | Version (as pinned) | Primary License | Apache 2.0 Compatible | Notes |
 |---|---|---|---|---|
 | markitdown | `==0.1.9` (extra `documents`) | MIT | Yes | Permissive; only reachable behind `read`/`write`/`edit` (globally denied). |
-| protobuf | `==7.36.2` (extra `documents`) | BSD-3-Clause / Apache-2.0 | Yes | Permissive; transitive via `markitdown`→`onnxruntime`. |
+| protobuf | `==7.36.2` (extra `documents`) | BSD-3-Clause | Yes | Permissive; transitive via `markitdown`→`onnxruntime`. |
 | markdown | unpinned (extra `pdf`) | BSD-3-Clause | Yes | Permissive |
-| weasyprint | unpinned (extra `pdf`) | BSD-3-Clause (package) | Yes (with caveats) | Package itself BSD-3-Clause; transitive deps include LGPL (e.g. `pango`/`cairo` via system libs). See weasyprint docs. |
+| weasyprint | unpinned (extra `pdf`) | BSD-3-Clause (package) | Yes (with caveats) | Package itself BSD-3-Clause; Pyphen has alternative GPL/LGPL/MPL code terms and separate dictionary terms; system libraries have their own licenses. |
 
-`weasyprint` is BSD-3-Clause itself; the caveat is its **system** dependencies (`pango`, `cairo`, `harfbuzz`), which are LGPL and are linked at runtime rather than vendored into this project. If `markdown` or `weasyprint` is later pinned, update the version column above.
+`weasyprint` is BSD-3-Clause itself. Its Python closure includes Pyphen with
+alternative GPL/LGPL/MPL code licenses and separately licensed dictionaries.
+Its native stack includes Pango (LGPL) and HarfBuzz (MIT-style); current
+WeasyPrint uses pydyf for PDF output. Review exact Python and OS artifacts
+before redistributing a PDF-capable environment. Windows MCP installs also
+bring pywin32, whose adodbapi component has LGPL-2.1 terms.
+
+## Build backend
+
+| Package | Declaration | Primary License | Source |
+|---|---|---|---|
+| setuptools | `>=77` in `pyproject.toml` | MIT, with separate vendor notices | https://pypi.org/project/setuptools/ |
 
 ## Hosted demo (`deploy/`, ROADMAP_v3 §79)
 
-What the bridge -- the process that serves a Space's or Studio's page and relays each session -- runs beside Gradio. None of it is installed by `pip install` or npm: `deploy/` ships in neither, and a deployment installs these from PyPI when the platform builds it, so nothing here is redistributed. Licences read from each version's PyPI metadata (2026-10-23).
+The bridge runs separately from the harness's session environment. These
+packages are installed by the hosting platform or generated Docker build;
+`deploy/` is excluded from npm and the metadata-only Python wheel. Installing
+packages on the server and sending their assets to browsers are distinct paths.
 
 | Package | Version (as pinned) | Primary License | Apache 2.0 Compatible | Where |
 |---|---|---|---|---|
@@ -73,38 +107,65 @@ What the bridge -- the process that serves a Space's or Studio's page and relays
 | gradio | `==6.30.0` | Apache-2.0 | Yes | installed by the Space at the README's `sdk_version`; in the Studio's `bridge.lock` |
 | spaces | `==0.51.3` | Apache-2.0 | Yes | installed by the Space itself; in the Studio's `bridge.lock` |
 
-## Deploy tooling (CI only)
+### Browser assets
 
-Installed by `.github/workflows/deploy-demo.yml` to build, audit and upload a bundle (batch 169), and by the owner to deploy the Studio by hand. Never part of any install or bundle.
+The bridge serves only `js/textual.js`, `css/xterm.css` and `NOTICE.txt` under
+`/venastine-static/`. It does not expose the wheel's unused Roboto Mono fonts
+or background image. The font name tables in Textual Serve 1.1.3 identify
+Apache-2.0; blocking those URLs avoids delivering unneeded font copies.
+The terminal's external Google Fonts stylesheet is a separate delivery by Google.
 
-| Package | Version (as pinned) | Primary License | Apache 2.0 Compatible |
-|---|---|---|---|
-| huggingface_hub | `==2.2.0` | Apache-2.0 | Yes |
-| pip-audit | `==2.10.1` | Apache-2.0 | Yes |
+The reviewed wheel SHA-256 is
+`207a472bc6604e725b1adab4ab8bf12f4c4dc25b04eea31e4d04731d8bf30f18`.
+The bridge checks the original JS and CSS hashes before serving them and adds
+[full browser notices](../deploy/hosted/browser-NOTICES.txt) to every JS response.
+The same text is available at `/venastine-static/NOTICE.txt` and linked from the
+terminal. The CSS retains its full MIT notice. Embedded components identified
+in the JS include xterm.js and its addons (MIT), js-base64 3.7.7 (BSD-3-Clause),
+and webpack loader/runtime code (MIT), as well as Textual Serve (MIT).
+Upstream supplies no frontend lockfile, so exact versions of every embedded
+component are not established. A changed asset hash requires a renewed review.
+
+### Installed images and native components
+
+The ModelScope recipe installs the bridge and session packages into a
+Debian-based Python image. This review did not obtain the deployed image or
+establish its delivery terms. It therefore makes no claim of image compliance
+or violation. Before supplying an image copy, inspect its exact wheels and OS
+packages, preserve bundled LICENSE/NOTICE files, and satisfy applicable source
+availability and license requirements for MPL/LGPL/GPL-covered components.
+Include OpenSSL, Abseil, native libraries bundled in wheels and Debian packages
+in that review. Platform-managed Hugging Face packages, including GPU wheels,
+are not a fixed inventory established by the source manifests alone.
+
+## Development and deployment tooling
+
+These tools run in CI or the operator's environment; they are not npm runtime
+dependencies. Entries describe the primary project licenses, not every vendored
+component or service agreement.
+
+| Package | Declaration / use | Primary License |
+|---|---|---|
+| huggingface_hub | `==2.2.0`, deployment CI | Apache-2.0 |
+| pip-audit | `==2.10.1`, dependency audit | Apache-2.0 |
+| bandit | `==1.9.4`, security scan | Apache-2.0 |
+| ruff | `==0.15.21`, lint | MIT |
+| uv | `==0.13.4`, CI and hosted setup | MIT OR Apache-2.0 |
+| modelscope | optional operator login CLI, unpinned | Apache-2.0 |
+| gitleaks | `8.30.1`, secret scan | MIT |
+
+CPython, Node.js/npm, GitHub Actions, CodeQL and optional Docker/Podman and SSH
+helpers have their own project, bundled-component and, for CodeQL, service/tool
+terms. They are execution tools rather than dependencies embedded in the source
+package. Do not infer their complete license inventory from the Python tables.
 
 ## Non-code third-party material
 
-**No third-party source code is included in this repository.** Measured, not assumed: all 277 tracked
-Python files carry no foreign copyright header and no `SPDX-License-Identifier`; a sweep for
-copied or adapted code ("adapted from", "copied from", "taken from", "vendored", "borrowed from")
-returns only this project's own design prose; and the 45 tracked files that are neither `.py`
-nor `.md` are first-party without exception — the licence texts, configuration and packaging
-(`config.yaml`, `pyproject.toml`, the three requirements files, `package.json`, `pytest.ini`, the
-`.github/` workflows, issue templates and scanner configuration, the dotfiles), the two prompt
-texts, `bin/venastine.mjs` and `scripts/prepublish-check.mjs`, `docs/assets/research-mode-birds-eye.mermaid`,
-`tui/app.tcss`, the two `.example` templates, the hosted demo's four page templates in
-`deploy/hosted/`, one screenshot of this project's own interface, and its cover image with the
-page it is rendered from. **No third-party fonts, images or data files are bundled.** The
-cover's text is set in Cascadia Mono, Microsoft's font under the SIL Open Font License: the PNG
-holds rendered glyphs, and its page names the font, and neither carries a copy of it.
-
-*(Counts restated in batch 83. The figure had been 166 against 200, the enumeration named
-five of the thirty-four, and the closing sentence said there were no images at all while the
-screenshot was tracked. The claim itself held throughout; only its arithmetic had drifted.)*
-
-*(Restated again in batch 198, when the cover joined: 200 and 34 had become 277 and 43 as the
-project grew. Both sweeps were run again and found nothing new, and every file added since
-batch 83 is first-party.)*
+The repository does not vendor dependency wheels, third-party fonts or browser
+bundles. The hosted bridge reads the browser bundle from its installed wheel
+and adds the reproduced license texts in `deploy/hosted/browser-NOTICES.txt`.
+The cover image contains rendered glyphs from Cascadia Mono (SIL Open Font
+License); it does not carry the font file.
 
 What the repository *does* reproduce is third-party **text**:
 
@@ -128,21 +189,33 @@ What the repository *does* reproduce is third-party **text**:
 
 ## What this means
 
-* All licenses **listed above** are **permissive** (MIT / BSD-3-Clause / PSF / Apache-2.0). None are copyleft (GPL/AGPL) and none impose source-disclosure on this Apache-2.0 work. This is a statement about the direct dependencies in the tables, not about the full transitive closure — see *Scope* at the top.
-* This project does not redistribute any of them. It is distributed as **source** — a `git` checkout or the npm package `@yahyahammad/venastine`, which is the same folder of first-party files — and `pip` fetches each dependency from PyPI, onto the user's machine, under its own license. **No inbound `NOTICE` obligation therefore arises** — nothing here carries an upstream NOTICE that this project must propagate. The trigger is **redistribution**, not source-vs-binary, and not which channel delivered the source; if a build that vendors these packages is ever distributed, ship their `LICENSE` and `NOTICE` files as received (Apache-2.0 §4(d) applies to `openai`, `google-genai` and `pytest-asyncio`). **The npm tarball must therefore never carry wheels** — that is the one change that would turn this paragraph false, and `CONTRIBUTING.md` records it as a rule.
-* **The npm channel adds no third-party licence surface at all.** Its launcher (`bin/venastine.mjs`) is Node standard library only, with an empty `dependencies` block, so an install of this package fetches no JavaScript code from anyone. What the tarball contains is the first-party source listed under `files` in `package.json`, plus `LICENSE`, `NOTICE` and this file. Publishing *is* distribution of the Work under Apache-2.0 §4 where running from a checkout was not, which is why those three are in the allowlist rather than left to chance: npm auto-includes `LICENSE` and does **not** auto-include `NOTICE`.
-* The [NOTICE](./NOTICE) file this project publishes is therefore **voluntary**, not required. Apache-2.0 §4(d) obliges you to propagate a NOTICE you *received*; it does not oblige a licensor to author one. It exists because scanners and reviewers look for it and because it gives the copyright assertion a canonical home — and it is kept minimal on purpose, since anyone who redistributes this work must carry its contents forward.
-* Full license texts: `pip show <package>` or `pip-licenses --format plain --with-urls`, or the PyPI links above.
+* The harness's Apache-2.0 license does not replace the licenses of dependencies,
+  browser components, fonts or native libraries. Permissive direct dependencies
+  do not imply that the full installed closure contains no copyleft components.
+* The source channels fetch Python packages separately. The npm launcher uses
+  Node built-ins and declares no npm dependencies or bundled dependencies.
+  Do not add wheels or installed dependency directories to the npm tarball.
+* Hosted JS and CSS are copies delivered to visitors. Their notices must
+  accompany those copies; a LICENSE file only in server-side wheel metadata
+  does not accompany the browser response.
+* A redistributed installed image needs its own artifact inventory, notices
+  and any applicable source availability arrangements. A source-only assessment
+  does not establish compliance for that image.
+* The root [NOTICE](../NOTICE) describes these delivery paths. The first-party
+  copyright notice is voluntary; recipients must still retain applicable
+  third-party notices when redistributing their covered components.
 
 ## How to regenerate
 
-```bash
-pip-licenses --format markdown --with-urls --with-license-file
-# or
-pip install pip-licenses && pip-licenses --format plain
-```
+Read `requirements.txt`, `requirements-test.txt`, the build backend and extras
+in `pyproject.toml`, `deploy/hosted/requirements.txt`, and generated platform
+inputs in `scripts/build_demo_bundle.py`. Inspect the exact resolved wheels
+and their license files, including vendor notices; metadata alone can omit them.
+`pip-licenses --format markdown --with-urls --with-license-file` can help list
+an installed environment, but does not inventory browser bundles or OS layers.
 
-When a dependency is added or re-pinned, add a row here with its SPDX identifier and re-check the `Apache 2.0 Compatible` column. CI does not enforce this file today — it is documentation for reviewers.
+When a declaration changes, update its table row and review the actual delivery
+path. For a Textual Serve repin, inspect the bundle components and fonts, update
+browser notices and the reviewed asset hashes, and verify the served responses.
 
----
-*Last updated: 2026-08-27. If any row's upstream re-licenses, this file must be updated.*
+*Last checked: 2026-11-07.*

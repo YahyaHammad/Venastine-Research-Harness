@@ -24,6 +24,7 @@ deployment. The allowed hosts are the deployment's own (`SPACE_HOST`,
 
 from __future__ import annotations
 
+import hashlib
 import html
 import ipaddress
 import json
@@ -54,6 +55,13 @@ TICKET_TTL_S = 60.0
 # What every per-address limit counts over: its "per minute".
 RATE_WINDOW_S = 60.0
 STATIC_PREFIX = "/venastine-static"
+# Reviewed bytes from textual-serve 1.1.3. A repin must review the browser
+# components and their notices before exposing new bytes to visitors.
+BROWSER_ASSETS = {
+    "js/textual.js": "c1e7f29ed0facdd331181d6262f92acfc1cf908569d9e013c16038142a23a470",
+    "css/xterm.css": "0ea0e3c9dbc16c3b7736c1c60abb8ff843e9aa9d5adaa8b573dd6bebcf02cac5",
+}
+BROWSER_NOTICES = PAGES / "browser-NOTICES.txt"
 PROXY_SHAPES_LOGGED = 3
 
 _SECURITY_HEADERS = {
@@ -302,7 +310,7 @@ class Bridge:
     # -- routes --------------------------------------------------------------
 
     def routes(self) -> list:
-        from starlette.routing import Mount, Route, WebSocketRoute
+        from starlette.routing import Route, WebSocketRoute
 
         routes = [
             Route("/", self.landing, methods=["GET"]),
@@ -314,12 +322,40 @@ class Bridge:
             WebSocketRoute("/ws/{ticket}", self.websocket),
         ]
         if self.static_dir is not None:
-            from starlette.staticfiles import StaticFiles
-
-            routes.append(Mount(STATIC_PREFIX,
-                                app=StaticFiles(directory=str(self.static_dir)),
-                                name="venastine-static"))
+            routes.append(Route(STATIC_PREFIX + "/{asset:path}",
+                                self.browser_asset, methods=["GET"]))
         return routes
+
+    async def browser_asset(self, request):
+        """Only the two used assets, with notices accompanying every JS copy.
+
+        The wheel also contains unused fonts and an image. Mounting its whole
+        directory would distribute those too, under separate license terms.
+        """
+        from starlette.responses import Response
+
+        asset = request.path_params["asset"]
+        headers = dict(_SECURITY_HEADERS)
+        if asset == "NOTICE.txt":
+            return Response(BROWSER_NOTICES.read_bytes(), media_type="text/plain",
+                            headers=headers)
+        expected = BROWSER_ASSETS.get(asset)
+        if expected is None:
+            return Response(status_code=404, headers=headers)
+        data = (self.static_dir / asset).read_bytes()
+        if hashlib.sha256(data).hexdigest() != expected:
+            logger.error("hosted browser asset needs a license review: %s", asset)
+            return Response(status_code=503, headers=headers)
+        headers["Link"] = f'<{STATIC_PREFIX}/NOTICE.txt>; rel="license"'
+        if asset == "js/textual.js":
+            # Full terms travel in the response itself, including when saved
+            # independently of this page or the companion notice URL.
+            data = b"/*!\n" + BROWSER_NOTICES.read_bytes() + b"\n*/\n" + data
+            media_type = "application/javascript"
+        else:
+            # xterm.css already retains its full upstream MIT notice.
+            media_type = "text/css"
+        return Response(data, media_type=media_type, headers=headers)
 
     def _mode_words(self) -> dict:
         if self.single_user_requested:
