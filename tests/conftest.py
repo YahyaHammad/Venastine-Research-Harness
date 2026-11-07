@@ -9,8 +9,11 @@ This file provides helpers and per-test isolation, not import-time
 behavior.
 """
 
+import ipaddress
 import itertools
 import os
+import shutil
+import socket
 import time
 import types
 from datetime import UTC
@@ -695,6 +698,225 @@ def browser_opens(monkeypatch):
     for name in ("open", "open_new", "open_new_tab"):
         monkeypatch.setattr(webbrowser, name, record)
     return opened
+
+
+# ---------------------------------------------------------------------------
+# ---- No real name lookups, nothing left in the home (batch 243) ------------
+# ---------------------------------------------------------------------------
+
+_LOOPBACK_NAMES = {"localhost", "ip6-localhost", "ip6-loopback"}
+_REAL_GETADDRINFO = socket.getaddrinfo
+_REAL_GETHOSTBYNAME = socket.gethostbyname
+_REAL_GETHOSTBYNAME_EX = socket.gethostbyname_ex
+
+#: Set by the root conftest's `_throwaway_home`, which spells it too. The
+#: root file cannot be imported from here: pytest registers THIS file as
+#: both `conftest` and `tests.conftest`, so the root module is under neither
+#: name. `test_suite_isolation.py` reads the folder back through this name,
+#: so a rename on either side fails there instead of turning the check off.
+SUITE_HOME_VARIABLE = "VENASTINE_SUITE_HOME"
+
+
+def _answers_without_dns(host, flags=0) -> bool:
+    """True for what every platform's resolver answers without asking DNS.
+
+    A literal address, a loopback name, and a call that asks for a numeric
+    parse only -- `policy_enforcement` makes that kind on every
+    `resolve=False` check, and it is offline by definition.
+
+    NOT the other spellings of a number. glibc reads `127.1` and
+    `2130706433` itself, but Windows sends them to DNS: measured,
+    `getaddrinfo("127.1", None)` there fails with 11001 rather than
+    answering 127.0.0.1. A test that looks one up without AI_NUMERICHOST
+    is making a lookup on one of the two platforms CI runs.
+    """
+    if flags & socket.AI_NUMERICHOST or host is None:
+        return True
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    name = host.lower()
+    if name == "" or name in _LOOPBACK_NAMES or name.endswith(".localhost"):
+        return True
+    try:
+        ipaddress.ip_address(name.split("%", 1)[0])
+        return True
+    except ValueError:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def no_name_lookups(request, monkeypatch):
+    """Fail a test that asks a real DNS server anything.
+
+    Batch 243. The suite calls itself offline, and 25 tests were not: every
+    test in `test_page_text.py` that drives `fetch_url`, and two in
+    `test_network_limit.py`, reached `is_url_permitted`'s real lookup of
+    example.com. GitHub's runners resolve it, so CI was green; Codex's
+    sandbox does not, and they failed there and on main alike. Three older
+    files already stubbed the lookup by hand; nothing made the next one.
+
+    AUTOUSE, for `browser_opens`' reason: the request leaves the machine,
+    so no test should reach it by forgetting. The lookup is answered with
+    `gaierror`, the offline answer, so nothing goes out, and the test FAILS
+    at teardown naming each host -- the production code catches the
+    error and refuses the URL, so without the teardown a test could pass
+    on the refusal and say nothing. Request `public_dns`, or patch
+    `socket.getaddrinfo` in the test, for a test that needs an answer;
+    either replaces this until the test ends.
+
+    In-process lookups only: a child process resolves for itself. Yields
+    the guard, whose `looked_up` a test of the guard itself clears.
+    """
+    guard = NameLookupGuard()
+    guard.install(monkeypatch)
+    yield guard
+    verdict = guard.verdict(request.node.nodeid)
+    if verdict:
+        pytest.fail(verdict, pytrace=False)
+
+
+class NameLookupGuard:
+    """`no_name_lookups`' stand-ins for the three forward lookups."""
+
+    def __init__(self):
+        self.looked_up = []
+
+    def _refuse(self, host):
+        self.looked_up.append(host.decode("ascii", "replace")
+                              if isinstance(host, bytes) else str(host))
+        raise socket.gaierror(socket.EAI_NONAME,
+                              "the test suite looks nothing up")
+
+    def getaddrinfo(self, host, port, family=0, type=0, proto=0, flags=0):
+        if not _answers_without_dns(host, flags):
+            self._refuse(host)
+        return _REAL_GETADDRINFO(host, port, family, type, proto, flags)
+
+    def gethostbyname(self, host):
+        if not _answers_without_dns(host):
+            self._refuse(host)
+        return _REAL_GETHOSTBYNAME(host)
+
+    def gethostbyname_ex(self, host):
+        if not _answers_without_dns(host):
+            self._refuse(host)
+        return _REAL_GETHOSTBYNAME_EX(host)
+
+    def install(self, monkeypatch):
+        for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex"):
+            monkeypatch.setattr(socket, name, getattr(self, name))
+
+    def verdict(self, nodeid):
+        """The failure to report, or None when nothing was looked up."""
+        if not self.looked_up:
+            return None
+        return (f"{nodeid} looked up {sorted(set(self.looked_up))} through "
+                f"the real resolver. The suite is offline: request the "
+                f"`public_dns` fixture, or patch socket.getaddrinfo, for a "
+                f"test that needs a name answered.")
+
+
+#: What `public_dns` answers every name with: a global address, so
+#: `is_url_permitted` clears it. The three older stubs use the same one.
+PUBLIC_ADDRESS = "93.184.216.34"
+
+
+@pytest.fixture
+def public_dns(monkeypatch):
+    """Answer every name with one public address. Numbers still parse.
+
+    For a test that drives `fetch_url` -- or anything else behind
+    `is_url_permitted` -- through the fake `httpx`, where the URL's host has
+    to clear the policy check for the request to be made at all. A test
+    about a PRIVATE answer patches `socket.getaddrinfo` itself, after this.
+
+    A number in any spelling is read as one, the same way on every
+    platform (`127.1` is 127.0.0.1 here on Windows too, which its own
+    resolver would have sent to DNS): only names get the public answer.
+    """
+    def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        if _answers_without_dns(host, flags):
+            return _REAL_GETADDRINFO(host, port, family, type, proto, flags)
+        try:
+            return _REAL_GETADDRINFO(host, port, family, type, proto,
+                                     flags | socket.AI_NUMERICHOST)
+        except (socket.gaierror, UnicodeError):
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP,
+                     "", (PUBLIC_ADDRESS, port or 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+
+#: What the operating system, not the harness, makes in a home it is handed.
+#: Windows creates the profile's `AppData` folders for any process that asks
+#: the shell for one -- measured: the `powershell -NoProfile` probe that
+#: `detect_shell()` runs when `tools.registry` is imported makes
+#: `AppData\Roaming` under the USERPROFILE it inherits. The harness keeps
+#: nothing there: its state is `~/.config/venastine` on every platform.
+_OWNED_BY_THE_PLATFORM = {"AppData"} if os.name == "nt" else set()
+
+
+def _home_contents(home: str) -> list:
+    found = []
+    for folder, dirs, files in os.walk(home):
+        if folder == home:
+            dirs[:] = [d for d in dirs if d not in _OWNED_BY_THE_PLATFORM]
+        found.extend(os.path.relpath(os.path.join(folder, name), home)
+                     for name in dirs + files)
+    return sorted(found)
+
+
+def _empty(home: str) -> None:
+    for name in os.listdir(home):
+        if name in _OWNED_BY_THE_PLATFORM:
+            continue
+        path = os.path.join(home, name)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+@pytest.fixture(autouse=True)
+def nothing_written_to_home(request):
+    """Fail a test that leaves anything in the home folder.
+
+    Batch 243. The root conftest points HOME and USERPROFILE at a throwaway
+    folder per process before anything is imported, so a test that forgot
+    to redirect writes there instead of into the developer's real
+    `~/.config/venastine`. This makes the forgetting visible: anything in
+    the folder after a test fails it, by name, and the folder is emptied so
+    the next test is judged on its own. Something found BEFORE a test was
+    left between tests -- by a fixture wider than one test, or a thread
+    that outlived its own -- and fails the next one with that said.
+
+    A test that sets HOME to its own tmp_path is untouched by this: what it
+    writes is in its tmp_path. Only writes through the inherited home count.
+    """
+    home = os.environ.get(SUITE_HOME_VARIABLE)
+    if not home or not os.path.isdir(home):
+        yield
+        return
+    before = _home_contents(home)
+    if before:
+        _empty(home)
+        pytest.fail(
+            f"{before} appeared in the suite's home folder between tests, "
+            f"before {request.node.nodeid} ran: a fixture wider than one "
+            f"test, or a thread outliving its test, wrote through HOME.",
+            pytrace=False)
+    yield
+    after = _home_contents(home)
+    if after:
+        _empty(home)
+        pytest.fail(
+            f"{request.node.nodeid} wrote {after} into the home folder. "
+            f"Tests must not write the user's home: redirect HOME and "
+            f"USERPROFILE to tmp_path, or move the module path that was "
+            f"computed from it.", pytrace=False)
 
 
 @pytest.fixture(autouse=True)

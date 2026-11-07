@@ -97,6 +97,14 @@ def install(tmp_path, monkeypatch):
     `root` holds `config.yaml` and a `package.json` naming the version, the
     way a package directory does; `state` is `~/.config/venastine/
     config-state` moved somewhere a test may write.
+
+    CONFIG_HOME MOVES TOO (batch 243). `state=` moves this install's own
+    directory, but every adoption and update also records the install in
+    `installs.json` under `state_base()`, which is CONFIG_HOME -- computed
+    from the home when the module is imported, so no HOME change reaches
+    it. Unmoved, the 33 tests through here wrote the developer's real
+    `~/.config/venastine/config-state/installs.json`: the owner's held 809
+    entries, every one a pytest temp path.
     """
     root = tmp_path / "package"
     root.mkdir()
@@ -107,6 +115,8 @@ def install(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config_schema, "CONFIG_PATH", str(live))
     monkeypatch.setattr(config_update, "LIVE", str(live))
+    monkeypatch.setattr(config_update, "CONFIG_HOME",
+                        str(tmp_path / "config-home"))
     config_edit.forget_document()
 
     box = types.SimpleNamespace(

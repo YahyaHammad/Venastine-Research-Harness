@@ -15,6 +15,21 @@ other name.
 
 ---
 
+## No real name lookups, and a throwaway home (batch 243)
+
+| Change | Test | Fix |
+|---|---|---|
+| A test reaches a real DNS lookup -- `fetch_url`, or anything behind `is_url_permitted(resolve=True)` | The test itself, at teardown: "looked up [...] through the real resolver" | Request `public_dns`, or patch `socket.getaddrinfo` in the test |
+| A test writes through HOME or USERPROFILE, or through a module path computed from the home at import | The test itself, at teardown: "wrote [...] into the home folder" -- or the next one, at setup, when a fixture wider than a test wrote it | Redirect HOME and USERPROFILE to `tmp_path`, or move the module path, as `test_config_update.py`'s `install` moves `config_update.CONFIG_HOME`, or the tool's own variable, as `test_demo_bundle.py` sets `UV_CACHE_DIR` for a real uv |
+| Drop either autouse guard or the root conftest's `_throwaway_home`, or let a guard pass a test it should fail | `test_suite_isolation.py::test_each_guard_fails_exactly_the_test_that_crossed_it` | Put it back |
+| Rename `VENASTINE_SUITE_HOME` in one of the two conftests | `TestTheThrowawayHome::test_every_spelling_of_home_is_the_throwaway`, with a KeyError | Spell it the same in both: the root conftest cannot be imported from `tests/conftest.py` |
+
+## Hosted browser notices and asset scope (batch 242)
+
+| Change | Test | Fix |
+|---|---|---|
+| Serve a new Textual Serve bundle, remove its inline notices, or expose the wheel's fonts/images | `test_browser_copies_carry_notices_and_unused_assets_are_unreachable` | Review the exact JS/CSS bytes and embedded components, update the hashes and full license texts together, and keep public routes limited to the used assets and notices |
+
 ## anthropic 2.x and openai 3.x (batch 234)
 
 anthropic 2.1.0 sends API version 2026-10-21 and the key as

@@ -30652,3 +30652,193 @@ UV4, the copy, follows from the measurement.
   ruff clean, bandit 0 new, gitleaks clean with CI's config; the requirement
   files are unchanged, and uv 0.13.4 has no OSV advisory.
 - **Version:** `0.3.9-b.3.network-byte-limit.r9cd3a68c74e1`.
+
+## Batch 242 -- license notices delivered with hosted browser copies (2026-11-07)
+
+The dependency license report was checked against current main and the PyPI
+Textual Serve 1.1.3 wheel. Its SHA-256 matched
+`207a472bc6604e725b1adab4ab8bf12f4c4dc25b04eea31e4d04731d8bf30f18`.
+The JavaScript lacked Textualize's MIT notice; the mounted fonts identified
+Apache-2.0 in their name tables but had no accompanying license copy. The
+terminal used neither wheel font nor its background image. The owner chose
+to restrict the public assets to the used JS, CSS and notices.
+
+The bridge now allows only those three URLs. Every JS response includes the
+full Textualize, xterm.js/addon, js-base64 and webpack loader/runtime notices;
+the terminal links the same text separately. The BSD-3-Clause js-base64 3.7.7
+component was identified by its embedded version and implementation. The
+upstream wheel carries no frontend lockfile, so exact versions of every
+embedded component remain unestablished. Reviewed JS/CSS hashes prevent a
+changed bundle from silently retaining this assessment.
+
+Root NOTICE and THIRD_PARTY_NOTICES distinguish source installs from browser
+copies and installed container images. All 32 distinct direct declarations now
+have rows, including defusedxml, pypdf, starlette and setuptools. Protobuf's
+pinned wheel identifies BSD-3-Clause. Transitive MPL, optional PDF/Windows and
+native-library terms are scoped separately. No deployed ModelScope image was
+obtained; no image compliance or violation claim is made.
+
+Validation includes the hosted route regression, the exact wheel served through
+Starlette (including JavaScript syntax validation), npm's dry-run file inventory,
+and selection of both notice files into the hosted bundle. The source package
+contains no wheel/font/deploy assets. The hosted/bundle/docs run passed 255 tests (4 narrow-run skips); the
+standalone documentation gate passed 92 (1 full-session skip). Ruff, Bandit's
+baseline and count checks, and Gitleaks on a clean staged export passed.
+
+The full run passed 9085, skipped 46 and failed 39. Three documentation count
+failures were corrected and the documentation gate rerun successfully. The
+other 36 failures matched exactly on an archive of unchanged main
+`3cdb625`: the mocked web tests use DNS for example.com, unavailable here,
+and config-update tests try to write the sandbox's read-only home directory.
+Those environment failures are not changes made by this batch.
+
+Branch version: `0.3.10-b.1.codex-dependency-license-fixes.rbd51e3728512`.
+
+## Batch 243 -- the suite offline and out of the home (2026-11-07)
+
+**Why.** Codex's draft PR #280 ran the full suite in its cloud sandbox and
+reported 36 failures that also failed on main `3cdb625`, put down to the
+sandbox: no DNS for example.com, and a read-only home. GitHub's runners
+passed all of them. The owner asked for the PR to be checked.
+
+**Measured first.** PR #280's tree, run in WSL three ways: a control; with
+a pytest plugin refusing name lookups and HOME an empty read-only folder;
+and with HOME an empty writable folder, listing what landed in it. A second
+plugin then gave each xdist worker its own HOME and logged which test wrote
+what. Exactly Codex's 36: **25 + 11.**
+
+- **25 real lookups**, all of example.com: `test_page_text.py` (23, batch
+  240) and `test_network_limit.py::TestTheTools` (2, batch 239) drive
+  `fetch_url`, whose `is_url_permitted` resolves the host before the fake
+  httpx is asked. `test_fetch_url.py`, `test_paging.py` and
+  `test_redact_before_cut.py` stub that lookup by hand; these two files did
+  not. Both batches were this agent's, and green CI said nothing because the
+  runners resolve the name.
+- **34 tests wrote the real home**, 11 of which fail when it is read-only.
+  33 go through `test_config_update.py`'s `install` fixture: it moves
+  `state=` but not `config_update.CONFIG_HOME`, which is computed from the
+  home at IMPORT, so every adoption and update recorded its pytest temp
+  install in the developer's real `~/.config/venastine/config-state/
+  installs.json` -- the owner's Windows copy held 809 entries, every one a
+  pytest path; WSL's held 208 beside one real install. Neither file was
+  touched by this batch. The 34th is
+  `test_project_path_guard.py::...::test_an_ordinary_directory_still_launches`:
+  its `launch` fixture copied `test_cli.py`'s `startup` without the `chdir`,
+  as it meant to, and without the HOME redirect `startup` gained in batch
+  121, so a launch past the guard created the real `mcp.json`.
+
+**The owner's decisions:** fix it with guards, so the next one fails in CI;
+and for the home, a throwaway home plus a per-test check, over checking the
+real folder (which lets the write land first and cannot name the writer
+across parallel workers).
+
+**Built.**
+
+- The root `conftest.py`'s `_throwaway_home()`: HOME and USERPROFILE point
+  at a `venastine-suite-home-*` folder per process, made before any project
+  module is imported (the one place that reaches `CONFIG_HOME`), removed at
+  exit, named in `VENASTINE_SUITE_HOME`. `PYTHONUSERBASE` (when the user site
+  is on) and `DOCKER_CONFIG` stay on the real home, so a `pip install
+  --user` and the image-build test keep working, and so do `RUSTUP_HOME`
+  and `CARGO_HOME` where those folders exist; the XDG_*_HOME variables
+  are dropped.
+- `tests/conftest.py`: autouse `nothing_written_to_home` fails a test that
+  leaves anything in that folder, and the next one, at setup, when a fixture
+  wider than a test wrote it; it empties the folder either way. Autouse
+  `no_name_lookups` answers a forward lookup with `gaierror` and fails the
+  test at teardown naming each host -- production catches the error and
+  refuses the URL, so the test body alone could pass. `public_dns` answers
+  names with one public address and reads numbers as numbers.
+- The fixes: `test_page_text.py` and `TestTheTools` request `public_dns`;
+  `install` moves `CONFIG_HOME`; `launch` redirects HOME.
+- `tests/test_suite_isolation.py` (23 tests), including an end-to-end run of
+  the uncollected `tests/_suite_guard_probe.py` in a child pytest: each guard
+  fails exactly the probe that crossed it, the control passes, and a write
+  from a class fixture is reported before the next test.
+
+**Measured on the way.**
+
+- **Windows sends `127.1` and `2130706433` to DNS** unless the call asks for
+  a numeric parse: `getaddrinfo("127.1", None)` fails there with 11001,
+  where glibc answers 127.0.0.1. So the guard passes literals, loopback
+  names and AI_NUMERICHOST calls only, and `public_dns` parses every
+  spelling of a number the same way on both platforms.
+- **Windows PowerShell makes `AppData\Roaming` under the USERPROFILE it
+  inherits.** `detect_shell()` runs `powershell -NoProfile` when
+  `tools.registry` is imported, so the first full Windows run blamed
+  whichever test imported it first, or the next test, between tests. The
+  folder is the platform's -- the harness keeps nothing there -- so the
+  check skips a top-level `AppData` on Windows, and a test runs the probe
+  and holds that.
+- **pip starts rustup.** It puts `rustc --version` in its user agent, so
+  every real pip run -- `ensurepip` inside `python -m venv` among them --
+  starts rustup's proxy where one is on PATH, and rustup wrote
+  `.rustup/settings.toml` into the throwaway home of the two real-uv
+  integration tests on Windows. GitHub's images ship rustup as well, so
+  its two homes are kept on the real ones, and a test holds it wherever
+  `rustc` is on PATH.
+- **The root conftest cannot be imported from `tests/conftest.py`**: pytest
+  registers that file as both `conftest` and `tests.conftest`, and the root
+  module is under neither name. So `VENASTINE_SUITE_HOME` is spelled in both,
+  and a test reads the folder back through it. The same import in
+  `make_fake_anthropic_client` and `make_fake_openai_client` therefore
+  reaches `tests/conftest.py`; no test calls either, so it has never
+  failed. Noted, not changed.
+- **A slip, caught by the suite:** the first draft of the probe was written
+  over the tracked `tests/_isolation_probe.py`, `tools/isolation`'s handler
+  module. Five `test_tool_budgets.py` / `test_confine.py` tests failed on
+  the missing handlers; the file was restored from git, and the probe is
+  `_suite_guard_probe.py`.
+
+**Verification.**
+- **Mutations:** 24, each red on the test meant to catch it, on every
+  platform it ran on -- all 24 on Windows, 21 in WSL (the user-site row
+  needs a Python with the user site on, and the AppData and rustup rows
+  are Windows') -- and two green controls, one with an XDG home planted.
+  Reverting any of the four fixes is caught by the guards themselves,
+  each failing its tests by name.
+- **The Codex sandbox, reproduced:** the full suite in WSL with name
+  lookups refused by the recording plugin, HOME an empty read-only
+  folder and a real `.git`: 9154 passed, 38 skipped, nothing failed. The
+  plugin saw no lookup, and the read-only home stayed empty.
+- **Full suite** on Windows in the pinned venv, `AGENT_WORKSPACE` unset:
+  9104 passed, 88 skipped, and the owner's real `installs.json` kept its
+  timestamp from before the batch. Integration: 7 passed and the Linux
+  image build skipped on Windows with uv 0.13.4 on PATH, 6 passed in WSL.
+  ruff clean, bandit 0 new (47 live) and its count check green, gitleaks
+  clean on an export with CI's config; no requirement changed.
+
+**After the push (PR #281).**
+- **Opened into `codex/dependency-license-fixes`, not `main`,** at the
+  owner's request, so the two branches meet before either lands. Batch 242
+  was merged in: seven conflicts, all bookkeeping -- the stated count
+  (recounted: 9193, main's 9169 + 23 here + 1 there), both DEVLOG
+  sections (242, then 243), both BREAKING_CHANGES sections (newest first)
+  and the beta version (this branch's).
+- **CI's integration job failed on the guard, which was doing its job.**
+  `test_demo_bundle.py::test_the_image_holds_exactly_the_bundles_files`
+  wrote 338 files of uv's cache into the throwaway home: `bundle.build`
+  compiles the locks with a real uv, and uv keeps its cache under the home
+  on Linux and macOS (`~/.cache/uv`), but under `LOCALAPPDATA` on
+  Windows, which the redirect does not move. The test needs a Docker
+  daemon, so both local runs had skipped it. Fixed in the test --
+  `UV_CACHE_DIR` goes to `tmp_path`, as `test_installers.py`'s real-uv
+  tests already send it -- not in the root conftest: uv runs on an empty
+  cache, where rustup and Docker need their real homes. Reproduced in WSL
+  without Docker, since the failure is in the lock step that runs before
+  Docker is asked: a scratch probe calling `bundle.build` wrote
+  `.cache/uv` and failed `nothing_written_to_home`, and the same call with
+  the cache moved passed.
+- **And the pytest job, on two tests no machine here can run.**
+  `TestThePowerShellInstallerAsksUvForAPython` runs install.ps1 under
+  PowerShell 7 on Linux CI, and pwsh wrote its start-up cache
+  (`~/.cache/powershell`, with a telemetry id) and
+  `~/.local/share/powershell/Modules` into the home it inherited. Its
+  `_run` now gives pwsh a home in `tmp_path`, as `_run_launcher` already
+  does. Here the class runs on Windows PowerShell and still passes; the
+  pwsh half is proved by CI alone. The full Linux suite otherwise passed
+  on the runner: 9157 passed, 35 skipped, these 2 errors.
+- **The merged tree on Windows**, pinned venv, `AGENT_WORKSPACE` unset:
+  9105 passed, 88 skipped.
+
+- **Version:** `0.3.10-b.2.offline-suite.r917a9c2e519c`.

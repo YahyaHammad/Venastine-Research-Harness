@@ -46,10 +46,20 @@ SECOND JOB SINCE BATCH 109: this file decides how many workers `-n auto`
 spends, which has to be here rather than in `tests/conftest.py` -- see the
 section at the bottom. (It also gave each worker its own matplotlib cache
 until batch 212 removed matplotlib.)
+
+THIRD JOB SINCE BATCH 243: every test process runs with HOME and
+USERPROFILE pointing at a throwaway folder of its own, set here because
+this is the one file that runs before any project module is imported --
+see "A throwaway home" below, and `tests/conftest.py`'s
+`nothing_written_to_home`, which fails a test that leaves anything in it.
 """
 
+import atexit
 import os
+import shutil
+import site
 import sys
+import tempfile
 import types
 
 # ---------------------------------------------------------------------------
@@ -822,6 +832,62 @@ def _install_fake_sdks():
 
 
 _install_fake_sdks()
+
+
+# ---------------------------------------------------------------------------
+# ---- A throwaway home (batch 243) -------------------------------------------
+# ---------------------------------------------------------------------------
+#
+# Measured before it was built, with a plugin that gave each worker an empty
+# HOME and listed what landed in it: 33 tests in `test_config_update.py`
+# wrote the developer's real `~/.config/venastine/config-state/
+# installs.json` (the owner's Windows copy held 809 entries, every one a
+# pytest temp path), and one in `test_project_path_guard.py` created their
+# `mcp.json`. A per-test HOME change could not have stopped the first:
+# `config_update.CONFIG_HOME` is computed when the module is imported, which
+# is during collection, before any fixture runs. So the redirect is here.
+#
+# ONE FOLDER PER PROCESS. Each xdist worker imports this file itself and
+# makes its own, so two workers' tests never share a home. It is removed at
+# exit. `SUITE_HOME_VARIABLE` names it for the check in `tests/conftest.py`,
+# which spells the name again because it cannot import this module.
+#
+# What is KEPT pointing at the real home, because it is the machine's
+# tooling rather than the harness's state: the user site of a `pip install
+# --user` (a child Python would otherwise lose the packages the suite runs
+# on), Docker's client configuration (the image-build integration test
+# needs the daemon's context), and rustup's and cargo's homes where they
+# exist. That last is measured: pip puts `rustc --version` in its user
+# agent, so every real pip run -- `ensurepip` inside `python -m venv`
+# among them -- starts rustup's proxy, which wrote `.rustup/settings.toml`
+# into the throwaway home of the real-uv integration tests. GitHub's images
+# ship rustup too. The XDG_*_HOME variables are dropped, since each one
+# names a folder of the real home.
+
+#: The environment variable holding this process's throwaway home.
+SUITE_HOME_VARIABLE = "VENASTINE_SUITE_HOME"
+
+
+def _throwaway_home() -> str:
+    real = os.path.expanduser("~")
+    if site.ENABLE_USER_SITE:
+        os.environ.setdefault("PYTHONUSERBASE", site.getuserbase())
+    os.environ.setdefault("DOCKER_CONFIG", os.path.join(real, ".docker"))
+    for name, folder in (("RUSTUP_HOME", ".rustup"), ("CARGO_HOME", ".cargo")):
+        if os.path.isdir(os.path.join(real, folder)):
+            os.environ.setdefault(name, os.path.join(real, folder))
+    for name in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+                 "XDG_STATE_HOME"):
+        os.environ.pop(name, None)
+    home = tempfile.mkdtemp(prefix="venastine-suite-home-")
+    atexit.register(shutil.rmtree, home, ignore_errors=True)
+    os.environ["HOME"] = home
+    os.environ["USERPROFILE"] = home
+    os.environ[SUITE_HOME_VARIABLE] = home
+    return home
+
+
+_throwaway_home()
 
 
 # ---------------------------------------------------------------------------

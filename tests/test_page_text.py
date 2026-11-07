@@ -34,6 +34,11 @@ from tools.builtin._page_text import html_document, split_marker_end
 
 BASE = "https://example.com/docs/page"
 
+# Batch 243: `fetch_url` clears its URL's host with a real lookup before the
+# fake httpx is ever asked, so without an answer every fetch here was a DNS
+# query for example.com -- and offline, a refusal before any request.
+pytestmark = pytest.mark.usefixtures("public_dns")
+
 
 # ---------------------------------------------------------------------------
 # ---- Building PDFs --------------------------------------------------------

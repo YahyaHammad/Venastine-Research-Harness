@@ -64,7 +64,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 9169 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 9193 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -3195,15 +3195,17 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   and source files are out of scope entirely — widening to those turns it into
   `read` with no gate. But the set is not small: the tool takes a PATH, resolves
   anywhere under the project, and admits `.md`/`.markdown`/`.rst`/`.txt` plus ten
-  named build files, which on a clean checkout of this repository is **63 files
+  named build files, which on a clean checkout of this repository is **64 files
   and under 6 MB at depths 0-3**, including every agent and skill body under
   `agents/builtin/` and `skills/builtin/` and the whole of `docs/`. The 61st is
   `docs/REVIEW_MARATHON.md` (batch 129), and the per-scope review reports it
   governs are deliberately NOT tracked, so they do not move this figure at
   all -- that decision is recorded there and this is the number it was taken
   against. The 63rd is `deploy/hosted/requirements.txt` (batch 165), read
-  before it was counted: two pinned package names and why each is there --
-  what the hosted demo's bridge installs, nothing a pass could use. **It said 40
+  before it was counted: pinned package names and why each is there --
+  what the hosted demo's bridge installs. The 64th is
+  `deploy/hosted/browser-NOTICES.txt` (batch 242), the reviewed third-party
+  browser license texts, with no configuration or executable content. **It said 40
   files and ~1.1 MB until batch 128**, when it was re-measured through the
   tool's own `is_readable_doc` at 60 files and 3.58 MB -- a 3.3x
   understatement, and almost all of the growth is this record: `DEVLOG.md`
@@ -3418,6 +3420,8 @@ The guard is now `_validate_ast`: `parse_expr` is split into its two halves (`st
 ### Testing
 
 All tests run offline: zero network, zero real API keys. The **root** `conftest.py` stubs 6 SDK packages into `sys.modules` at import time (`openai`, `anthropic`, `google`/`google.genai`, `sqlmodel`, `httpx`, `ddgs`) — plus `markitdown`, which is not an SDK but is an optional extra since #144, so a default install does not have it and `test_file_ops.py` patches it by string target — fixtures run too late, since `core/client.py`'s imports fire during collection. `pydantic` and `sympy` are deliberately *not* faked. Tests needing real SQLite monkeypatch the fake `sqlmodel` away (pattern documented in `test_memory_write_through.py`'s docstring). **No test opens a browser** (batch 207): `tests/conftest.py`'s autouse `browser_opens` stands in for `webbrowser.open`, `open_new` and `open_new_tab` and records the URLs, because before it the ChatGPT sign-in tests opened 17 real OpenAI authorize tabs per run -- real requests from an "offline" suite, and tabs that piled up until the owner's Firefox held 27 GB and four cores and the suite took 9-17 minutes instead of two. Request it by name to assert what would have opened.
+
+**No test looks up a name, and none writes the home** (batch 243). Run the way Codex's sandbox runs it -- no DNS, a read-only home -- main failed 36 tests that GitHub's runners pass: 25 looked up example.com for real (`test_page_text.py` and `test_network_limit.py` drive `fetch_url`, whose policy check resolves the host before the fake httpx is asked), and 11 were among the 33 in `test_config_update.py` that wrote the developer's real `~/.config/venastine/config-state/installs.json` (the owner's held 809 pytest entries). Two guards stop the next one. The root `conftest.py` points HOME and USERPROFILE at a throwaway folder per process before anything is imported -- it has to be there, because `config_update.CONFIG_HOME` is computed at import, during collection -- and keeps `PYTHONUSERBASE`, `DOCKER_CONFIG`, `RUSTUP_HOME` and `CARGO_HOME` on the real ones (pip runs `rustc --version` for its user agent, so a real pip run starts rustup's proxy, which writes under whatever home it is given). A tool that only caches under the home is moved per test instead: a real uv gets `UV_CACHE_DIR` under `tmp_path` (`test_installers.py`, `test_demo_bundle.py`), because its Linux and macOS cache is `~/.cache/uv`, which CI's image-build test filled with 338 files on PR #281's first run; and a real pwsh gets HOME there (`TestThePowerShellInstallerAsksUvForAPython`), because PowerShell 7 writes `~/.cache/powershell` and `~/.local/share/powershell` at start-up. `tests/conftest.py`'s autouse `nothing_written_to_home` fails a test that leaves anything in that folder (Windows' own `AppData` aside), and `no_name_lookups` answers a real lookup with `gaierror` and fails the test at teardown, naming the host, because production code catches the error and a test could pass on the refusal. **Request `public_dns`** for a test that needs a name answered: names get one public address, numbers in any spelling are read as numbers. Not covered: a child process's own lookups, and a connection to a literal address.
 
 **Waiting in a Textual pilot test: `settle`, never a pump count** (`tests/conftest.py`, TECHNICAL_DEBT 8). `await settle(pilot, predicate)` waits on a wall-clock deadline and quiesces once the predicate holds; `await pump(pilot, n)` gives the loop `n` turns and is for *negative* assertions only ("prove X did not happen"), where there is no predicate and a deadline would make every such site pay its full timeout. Do not hand-roll either — there were five copies with five budgets and two orderings, and the two bugs in them were invisible to 1246 passing tests, so `test_pilot_wait.py` now fails on a sixth. Two facts behind this: `pilot.pause()` is **not** a fixed unit of time (21ms with nothing burning CPU in-process, 1021ms with one busy sibling thread — its exit condition is a process-wide CPU heuristic), and a predicate like `isinstance(app.screen, SomeModal)` goes true *before* the worker reaches `channel.get()`, so joining that thread from the event-loop thread deadlocks both ways.
 

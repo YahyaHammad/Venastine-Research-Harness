@@ -55,14 +55,24 @@ from security import protected_paths
 
 
 @pytest.fixture
-def launch(monkeypatch):
+def launch(monkeypatch, tmp_path):
     """`main(argv)` with every side effect stubbed, recording what ran.
 
     See the module docstring for why this is not `test_cli.py`'s `startup`.
     The returned dict's `order` is what makes the two placement assertions
     possible: a stub that is never called cannot appear in it.
+
+    HOME IS REDIRECTED, as `startup` has done since batch 121 (batch 243).
+    This copy left out the one line it meant to, `chdir`, and also the
+    redirect, so a launch that got past the guard ran
+    `ensure_user_config()` against the developer's own config directory
+    and created their `~/.config/venastine/mcp.json`.
     """
     import main
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("HOME", str(home))
 
     reached = {"order": [], "project_path": None}
 
