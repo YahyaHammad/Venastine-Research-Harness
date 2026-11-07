@@ -192,6 +192,7 @@ list which is a decision rather than an omission.
 - [/init (ROADMAP_v2 §24)](#init-roadmap_v2-24)
 - [MCP teardown (ROADMAP_v2 §37 F6, #64)](#mcp-teardown-roadmap_v2-37-f6-64)
 - [Network limits (ROADMAP_v3 §53)](#network-limits-roadmap_v3-53)
+- [Reading web pages and PDFs (ROADMAP_v3 §92)](#reading-web-pages-and-pdfs-roadmap_v3-92)
 - [Shell / sandbox (ROADMAP §7)](#shell-sandbox-roadmap-7)
 - [Output redaction (#167/#49, batch 20)](#output-redaction-16749-batch-20)
 - [Compaction (ROADMAP_v2 §21)](#compaction-roadmap_v2-21)
@@ -1014,6 +1015,30 @@ Not authority keys: a ceiling decides how much may be spent, which is
 count (IO5): shell commands (containers, WSL, SSH), `stdio` MCP servers,
 sign-in and token-refresh traffic, and TLS and TCP overhead. `/network`
 lists every meter, what it has used and when room returns.
+
+## Reading web pages and PDFs (ROADMAP_v3 §92)
+
+### `fetch_max_html_mb`
+
+2, decimal megabytes (PT3, the owner's amendment of PG6). How much of one
+HTML page `fetch_url` downloads. What the model reads is the page's
+extracted text -- its main content without the site's navigation -- held up
+to 200,000 characters and paged; so this bounds the download, not the
+memory. Measured: Wikipedia's article began at HTML character 73,396, which
+the old 64 KB cap never reached. A page past the limit is read that far and
+says the rest was never retrieved.
+
+### `fetch_max_pdf_mb`
+
+32, decimal megabytes (PT6, the owner's number, configurable at their
+request). How large a PDF `fetch_url` will download. arXiv papers run 1-5 MB
+and the Llama 2 report is 13.7 MB. A PDF cannot be read in part, because its
+index is at the end, so one past the limit is refused whole -- before any of
+it is read when the server states its size. It is parsed with pypdf in
+`tools/isolation`'s child, which `tool_compute_timeout_s` stops.
+
+Neither is an authority key: each bounds how much is downloaded, not what
+may run. Text that is neither HTML nor a PDF keeps PG6's 64 KB.
 
 ## Shell / sandbox (ROADMAP §7)
 

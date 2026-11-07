@@ -1,6 +1,6 @@
 {
   "name": "@yahyahammad/venastine",
-  "version": "0.3.9-b.1.network-byte-limit.r9cd3a68c74e1",
+  "version": "0.3.9-b.2.network-byte-limit.r9cd3a68c74e1",
   "description": "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline.",
   "keywords": [
     "agent",

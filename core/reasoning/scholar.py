@@ -252,7 +252,7 @@ class ScholarLookup:
             params = {**params, "mailto": config.SCHOLAR_MAILTO}
         response = _net_common.get(
             url, params=params, timeout=config.SCHOLAR_TIMEOUT_S,
-            headers={"User-Agent": "venastine-research-harness/1.0"},
+            headers={"User-Agent": _net_common.USER_AGENT},
             follow_redirects=True)
         response.raise_for_status()
         return response.json()

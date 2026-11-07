@@ -61,11 +61,19 @@ TOOL_SCHEMA = {
 # ---- Normalized result shape ---------------------------------------------
 
 class SearchResult(BaseModel):
+    """One result as the model reads it.
+
+    BATCH 240 TOOK OUT WHAT CARRIED NOTHING. `published` was always None --
+    ddgs's text search returns no date, as its own comment here said -- and
+    both truncation flags were False on almost every row. Measured on a live
+    search, those three keys were 361 of the result's 2,651 characters. The
+    flags are now present only when TRUE (`model_dump(exclude_defaults=
+    True)`), the shape `arxiv_search` already uses for its own.
+    """
+
     title: str
     url: str
     snippet: str
-    published: Optional[str] = None  # ddgs's text search doesn't return a
-                                       # publish date, so this stays None here
     # ROADMAP_v3 §51 (PG8). Whether MAX_SNIPPET_CHARS cut this one, and
     # where the rest is. Before §51 a cut snippet and a short one were
     # indistinguishable, so "the source does not mention X" and "the first
@@ -90,6 +98,12 @@ class WebSearchError(Exception):
 # ---- Policy / tuning knobs -------------------------------------------------
 
 MAX_SNIPPET_CHARS = 300
+
+# A cut snippet ends at a word, with this after it, rather than in the
+# middle of one ("...into a vector th"): the flag says it was cut, and the
+# mark says where. Not before 60% of the cap, so a snippet with one long
+# word is still cut near the cap rather than to almost nothing.
+_ELLIPSIS = "\u2026"
 
 # Batch 156. 300 is the number `arxiv.py` settled for the same kind of
 # value, measured there over sixty real entries whose longest title was
@@ -142,6 +156,13 @@ def _call_ddgs(query: str, num_results: int, page: int = 1) -> list[dict]:
     try:
         with DDGS(timeout=REQUEST_TIMEOUT_S) as ddgs_client:
             return ddgs_client.text(query, max_results=num_results, page=page)
+    except Exception as exc:
+        # An empty search is an ANSWER. Retried as a failure, it cost two
+        # more full searches and then told the model "search failed after
+        # 3 attempts: No results found." -- measured, the same day.
+        if _empty(exc):
+            return []
+        raise
     finally:
         _net_common.record_web_search(num_results)
 
@@ -235,19 +256,46 @@ def _normalize(raw: list[dict]) -> list[SearchResult]:
             r.get("body"), MAX_SNIPPET_CHARS)
         if snippet is None:
             snippet = ""
+        elif snippet_truncated:
+            snippet = _at_a_word(snippet, MAX_SNIPPET_CHARS)
 
         out.append(
             SearchResult(
                 title=title,
                 url=url,
                 snippet=snippet,
-                published=None,
                 snippet_truncated=snippet_truncated,
                 title_truncated=title_truncated,
             )
         )
     third.report()
     return out
+
+
+def _at_a_word(text: str, cap: int) -> str:
+    """`text`, already cut to `cap`, cut back to a word and marked."""
+    room = text[:cap - len(_ELLIPSIS)]
+    space = room.rfind(" ")
+    if space >= cap * 0.6:
+        room = room[:space]
+    return room.rstrip(" ,;:-") + _ELLIPSIS
+
+
+def _empty(exc: BaseException) -> bool:
+    """ddgs's way of saying a search found nothing: it RAISES.
+
+    Measured (batch 240): `DDGS.text` raises `DDGSException("No results
+    found.")` when every backend answered and none had a row -- and only
+    then; a backend's own failure is raised under its own message. Read by
+    class NAME, as `core/provider_errors` reads an SDK's, because the suite
+    installs a fake `ddgs`.
+    """
+    return (type(exc).__name__ == "DDGSException"
+            and str(exc).strip().rstrip(".").lower() == "no results found")
+
+
+def _rate_limited(exc: BaseException) -> bool:
+    return type(exc).__name__ == "RatelimitException"
 
 
 def _kept(results: list, asked: int) -> list:
@@ -305,6 +353,12 @@ def run(params: dict) -> dict:
                 # into the result the model reads.
                 raise
             except Exception as e: # Simpler to try again then elaborate on every error type
+                if _rate_limited(e):
+                    # Retrying a rate limit at once is asking again into
+                    # the limit. Said once, plainly, so the model waits.
+                    return {"error": (
+                        "The search provider is rate-limiting this harness. "
+                        "Wait a minute before searching again.")}
                 last_exc = e
                 logger.warning(
                     "web_search attempt %s/%s failed for %r: %s",
@@ -333,7 +387,7 @@ def run(params: dict) -> dict:
         return {"results": [], "result_count": 0, "message": "No results found."}
 
     out = {
-        "results": [r.model_dump() for r in results],
+        "results": [r.model_dump(exclude_defaults=True) for r in results],
         "result_count": len(results),
         "page": parsed.page,
     }

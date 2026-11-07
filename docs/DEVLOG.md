@@ -30489,3 +30489,99 @@ side of the line.
   - pip-audit not re-run: no requirements file changed.
 - **Version**, by `scripts/version.py branch` then `bump`:
   `0.3.9-b.1.network-byte-limit.r9cd3a68c74e1`.
+
+
+## Batch 240 -- a page read as its text, and a PDF read at all (2026-11-07)
+
+**ROADMAP_v3 §92, PT1-PT10.** On the §53 branch, before its PR, the owner
+asked two things. First, whether §53 had set a default cap -- it had not,
+and should not, since a research run may be asked to download a large
+model; every ceiling ships at 0. Second, to check `web_search` and
+`fetch_url` for defects and to strip the boilerplate and metadata that bloat
+or confuse a result.
+
+### Measured first
+
+Both tools, run as they are, on live pages and searches:
+
+- `fetch_url` returned raw HTML: the first page was 80-96% markup on seven
+  sites, and the readable text 1-25% of the HTML.
+- Wikipedia refused httpx's default agent with 403, and its article sat past
+  the 64 KB read cap (PG6) at HTML character 73,396.
+- A PDF came back as binary (2,731 replacement and control characters on
+  page one of arXiv's 1706.03762), and no content type was checked.
+- `web_search` retried ddgs's `DDGSException("No results found.")` twice and
+  called it a failure, retried a rate limit at once, and spent 361 of a
+  result's 2,651 characters on a null date and false flags.
+
+### Settled with the owner
+
+- **PT1-PT3:** main-content extraction with the stdlib; links as `[L<n>]`
+  markers with their URLs listed per page; HTML read to 2 MB
+  (`fetch_max_html_mb`), amending PG6, with other text kept at 64 KB.
+- **PT4:** pypdf, after a measurement on three arXiv papers. pypdf kept whole
+  sentences on one- and two-column layouts; markitdown[pdf] ran words
+  together on all three and turned BERT's columns into a table, at 188 MB of
+  dependencies. Then pip-audit found seven advisories in the two-weeks-old
+  6.21.2 -- infinite loops and memory exhaustion on crafted PDFs -- and the
+  owner chose 6.21.4, which fixes them and extracted identically.
+- **PT5, PT6:** parsed in `tools/isolation`'s killable child; up to 32 MB,
+  configurable (`fetch_max_pdf_mb`).
+- **PT7:** 200,000 characters held, and the rest reachable by offset: a page
+  past the window re-fetches, and a digest of the whole document says when
+  it changed between the two fetches.
+
+PT8-PT10 (a descriptive agent, binary refused with a reason, the search
+fixes) follow from the measurements.
+
+### Built
+
+- `tools/builtin/_page_text.py`: the extractor, two `html.parser` passes,
+  total over malformed HTML.
+- `tools/builtin/_pdf_text.py`: the child's handler, redacting before it
+  cuts the window.
+- `fetch_url.py`: body kinds, a bound per kind, the held window and the
+  re-fetch past it, per-page links, `title`/`format`/`pages`.
+- `web_search.py`: PT10.
+- `_net_common.USER_AGENT`, shared by `fetch_url` and the scholar lookup.
+
+### Measured after
+
+On the same live pages, every first page was under 6% markup: Wikipedia
+840 KB of HTML to 79,573 characters of article, MDN 210 KB to 1,831. The
+arXiv PDF came back as 15 pages, 39,721 characters, through the real child.
+A PNG was refused with a reason. The same search's dead-field characters
+fell from 361 to 81, and an empty search returned at once.
+
+Three rounds of the extractor against those pages found what the first
+draft kept:
+
+- Wikipedia's language list, inside `<main>`, used all 200 link numbers.
+- Sphinx's `¶` heading links survived.
+- Table layouts left empty ` | ` cells.
+
+Each fix is a furniture entry or a tidy rule with the site named.
+
+### Caught on the way
+
+- A body shorter than the 1 KB sniff window was typed after the read loop
+  and never held to its limit (`test_the_byte_cap_alone_marks_a_page_
+  truncated`).
+- The test PDF stores its text uncompressed, so a PDF wrongly read as plain
+  text still contained the expected words: mutation M24 survived. The test
+  now asserts the format, for three declared types.
+- A bash heredoc mangled a regex patch; its assert stopped the write, and the
+  edit was made with the Edit tool.
+- `[L12]` in a docstring was read by the decision-id gate as an id; markers
+  are written `[L<n>]` in prose now.
+
+### Verified
+
+- **Tests:** 87 new in `tests/test_page_text.py`, one through the real
+  isolated child. Four existing tests moved (two absent-unless-true flags, a
+  snippet cut back to a word in two places) and the settable-scalar count
+  went from 156 to 158.
+- **Mutations:** 43, every one red on its assertion after M24's test was
+  strengthened, and a green control.
+- **pip-audit** on `requirements.txt`: no known vulnerabilities.
+- **Version:** `0.3.9-b.2.network-byte-limit.r9cd3a68c74e1`.

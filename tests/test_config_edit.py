@@ -318,8 +318,9 @@ class TestTheRoundTripIsLossless:
         # 152 since batch 221: `init_max_hub_chars` and
         # `init_diff_shown_lines`, /init's bounds on the existing hub (#226).
         # 156 since batch 239: ROADMAP_v3 §53's window and its three meter
-        # ceilings (IO8, IO9).
-        assert touched == 156, f"{touched} settable scalars, expected 156"
+        # ceilings (IO8, IO9). 158 since batch 240: fetch_url's two read
+        # bounds, `fetch_max_html_mb` and `fetch_max_pdf_mb`.
+        assert touched == 158, f"{touched} settable scalars, expected 158"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

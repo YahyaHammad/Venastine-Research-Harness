@@ -629,6 +629,24 @@ network_limit_provider_mb: 0
 network_limit_mcp_mb: 0
 
 # ======================================================================
+# Reading web pages and PDFs
+# ======================================================================
+
+# How much fetch_url downloads of one HTML page or one PDF, in decimal
+# megabytes. What the model reads is the extracted TEXT -- a page without
+# its navigation, a PDF's words -- held up to 200,000 characters at a time
+# and paged through; an offset past that fetches again and serves the rest.
+#
+# An HTML page past its limit is read as far as the limit and says the rest
+# was never retrieved. A PDF cannot be read in part (its index is at the
+# end), so one past its limit is refused whole, before it is downloaded
+# when the server states its size. PDFs are parsed with pypdf in a separate
+# process that tool_compute_timeout_s stops. Text that is neither (JSON,
+# plain text, XML) keeps its 64 KB read limit.
+fetch_max_html_mb: 2
+fetch_max_pdf_mb: 32
+
+# ======================================================================
 # Shell and sandbox
 # ======================================================================
 

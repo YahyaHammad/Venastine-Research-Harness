@@ -98,6 +98,17 @@ MAX_ENTRIES = 128
 MAX_URL_CHARS = 400
 
 
+# Batch 240. Who this harness says it is when it fetches a page itself.
+# Wikimedia answers httpx's default `python-httpx/<version>` with 403 --
+# measured on en.wikipedia.org, where a descriptive agent got 200 -- and its
+# policy asks a client to name itself and a way to reach its maintainers.
+# The project's own public repository is that way; nothing about the user
+# is in it. `fetch_url` and the scholar lookup send it; `arxiv_search` keeps
+# the agent arXiv's API was already given.
+USER_AGENT = ("venastine-research-harness "
+              "(+https://github.com/YahyaHammad/Venastine-Research-Harness)")
+
+
 class ThirdPartyText:
     """One tool call's worth of strings nobody here wrote, REDACTED and
     THEN cut.

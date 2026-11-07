@@ -411,6 +411,12 @@ class HarnessConfig(_Model):
     network_limit_provider_mb: NonNegativeNumber
     network_limit_mcp_mb: NonNegativeNumber
 
+    # -- Reading web pages and PDFs (batch 240) ----------------------------
+    # The owner's amendment of PG6: what is HELD is extracted text, so these
+    # bound the download, not the memory.
+    fetch_max_html_mb: PositiveNumber
+    fetch_max_pdf_mb: PositiveNumber
+
     # -- Shell / sandbox ---------------------------------------------------
     shell_binary: str
     allow_insecure_sandbox_fallback: StrictBool

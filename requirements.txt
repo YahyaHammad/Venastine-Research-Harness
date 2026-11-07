@@ -288,6 +288,25 @@ PyJWT>=2.15.0,<3
 # parser's refusals are exactly what a silent minor bump could change.
 defusedxml==0.7.1
 
+# Batch 240, the owner's choice: fetch_url reads PDFs, and pypdf is what it
+# reads them with (tools/builtin/_pdf_text.py, in tools/isolation's killable
+# child). MEASURED against markitdown[pdf] on three arXiv papers: pypdf kept
+# every probe sentence whole on a one-column and a two-column paper and ran
+# 0.8% of words together on the 77-page Llama 2 report; markitdown ran words
+# together on all three (22% on Llama 2) and turned BERT's two columns into a
+# table of fragments. pypdf is pure Python with no dependencies on 3.11+
+# (4.1 MB); markitdown[pdf] is 188 MB.
+#
+# 6.21.4, NOT the two-weeks-old 6.21.2, the owner's choice: pip-audit found
+# seven advisories in 6.21.2 -- crafted PDFs that loop forever or exhaust
+# memory (CVE-2026-119203 to -119209), which is precisely what a tool reading
+# strangers' PDFs parses -- all fixed by 6.21.4 (2026-10-28), which audits
+# clean and extracted the three papers identically. The rule gives way to a
+# security fix, as it did for mcp 2.2.0 in batch 165. Exact, for defusedxml's
+# reason: a parser of hostile input is where a silent bump changes what is
+# refused.
+pypdf==6.21.4
+
 # Test dependencies live in requirements-test.txt, NOT here (S18-07,
 # batch 136). pyproject.toml reads THIS file for `[project].dependencies`
 # via `dynamic`, so anything below this line is a hard requirement of the

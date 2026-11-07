@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
 - **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
 - **§90. Disagreement routed to a check, not deducted** - **(BUILT in batch 232)** (on an ensemble run, cross-candidate disagreement was a 0.15 penalty nothing else read, and it could not be worked off: at 1 of 3 it took a partially grounded claim from MEDIUM to LOW, the loop re-scored it under the same penalty every round, and D2 published it UNVERIFIED. D1 now sends a factual claim at most half the candidates asserted to the 6a/6b loop to be checked, 6a is told the count, and the penalty is retired; issue #12, A85)
 - **§89. One command catalog, and the CLI's slash commands** - **(BUILT in batch 231)** (the CLI had no command layer, so `/help` at its prompt was a billed chat turn and every feature that wanted the CLI shipped a launch flag. One catalog in `core/commands.py` now declares every command once and both shells bind handlers to it; the CLI gets 18 commands, among them `/call`, the CLI's route to item 45's call and session views, and a `/` line that names nothing is refused; A84)
@@ -2980,6 +2981,83 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §92. A page read as its text, and a PDF read at all
+
+**Added and built in batch 240, from the owner's request** -- made on the §53 branch, before its
+PR -- to check `web_search` and `fetch_url` for defects, and to strip "noncritical boilerplate and
+metadata that adds no context but causes context bloat or model confusion" from what they return.
+The owner first confirmed the §53 ceilings ship uncapped (they do: every ceiling is 0), because a
+research harness may be asked to download a large model.
+
+### What was measured (2026-11-07)
+
+Both tools, called as they are, on live pages and searches:
+
+- **`fetch_url` returned the decoded body as it arrived.** On seven sites the first 5,000-character
+  page was 80-96% markup; the text a person reads was 1-25% of the HTML. Wikipedia's article
+  began at HTML character 73,396, past the 64 KB read cap (PG6), so no part of any Wikipedia
+  article was retrievable; GitHub's README began on page five.
+- **Wikimedia answered httpx's default agent, `python-httpx/0.28.1`, with 403**, and a descriptive
+  agent with 200.
+- **A PDF came back as binary**: 2,731 replacement and control characters on the first page of
+  arXiv's PDF of 1706.03762, which `arxiv_search` offers as a route. No content type was checked,
+  so an image or an archive would have been decoded as text too.
+- **`web_search` treated an empty search as a failure.** `ddgs` raises `DDGSException("No results
+  found.")`; it was retried twice -- each a full multi-backend search -- and reported as "search
+  failed after 3 attempts". A rate limit was retried at once, into the limit.
+- **A search row carried `published: null` on every result** (ddgs returns no date) and two flags
+  that were almost always false: 361 of a result's 2,651 characters. Snippets were cut mid-word.
+
+### Decisions (PT1-PT10)
+
+| # | Decision |
+|---|---|
+| **PT1** | **An HTML page is read as its main content, with Python's `html.parser` and no new dependency** (owner). The region is the page's `<main>` or `role="main"`, else its first `<article>`, else `<body>`; inside it, page furniture is dropped by tag, ARIA role, hiddenness and a short list of class and id names, and structure is kept as `#` headings, list items, table rows and verbatim `<pre>` blocks (`tools/builtin/_page_text.py`). Measured on the same pages after: Wikipedia 840 KB of HTML to 79,573 characters of article, MDN 210 KB to 1,831, every first page under 6% markup |
+| **PT2** | **Links stay in the prose as markers and their URLs are listed per page** (owner). A link gains `[L<n>]` after its text; distinct URLs are numbered once per document, up to 200; each returned page lists the URLs for the markers it carries, up to 30, and says how many more. A link the tool would refuse, or one too long for it to accept, gets no marker |
+| **PT3** | **An HTML page is read up to `fetch_max_html_mb` (2 MB), amending PG6** (owner). What is held is the extracted text, so the bound is on the download rather than the memory. A text body that is not HTML -- JSON, plain text, XML -- keeps PG6's 64 KB |
+| **PT4** | **A PDF is read with pypdf** (owner, after a measurement put to them). On three arXiv papers pypdf kept every probe sentence whole on a one-column and a two-column paper and ran 0.8% of words together on the 77-page Llama 2 report; markitdown[pdf] ran words together on all three (22% on Llama 2) and turned BERT's two columns into a table of fragments, at 188 MB of dependencies against pypdf's 4.1 MB and none. Pinned at 6.21.4, the owner's choice over the two-weeks-old 6.21.2: pip-audit found seven advisories in 6.21.2 (crafted PDFs that loop forever or exhaust memory, CVE-2026-119203 to -119209), all fixed in 6.21.4, which extracted the three papers identically. Ligatures are expanded, a line-end hyphen before a lower-case letter is joined, and each page is marked `[page N]` |
+| **PT5** | **A PDF is parsed in `tools/isolation`'s killable child under `tool_compute_timeout_s`** (owner). PDF parsers have a history of hostile files that spin or exhaust memory, and a thread cannot be stopped. The child imports pypdf before a shared deployment confines it, redacts the whole text before it cuts the window (RB1), and returns only that window |
+| **PT6** | **A PDF is downloaded up to `fetch_max_pdf_mb` (32 MB), configurable** (owner). A PDF cannot be read in part, so one past the limit is refused whole, before any of it is read when its Content-Length says so |
+| **PT7** | **200,000 characters are held, and the rest is reachable by offset** (owner: "the entire page should be readable even if not retrieved in one pass"). An offset past the held window fetches again and serves the window there. PG5's splice is named rather than risked silently: the held entry carries a digest of the whole document, and a re-fetch whose digest differs says the document changed |
+| **PT8** | **`fetch_url` and the scholar lookup send a descriptive User-Agent** naming the project and its public repository -- nothing about the user. Wikimedia's policy asks for one, and refused the default |
+| **PT9** | **A body that is not text, HTML or a PDF is refused with a reason**, as soon as its type or first bytes show it, and the reason says a shell command is the way to keep the file. A PDF is recognised by its magic bytes whatever its header claims |
+| **PT10** | **`web_search`: an empty search is an answer, a rate limit is reported at once, and a row carries only what it says.** `published` is gone, a truncation flag is present only when true (`arxiv_search`'s shape), and a cut snippet ends at a word with an ellipsis. Measured after: the same search's dead-field characters fell from 361 to 81 |
+
+### Built and measured (batch 240, 2026-11-07)
+
+- **`tools/builtin/_page_text.py`**: the two-pass extractor (find the region, then render it),
+  total over malformed HTML -- an end tag closes whatever is open above it, so an unclosed dropped
+  element cannot swallow the page -- and the link numbering, the marker helpers and a document
+  digest. Pure: no network, no config.
+- **`tools/builtin/_pdf_text.py`**: the child's handler, `pdf_window`.
+- **`tools/builtin/fetch_url.py`**: the body's kind from its type and first bytes, a bound per kind,
+  the held window (`_Held`), the re-fetch past it and the version check, the per-page links, and
+  `title`, `format` and `pages` added to the result. Every existing key keeps its meaning.
+- **`tools/builtin/web_search.py`**: PT10. ddgs's exceptions are read by class name, as
+  `core/provider_errors` reads an SDK's, because the suite installs a fake `ddgs`.
+- **`config.yaml`**: `fetch_max_html_mb` and `fetch_max_pdf_mb`. Not authority keys.
+
+87 tests in `tests/test_page_text.py`, one of them through the real isolated child with a PDF built
+from raw objects in the test. Four existing tests moved: two flags pinned as `False` are now
+absent, and a snippet is cut at the cap and then back to a word (`test_paging.py` twice and
+`test_redact_before_cut.py`'s sweep); `test_config_edit.py`'s settable-scalar count went from 156
+to 158.
+
+### Gap register
+
+- **The furniture list is heuristic.** A class word like `menu` drops a menu, and would drop a
+  page whose prose sat in a `menu` class. Each entry is measured against a real site, and the list
+  is short so that a wrong one is findable.
+- **A page with no `<main>` or `<article>` keeps more chrome.** Its `<body>` is the region, and only
+  its top `<header>` and the furniture rules stand between the reader and the site's own text.
+- **A PDF past the held window is downloaded again.** The 13.7 MB Llama 2 report read past
+  character 200,000 costs a second 13.7 MB, counted by the §53 meter.
+- **pypdf runs some words together on tightly kerned PDFs** (0.8% on Llama 2) and reads no
+  scanned page: a PDF with no text layer says so rather than returning page markers.
+- **A JSON body past 64 KB is still cut there**, as PG6 always cut it.
+
 ---
 
 ## §91. A release for every merge, and npm without a token
