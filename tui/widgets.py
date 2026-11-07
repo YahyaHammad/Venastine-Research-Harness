@@ -563,6 +563,54 @@ class UsageLine(Static):
                  style=self._styles().get("system", ""))))
 
 
+class NetworkLine(Static):
+    """ROADMAP_v3 §53 (IO13): each network meter that is on, one line
+    under the usage line -- `net · tools 1.2M/500M · per 24 h`.
+
+    HIDDEN WHILE EVERY METER IS OFF, which is the shipped state, so a
+    harness with no limit set shows nothing for a feature it is not using.
+
+    MACHINE-WIDE, NOT PER THREAD, and so never reset on a thread switch the
+    way UsageLine is: the ledger counts every harness process, and a new
+    thread has not spent less of the allowance.
+
+    The text is `_net_common.sidebar_text`'s, so this and `/network` cannot
+    disagree about what a figure means; this widget decides only colour.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.display = False
+        self._last = None
+
+    def _styles(self) -> dict:
+        try:
+            app = self.app
+        except Exception:  # noqa: BLE001 -- no running app; render unstyled
+            return {}
+        return themes.styles_for(app)
+
+    def update_meters(self, states: list) -> None:
+        from tools.builtin import _net_common
+
+        text = _net_common.sidebar_text(states)
+        full = any(state.full for state in states)
+        key = (text, full)
+        if key == self._last:
+            return
+        self._last = key
+        if text is None:
+            self.display = False
+            self.update("")
+            return
+        self.display = True
+        # `warning` when a meter is full: the one state here that changes
+        # what the harness will do next.
+        role = "warning" if full else "system"
+        self.update(as_content(
+            Text(text, style=self._styles().get(role, ""))))
+
+
 class GoalBanner(Static):
     """Persistent-objective banner (§18 goal mode). Hidden when the
     thread has no goal; a one-line reminder of what the session is

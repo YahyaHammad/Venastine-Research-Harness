@@ -125,6 +125,10 @@ _SPECS = (
                              "the CLI does not have."}),
     CommandSpec("model", "switch provider and/or model for this session",
                 "[[PROVIDER] name]"),
+    # ROADMAP_v3 §53 (IO13). Both shells: a line terminal on a metered
+    # connection needs the figure as much as the TUI does. 47 characters
+    # with its name, inside the slash panel's 50 at 80x24.
+    CommandSpec("network", "network data used against its limits"),
     CommandSpec("new", "start a new thread"),
     CommandSpec("quit", "exit the harness", aliases=("exit", "bye")),
     CommandSpec("ref", "reference another conversation's summary",

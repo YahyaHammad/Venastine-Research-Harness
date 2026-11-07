@@ -34,7 +34,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§50. Declared network for a shell command** — **(BUILT in batch 99)** (the network detector reads command TEXT against a fourteen-word list, so a command it cannot see is auto-approved into `--network none` and fails with no way for the user to have allowed it)
 - **§51. Paging for network tool results** — **(BUILT in batch 105)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
 - **§52. Redact before the cut, and a bound on the held body** — **(BUILT in batch 106)** (§51 cut the page out of the body before the redactor saw it, so a credential straddling character 5,000 reached the corpus whole; and the body it began holding was unredacted, in a cache whose entry count nothing bounded)
-- **§53. A rolling bound on what the harness pulls and pushes** — **(NOT BUILT: requested batch 122, specified, not designed)** (nothing anywhere counts a byte over the wire, so a user on a metered connection has no ceiling and a tool that fetches something enormous is bounded only by one tool's own per-request cap)
+- **§53. A rolling bound on what the harness pulls and pushes** — **(BUILT in batch 239)** (nothing anywhere counts a byte over the wire, so a user on a metered connection has no ceiling and a tool that fetches something enormous is bounded only by one tool's own per-request cap)
 - **§54. `@` names a file, and the tree is read once** — **(BUILT in batch 204)** (project paths and folders complete in the existing panel; names guide the agent to read, without loading contents)
 - **§55. The whole command, and what it printed** — **(BUILT in batch 125)** (a shell call shows a 140-character digest and its output is never rendered at all, so what the agent ran and what came back are both off screen)
 - **§56. A decision model as the shell classifier** — **(NOT BUILT: requested batch 122, specified, not designed)** (the gate decides from a word list and a token scan, so every judgement it cannot express as a rule costs an approval prompt, and the rules cannot be tuned per user)
@@ -43,6 +43,8 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
+- **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
 - **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
 - **§90. Disagreement routed to a check, not deducted** - **(BUILT in batch 232)** (on an ensemble run, cross-candidate disagreement was a 0.15 penalty nothing else read, and it could not be worked off: at 1 of 3 it took a partially grounded claim from MEDIUM to LOW, the loop re-scored it under the same penalty every round, and D2 published it UNVERIFIED. D1 now sends a factual claim at most half the candidates asserted to the 6a/6b loop to be checked, 6a is told the count, and the penalty is retired; issue #12, A85)
 - **§89. One command catalog, and the CLI's slash commands** - **(BUILT in batch 231)** (the CLI had no command layer, so `/help` at its prompt was a billed chat turn and every feature that wanted the CLI shipped a launch flag. One catalog in `core/commands.py` now declares every command once and both shells bind handlers to it; the CLI gets 18 commands, among them `/call`, the CLI's route to item 45's call and session views, and a `/` line that names nothing is refused; A84)
@@ -954,6 +956,9 @@ default: a ceiling for users on a metered connection, and defence in depth again
 pushing something enormous. Specified here to the depth the owner's answers support; the design
 round that locks the remaining shapes happens when it is picked up (the §49 cycle).
 
+**Designed with the owner and built in batch 239** -- the five open questions below are IO8-IO13,
+and a live measurement of `web_search` amended IO3 as IO15.
+
 ### What the code does today
 
 - **Nothing counts a byte.** There is no rate limiter, quota, budget or byte accounting anywhere in
@@ -996,6 +1001,72 @@ round that locks the remaining shapes happens when it is picked up (the §49 cyc
   "how much has this cost" instruments already live.
 - Whether a refusal stops the one tool or every network tool for the rest of the window.
 
+### Settled with the owner (batch 239, IO8-IO15)
+
+The five questions above were put to the owner with the code they depend on. The window's length
+was discussed in both directions first, and the ledger's answer came with a condition of the
+owner's own: that it must not grow with the traffic or wear the disk. A live measurement then
+contradicted IO3's estimate, and the owner chose the amendment (IO15).
+
+| # | Decision |
+|---|---|
+| **IO8** | **One window for all three meters, 24 hours by default** (`network_window_hours`). The owner asked whether 6-12 hours was more sensible, and the two directions were weighed. A shorter window bounds a burst more tightly and frees room sooner, but over a day it admits 24 / window times the ceiling, so a "250 MB" read as per day is 1 GB a day at 6 hours -- a failure nobody sees until the allowance is gone. A longer one maps straight onto an allowance and fails LOUDLY instead, with a refusal that says when room returns. Too short fails silently and too long fails loudly, which is the asymmetry this project always resolves the same way. 24 hours is the shortest period allowances are commonly sold in |
+| **IO9** | **One ceiling per meter, in decimal megabytes, covering both directions; 0 is off.** Per meter, so a runaway MCP server cannot starve the model calls and a refusal can name what is full; the allowance is their sum. Both directions in one ceiling, the way an allowance is charged -- and the provider's traffic is mostly upload, because every step re-sends the thread, which a download-only cap would never see. Decimal, because carriers count that way |
+| **IO10** | **The ledger is persisted and machine-wide: `~/.config/venastine/network.db`, shared by every harness process and subagent.** A counter in memory is emptied by quitting, which is the per-run reset IO7 rejects. SQLite rather than a JSON file, because two processes flushing one bucket must BOTH count, and an atomic replace of a read-modify-write keeps only the last writer's figure. THE OWNER'S CONDITION: it holds counts, never traffic, in buckets of the window over 1,440 (never under a minute), and rows past the window are deleted on every write -- so it stops at about 1,440 rows per meter whatever the volume, and 50 MB a day adds to an integer rather than to the file |
+| **IO11** | **A call is checked BEFORE it starts, and never cut once running.** Refused when its meter is full or, where what it will send is known, when sending it would pass the ceiling -- which is exact for the provider, whose request is sized in the hook before it leaves. A response already in flight completes and is counted, so a meter can end a window over by one response. A half-read body is the spliced-document failure PG5 exists to prevent, and a model stream stopped halfway ends a turn on a refusal partway through an answer |
+| **IO12** | **Written at most once a minute, and never while idle.** Counts gather in memory; the first one after a flush starts a one-shot timer, and the flush is one transaction of a few rows. A refusal decision reads memory, never the disk, and the file is read again only when the last read is a minute old. The owner's other condition, about write wear: the worst case is about 1,440 small commits a day, and with every meter off there is no file at all. The cost is stated: another process's traffic can be a minute late here, and a crash loses at most a minute of counts |
+| **IO13** | **The figure is shown in the sidebar and by `/network`, in both shells.** A `net · tools 1.2M/500M · per 24 h` line under the usage line while any meter is on, hidden otherwise, coloured as a warning when a meter is full; `/network` lists each meter's use, its ceiling, what of it is an estimate and when room returns, then IO5's list |
+| **IO14** | **Event hooks on each SDK's own HTTP client, and only while that meter is on.** Not a wrapped transport, and both halves of the reason were measured on httpx2 2.16.0: with `HTTPS_PROXY` set the client mounts a proxy transport of its own, which a wrapper on the default one never sees, and passing a transport instead makes the client DROP the environment's proxy. With the meter off, every SDK builds the client it always built -- nobody who has not set a limit runs a different HTTP stack because this exists |
+| **IO15** | **`web_search` is charged 21,000 bytes per result asked for, amending IO3** (the owner's choice). IO3 said its figure is "the size of what it returned". Measured live through a counting CONNECT proxy, five and ten results cost 85,746 and 206,637 bytes on the wire against 1,967 and 2,445 bytes of rows returned -- an undercount of 44x and 85x, which is IO3's own argument against it: a cap that silently undercounts one of its inputs is found out by overrunning the allowance. The higher ratio, rounded up, so the estimate leans high. Still labelled an estimate wherever it is shown, and re-measured when `ddgs` moves |
+
+### Built and measured (batch 239, 2026-11-07)
+
+- **The meter** is `tools/builtin/_net_common.py`'s (IO2): `Meter`, `Ledger`, `NetworkLimitReached`,
+  the sizing functions and the report. A meter reads its ceiling from `config` at call time; with
+  no ceiling it admits everything, counts nothing and never opens the ledger.
+- **The tools.** `fetch_url` and `arxiv_search` stream through `_net_common.stream` and the scholar
+  lookup reads through `_net_common.get`, which admit, call `httpx`, and count every hop off the
+  response: request line, headers and body, status line, headers, and `num_bytes_downloaded`.
+  `web_search` is admitted in `_call_ddgs` and charged IO15's estimate after the call, success or
+  not. A refusal is RAISED, and three places stop it being retried or flattened: `web_search`'s
+  retry loop re-raises it, the scholar lookup stops at it, and `registry.dispatch` returns its own
+  sentence as the result, above the containment that would log it as a crash.
+- **The provider.** `core/client.py`'s `_metered` hands each SDK its own `DefaultHttpxClient`
+  (anthropic, openai, and the ChatGPT plan's openai client) or, for google-genai, an httpx2 client
+  that follows redirects as genai's own does, each with `provider_event_hooks`. `core/
+  provider_errors` finds a refusal anywhere in an exception's chain: never transient, described
+  in its own words.
+- **MCP.** `mcp_client` puts `mcp_event_hooks` on the SDK's own client for `http` and `sse`
+  servers, through `create_mcp_http_client` so the timeouts stay the SDK's, and admits a call in
+  `call_tool` before anything is sent. A `stdio` server is not asked.
+- **What a person reads.** `tui/widgets.py`'s `NetworkLine`, held at mount like the usage line and
+  repainted from the same per-event path at most once a second; `/network` in both shells, which
+  both print `network_report()`.
+- **Not authority keys.** A ceiling decides how much may be spent, which is the side of the line
+  `ensemble_mode` sits on, not what may run.
+
+Measured before it was written, all against the suite's pins (anthropic 2.1.0, openai 3.36.0,
+google-genai 2.32.0, httpx2 2.16.0, mcp 2.3.0, ddgs 9.16.0):
+
+- **The SDKs and their clients.** All three accept an httpx2 client (google-genai an httpx one as
+  well), and all three call both hooks for an ordinary request, a stream and an embedding -- so
+  IO4's "derived from token counts" branch is not needed: every provider figure is exact. The
+  `google-genai==1.0.0` this section was written against has since moved to 2.32.0. A refusal
+  raised in the request hook: openai and google-genai raise it as itself, at once; anthropic wraps
+  it as `APIConnectionError("Connection error.")`, its cause the refusal, after two retries of its
+  own that the meter refuses at zero bytes (1.4 s) -- which is why `provider_errors` reads the
+  chain.
+- **The wire, against a real local server.** A 50,000-byte page served gzipped counted 143 bytes
+  in the hook and in `num_bytes_downloaded`; a chunked body counted its payload without the
+  framing; a redirect hop's 5-byte body was counted. A `MockTransport` response built with
+  `content=` is read at construction and counts nothing, so the tests stream their bodies.
+- **`ddgs` speaks through primp**, a Rust HTTP client with no hook, which is IO3's premise; and the
+  wire cost per result that became IO15.
+
+70 tests in `tests/test_network_limit.py`. Two existing tests moved: `test_config_edit.py`'s
+settable-scalar count went from 152 to 156, and `test_tab_completes_while_it_is_open` types `/q`
+for `/quit`, because `/network` now sorts ahead of `/new` under `/n`.
+
 ### Gap register
 
 - **The estimate and the exact figure are added together.** IO3 is honest about which input is which,
@@ -1004,6 +1075,21 @@ round that locks the remaining shapes happens when it is picked up (the §49 cyc
 - **A limit protects the allowance, not the machine.** It cannot stop a shell command, which is where
   an agent would reach for a large download if the tool route refused it. §50's declared-network flag
   is the control on that path and it is binary.
+- **anthropic retries a refusal twice before it surfaces.** The meter refuses each retry at zero
+  bytes, so nothing is spent, but the refusal reaches the transcript about 1.4 s late. The SDK's
+  own retry decides that; passing `max_retries=0` would also remove its retries of real failures.
+- **Concurrent calls can both be admitted.** Admission and counting are two steps, so subagents
+  running in parallel can each be admitted against the same room. The overshoot is bounded by
+  `subagent_max_parallel` responses.
+- **Two installs with different windows prune to the shorter one.** The ledger is machine-wide and
+  each process deletes what is past ITS window, so a longer window set elsewhere loses history
+  older than the shorter one.
+- **The sidebar does not see another process's traffic until an event repaints it.** It refreshes
+  on this process's loop events; a timer would be a wall-clock repaint in every test. `/network`
+  reads the ledger afresh.
+- **Bytes the kernel received after a read stopped early are not counted.** `fetch_url` stops at its
+  64 KB cap and closes; what was already in the socket buffer crossed the wire and is in no
+  figure. IO5's list says so.
 
 ---
 
@@ -2896,6 +2982,160 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §93. uv where pip was slow: CI, and the installers when it is there
+
+**Added and built in batch 241, from the owner's request** -- made on the §53 branch, before its
+PR -- to see whether uv in place of pip would make the CI runners faster, and to have the curlable
+installers use uv "when available (if it wont add extra friction somehow)".
+
+### What was measured (2026-11-07)
+
+- **CI's own timings.** In the last three runs on `main`, the install step took 18-29 s on every
+  Ubuntu job (docs-consistency, pytest, integration, live-ssh, py313-info) and 49-54 s on the
+  Windows job. In the pytest job's log, 14.5 s of its 23 s was pip's serial "Installing collected
+  packages" -- unpacking and compiling bytecode -- after 2 s upgrading pip and 5 s resolving.
+- **The same install on a 4-core Ubuntu box** (WSL, `taskset -c 0-3`, Python 3.11, uv 0.13.4,
+  three rounds, each tool with its own warm cache): pip 14.1-14.3 s; uv 0.1 s, but its first
+  `pytest --collect-only` then took 13.1-15.1 s against pip's 10.8-11.2 s, because uv compiles
+  no bytecode by default; uv with `--compile-bytecode` 2.6-2.7 s, and collection as fast as
+  pip's. With empty caches, the first-install case: pip 37.0-41.4 s, uv 10.2-13.1 s.
+- **Windows, this machine** (Python 3.13): a first install the way `scripts/install.py` builds it
+  took 255.6 s and 257.4 s with pip, and 39.7 s and 48.7 s with uv copying and compiling. Warm,
+  pip took 258-267 s against CI's 49-54 s for the same files, so this machine's per-file cost
+  (antivirus, most likely) is not CI's; uv's ratio held anyway.
+- **The same set.** From CI's two requirement files, pip and uv installed the identical 76
+  distributions at identical versions, listed by the same tool.
+- **The link.** uv's default on Linux and Windows hardlinks each installed file out of its cache:
+  a file installed that way had `st_nlink` 2 on both, and 1 with `--link-mode copy`.
+
+### Decisions (UV1-UV7)
+
+| # | Decision |
+|---|---|
+| **UV1** | **CI installs with uv from PyPI** (owner): `python -m pip install "uv==<pin>"`, then `python -m uv pip install --system --compile-bytecode -r requirements.txt -r requirements-test.txt`, in the seven jobs that install the requirements (tests.yml's four, compat.yml's two, publish.yml's). The pip self-upgrade and setup-python's pip cache are gone; nothing is cached for uv, because the set is all wheels and a uv cache pruned as astral advises for CI keeps only wheels built from source. No third-party action is added |
+| **UV2** | **One uv pin, 0.13.4** (owner), the version `deploy-demo.yml` and the hosted bridge already pinned; 0.13.5 was the newest at least two weeks old, and neither has an OSV advisory. `test_uv_has_one_pin_and_every_suite_job_installs_with_it` holds every `uv==` in the workflows and the bridge's requirements to one version, and every requirements install to UV1's form |
+| **UV3** | **The installers use uv when it is on PATH, with pip as the fallback** (owner). `python -m venv` as before, so the runtime holds pip, then `uv pip install --link-mode copy --compile-bytecode --python <runtime> -r requirements.txt`, run from a directory outside the caller's project so a project's uv settings are not read. `scripts/install.py`'s `install()` takes uv from `main()`, as it takes PATH, so no test can reach a real uv by accident |
+| **UV4** | **Copy, never link.** The runtime lives in `~/.config/venastine/runtime`, which the harness protects from tool writes; a hardlink would make its code one inode with a file under `~/.cache/uv`, which it does not protect, so a sandboxed command in a `$HOME` workspace could rewrite what the harness imports next. Copying cost 0.3-1 s on Linux and under 2 s on Windows. Bytecode is compiled as pip compiles it |
+| **UV5** | **A uv that fails costs a fresh venv and a pip install, never the installation** (owner): an old uv, or a mirror only `pip.conf` names, which uv does not read. `VENASTINE_NO_UV=1` (or `--no-uv`) installs with pip; the output says "with uv", the runtime record and the npm stamp carry `installer`, and both doctors print it |
+| **UV6** | **The shims ask uv for a Python last** (owner): when PATH has no Python 3.11+, `install.sh` and `install.ps1` try `uv python find --system --no-python-downloads '>=3.11'`, and probe what it names as they probe any candidate. `--system` because without it uv answered with the `.venv` in the current directory, measured on 0.13.4 and 0.12.5; nothing is downloaded, so "it does not install Python" stays true. `VENASTINE_PYTHON` and `VENASTINE_NO_UV` both keep uv out of it |
+| **UV7** | **The npm launcher follows UV3-UV5** (owner): the same command, fallback and opt-out, ", with uv" on its consent screen, and `installer` in its venv stamp |
+
+### Built and measured (batch 241, 2026-11-07)
+
+- **`scripts/install.py`**: `install_requirements()` (UV3-UV5), `runtime_python()`, `--no-uv`, and
+  `installer` in `.venastine-runtime.json`; **`bin/venastine.py`**'s doctor prints it.
+- **`install.sh`, `install.ps1`**: UV6.
+- **`bin/venastine.mjs`**: `findUv()`, `installRequirements()`, `installedBy()` for the doctor, and
+  `run()` takes spawn options.
+- **`.github/workflows/tests.yml`, `compat.yml`, `publish.yml`**: UV1. The integration job's
+  separate uv install folded into its install step.
+
+22 tests in `tests/test_installers.py`. Against fakes: the uv command and its working directory,
+both kinds of uv failure, the pip path, both failing, the opt-out, the doctor line, `install.sh`
+with no Python on PATH (uv's answer, a Python on PATH first, the opt-out, uv knowing none, uv naming one that fails the probe),
+`install.ps1` the same way under Windows PowerShell here and `pwsh` on CI's Ubuntu, and the npm
+launcher (the command and its directory, a failing uv, the opt-out, the doctor). Three are
+`integration` tests against a real uv, the one CI pins, on Linux and Windows: a file copied rather
+than linked (`st_nlink` 1, where uv's default made it 2), compiled, with pip still in the venv; a
+uv that refuses to start handing over to pip; and the npm launcher. One docs-consistency gate,
+UV2's. One existing test moved: the opt-out test's fake `install()` takes the new `uv` argument.
+
+### Gap register
+
+- **CI's saving is measured off the runners.** The baseline is CI's own step timings and the
+  comparison a 4-core Ubuntu box; the first runs after this lands are the first on a runner, and
+  uv downloads every wheel there, which a home connection could not stand in for.
+- **`install.ps1` under PowerShell 7 first runs in CI.** Neither machine here has `pwsh`; Windows
+  PowerShell 5.1 ran it locally.
+- **The npm launcher's fake-uv tests run on POSIX only.** Windows spawns a script only through a
+  shell, so the real uv covers that platform, in the integration job.
+- **A uv-managed Python can be uninstalled under the runtime built on it.** UV6 can find one, and
+  `uv python uninstall` then breaks that runtime until the installer is run again. uv names its
+  minor-version link, which survives patch upgrades.
+- **The npm launcher does not ask uv for a Python.** UV6 is the shims', as chosen; the launcher's
+  own search is unchanged.
+- **lint, bandit and pip-audit still use pip.** Each installs one tool, and pip-audit resolves with
+  pip by design.
+
+---
+
+## §92. A page read as its text, and a PDF read at all
+
+**Added and built in batch 240, from the owner's request** -- made on the §53 branch, before its
+PR -- to check `web_search` and `fetch_url` for defects, and to strip "noncritical boilerplate and
+metadata that adds no context but causes context bloat or model confusion" from what they return.
+The owner first confirmed the §53 ceilings ship uncapped (they do: every ceiling is 0), because a
+research harness may be asked to download a large model.
+
+### What was measured (2026-11-07)
+
+Both tools, called as they are, on live pages and searches:
+
+- **`fetch_url` returned the decoded body as it arrived.** On seven sites the first 5,000-character
+  page was 80-96% markup; the text a person reads was 1-25% of the HTML. Wikipedia's article
+  began at HTML character 73,396, past the 64 KB read cap (PG6), so no part of any Wikipedia
+  article was retrievable; GitHub's README began on page five.
+- **Wikimedia answered httpx's default agent, `python-httpx/0.28.1`, with 403**, and a descriptive
+  agent with 200.
+- **A PDF came back as binary**: 2,731 replacement and control characters on the first page of
+  arXiv's PDF of 1706.03762, which `arxiv_search` offers as a route. No content type was checked,
+  so an image or an archive would have been decoded as text too.
+- **`web_search` treated an empty search as a failure.** `ddgs` raises `DDGSException("No results
+  found.")`; it was retried twice -- each a full multi-backend search -- and reported as "search
+  failed after 3 attempts". A rate limit was retried at once, into the limit.
+- **A search row carried `published: null` on every result** (ddgs returns no date) and two flags
+  that were almost always false: 361 of a result's 2,651 characters. Snippets were cut mid-word.
+
+### Decisions (PT1-PT10)
+
+| # | Decision |
+|---|---|
+| **PT1** | **An HTML page is read as its main content, with Python's `html.parser` and no new dependency** (owner). The region is the page's `<main>` or `role="main"`, else its first `<article>`, else `<body>`; inside it, page furniture is dropped by tag, ARIA role, hiddenness and a short list of class and id names, and structure is kept as `#` headings, list items, table rows and verbatim `<pre>` blocks (`tools/builtin/_page_text.py`). Measured on the same pages after: Wikipedia 840 KB of HTML to 79,573 characters of article, MDN 210 KB to 1,831, every first page under 6% markup |
+| **PT2** | **Links stay in the prose as markers and their URLs are listed per page** (owner). A link gains `[L<n>]` after its text; distinct URLs are numbered once per document, up to 200; each returned page lists the URLs for the markers it carries, up to 30, and says how many more. A link the tool would refuse, or one too long for it to accept, gets no marker |
+| **PT3** | **An HTML page is read up to `fetch_max_html_mb` (2 MB), amending PG6** (owner). What is held is the extracted text, so the bound is on the download rather than the memory. A text body that is not HTML -- JSON, plain text, XML -- keeps PG6's 64 KB |
+| **PT4** | **A PDF is read with pypdf** (owner, after a measurement put to them). On three arXiv papers pypdf kept every probe sentence whole on a one-column and a two-column paper and ran 0.8% of words together on the 77-page Llama 2 report; markitdown[pdf] ran words together on all three (22% on Llama 2) and turned BERT's two columns into a table of fragments, at 188 MB of dependencies against pypdf's 4.1 MB and none. Pinned at 6.21.4, the owner's choice over the two-weeks-old 6.21.2: pip-audit found seven advisories in 6.21.2 (crafted PDFs that loop forever or exhaust memory, CVE-2026-119203 to -119209), all fixed in 6.21.4, which extracted the three papers identically. Ligatures are expanded, a line-end hyphen before a lower-case letter is joined, and each page is marked `[page N]` |
+| **PT5** | **A PDF is parsed in `tools/isolation`'s killable child under `tool_compute_timeout_s`** (owner). PDF parsers have a history of hostile files that spin or exhaust memory, and a thread cannot be stopped. The child imports pypdf before a shared deployment confines it, redacts the whole text before it cuts the window (RB1), and returns only that window |
+| **PT6** | **A PDF is downloaded up to `fetch_max_pdf_mb` (32 MB), configurable** (owner). A PDF cannot be read in part, so one past the limit is refused whole, before any of it is read when its Content-Length says so |
+| **PT7** | **200,000 characters are held, and the rest is reachable by offset** (owner: "the entire page should be readable even if not retrieved in one pass"). An offset past the held window fetches again and serves the window there. PG5's splice is named rather than risked silently: the held entry carries a digest of the whole document, and a re-fetch whose digest differs says the document changed |
+| **PT8** | **`fetch_url` and the scholar lookup send a descriptive User-Agent** naming the project and its public repository -- nothing about the user. Wikimedia's policy asks for one, and refused the default |
+| **PT9** | **A body that is not text, HTML or a PDF is refused with a reason**, as soon as its type or first bytes show it, and the reason says a shell command is the way to keep the file. A PDF is recognised by its magic bytes whatever its header claims |
+| **PT10** | **`web_search`: an empty search is an answer, a rate limit is reported at once, and a row carries only what it says.** `published` is gone, a truncation flag is present only when true (`arxiv_search`'s shape), and a cut snippet ends at a word with an ellipsis. Measured after: the same search's dead-field characters fell from 361 to 81 |
+
+### Built and measured (batch 240, 2026-11-07)
+
+- **`tools/builtin/_page_text.py`**: the two-pass extractor (find the region, then render it),
+  total over malformed HTML -- an end tag closes whatever is open above it, so an unclosed dropped
+  element cannot swallow the page -- and the link numbering, the marker helpers and a document
+  digest. Pure: no network, no config.
+- **`tools/builtin/_pdf_text.py`**: the child's handler, `pdf_window`.
+- **`tools/builtin/fetch_url.py`**: the body's kind from its type and first bytes, a bound per kind,
+  the held window (`_Held`), the re-fetch past it and the version check, the per-page links, and
+  `title`, `format` and `pages` added to the result. Every existing key keeps its meaning.
+- **`tools/builtin/web_search.py`**: PT10. ddgs's exceptions are read by class name, as
+  `core/provider_errors` reads an SDK's, because the suite installs a fake `ddgs`.
+- **`config.yaml`**: `fetch_max_html_mb` and `fetch_max_pdf_mb`. Not authority keys.
+
+87 tests in `tests/test_page_text.py`, one of them through the real isolated child with a PDF built
+from raw objects in the test. Four existing tests moved: two flags pinned as `False` are now
+absent, and a snippet is cut at the cap and then back to a word (`test_paging.py` twice and
+`test_redact_before_cut.py`'s sweep); `test_config_edit.py`'s settable-scalar count went from 156
+to 158.
+
+### Gap register
+
+- **The furniture list is heuristic.** A class word like `menu` drops a menu, and would drop a
+  page whose prose sat in a `menu` class. Each entry is measured against a real site, and the list
+  is short so that a wrong one is findable.
+- **A page with no `<main>` or `<article>` keeps more chrome.** Its `<body>` is the region, and only
+  its top `<header>` and the furniture rules stand between the reader and the site's own text.
+- **A PDF past the held window is downloaded again.** The 13.7 MB Llama 2 report read past
+  character 200,000 costs a second 13.7 MB, counted by the §53 meter.
+- **pypdf runs some words together on tightly kerned PDFs** (0.8% on Llama 2) and reads no
+  scanned page: a PDF with no text layer says so rather than returning page markers.
+- **A JSON body past 64 KB is still cut there**, as PG6 always cut it.
+
 ---
 
 ## §91. A release for every merge, and npm without a token

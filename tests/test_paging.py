@@ -1189,14 +1189,17 @@ class TestWebSearchSaysWhenASnippetWasCut:
         entry = web_search.run({"query": "x"})["results"][0]
 
         assert entry["snippet_truncated"] is True
-        assert len(entry["snippet"]) == web_search.MAX_SNIPPET_CHARS
+        # Batch 240: cut at the cap, then back to a word, and marked.
+        assert len(entry["snippet"]) <= web_search.MAX_SNIPPET_CHARS
+        assert entry["snippet"].endswith(web_search._ELLIPSIS)
 
     def test_an_uncut_snippet_says_so(self, mocker):
         mocker.patch.object(web_search, "_call_ddgs",
                             side_effect=lambda q, n, page=1: _hits(1, body_chars=20))
 
         entry = web_search.run({"query": "x"})["results"][0]
-        assert entry["snippet_truncated"] is False
+        # Batch 240: a flag is present only when true, arxiv's shape.
+        assert "snippet_truncated" not in entry
 
     def test_the_cap_itself_is_unchanged(self):
         assert web_search.MAX_SNIPPET_CHARS == 300
@@ -1433,7 +1436,8 @@ class TestWebSearchBoundsItsTitleToo:
         hit = web_search.run({"query": "x"})["results"][0]
 
         assert hit["title"] == "Result 0"
-        assert hit["title_truncated"] is False
+        # Batch 240: a flag is present only when true, arxiv's shape.
+        assert "title_truncated" not in hit
 
     def test_the_title_gets_a_flag_and_no_route(self):
         """The asymmetry `arxiv.py` already argues for the same field: a

@@ -2763,6 +2763,39 @@ def test_the_integration_tests_run_in_ci_on_both_platforms():
             f"{name} no longer fails on a skip")
 
 
+_UV_PIN = re.compile(r"\buv==([0-9][0-9.]*)")
+
+
+def test_uv_has_one_pin_and_every_suite_job_installs_with_it():
+    """ROADMAP_v3 §93, UV1 and UV2. The seven jobs that install
+    requirements.txt do it with uv, compiling bytecode as pip did, at the
+    version deploy-demo.yml and the hosted bridge already pinned. One pin,
+    so the first bump moves every copy; the count stops this going vacuous
+    when a job is renamed out from under it."""
+    pins = {}
+    texts = dict(_workflow_text())
+    with open(os.path.join(ROOT, "deploy", "hosted", "requirements.txt"), encoding="utf-8") as f:
+        texts["deploy/hosted/requirements.txt"] = f.read()
+    for name, text in texts.items():
+        for version in _UV_PIN.findall(text):
+            pins.setdefault(version, set()).add(name)
+    assert len(pins) == 1, f"uv is pinned at more than one version: {pins}"
+    [pin] = pins
+    installs = []
+    for name in _workflow_text():
+        for job_name, job in _workflow_yaml(name)["jobs"].items():
+            for step in job.get("steps", []):
+                run = step.get("run", "")
+                if "-r requirements.txt" not in run or "pip-audit" in run:
+                    continue
+                installs.append(f"{name}:{job_name}")
+                assert f'python -m pip install "uv=={pin}"' in run, f"{name}:{job_name} lost the uv pin"
+                assert ("python -m uv pip install --system --compile-bytecode "
+                        "-r requirements.txt -r requirements-test.txt") in run, (
+                    f"{name}:{job_name} installs the requirements without uv, or without bytecode")
+    assert len(installs) == 7, installs
+
+
 _VEN_TEST_NAME = re.compile(r"\bVEN_TEST_[A-Z0-9]+(?:_[A-Z0-9]+)*\b")
 
 
@@ -2936,7 +2969,8 @@ def test_the_launcher_and_python_agree_about_the_config_state():
 # ---------------------------------------------------------------------------
 
 _SMALL_NUMBERS = {
-    "three": 3, "nine": 9, "eleven": 11, "twelve": 12, "fifteen": 15,
+    "three": 3, "nine": 9, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fifteen": 15,
     "nineteen": 19, "twenty-one": 21, "thirty-five": 35,
 }
 

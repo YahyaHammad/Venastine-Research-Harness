@@ -663,6 +663,15 @@ def _cmd_memories(session: ChatSession, args: str) -> None:
     print_memories()
 
 
+def _cmd_network(session: ChatSession, args: str) -> None:
+    """ROADMAP_v3 §53 (IO13). The TUI's /network, line for line: both
+    print `_net_common.network_report`."""
+    from tools.builtin import _net_common
+
+    for line in _net_common.network_report():
+        _out(line)
+
+
 def _cmd_forget(session: ChatSession, args: str) -> None:
     raw = args.strip()
     if not raw:
@@ -823,6 +832,7 @@ def register_cli_commands() -> None:
         bind("help", _cmd_help),
         bind("memories", _cmd_memories),
         bind("model", _cmd_model),
+        bind("network", _cmd_network),
         bind("new", _cmd_new),
         bind("quit", _cmd_quit),
         bind("ref", _cmd_ref),

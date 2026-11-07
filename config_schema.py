@@ -401,6 +401,22 @@ class HarnessConfig(_Model):
     # -- MCP results -------------------------------------------------------
     mcp_max_event_bytes: PositiveInt
 
+    # -- Network limits (ROADMAP_v3 section 53) ----------------------------
+    # One window for all three meters (IO8) and one ceiling each, in
+    # decimal megabytes, where 0 is off (IO9). Not authority keys: a
+    # ceiling decides how much may be spent, which is the line
+    # `ensemble_mode` sits on, not what may run.
+    network_window_hours: PositiveNumber
+    network_limit_tools_mb: NonNegativeNumber
+    network_limit_provider_mb: NonNegativeNumber
+    network_limit_mcp_mb: NonNegativeNumber
+
+    # -- Reading web pages and PDFs (batch 240) ----------------------------
+    # The owner's amendment of PG6: what is HELD is extracted text, so these
+    # bound the download, not the memory.
+    fetch_max_html_mb: PositiveNumber
+    fetch_max_pdf_mb: PositiveNumber
+
     # -- Shell / sandbox ---------------------------------------------------
     shell_binary: str
     allow_insecure_sandbox_fallback: StrictBool

@@ -2,8 +2,9 @@
 """Shared, stdlib-only GitHub installer used by install.sh and install.ps1.
 
 Download this file completely before executing it. Dependencies are installed
-into a fresh venv at its permanent path (venvs cannot safely be relocated).
-Only after pip succeeds does the source replace the active app. Old app and
+into a fresh venv at its permanent path (venvs cannot safely be relocated),
+by uv when it is on PATH and pip otherwise, or after uv fails. Only after the
+install succeeds does the source replace the active app. Old app and
 runtime directories remain available for recovery; no user directory is purged.
 Then the command's directory goes on PATH for new terminals, unless the user
 opts out: the user PATH on Windows, the user's own shell's startup file elsewhere.
@@ -30,6 +31,13 @@ OWNER = "Venastine GitHub installer v1"
 MARKER = ".venastine-install.json"
 RUNTIME = ".venastine-runtime.json"
 NO_MODIFY_PATH = "VENASTINE_NO_MODIFY_PATH"
+NO_UV = "VENASTINE_NO_UV"
+# ROADMAP_v3 §93. The same pinned set pip installs, 3-8x sooner where measured.
+# COPY, NEVER uv's DEFAULT LINK: on Linux and Windows that hardlinks each file
+# out of uv's cache, so the runtime's code would be one inode with a file
+# under ~/.cache/uv, writable where the protected runtime directory is not.
+# Bytecode is compiled as pip compiles it, so a first launch compiles nothing.
+UV_INSTALL = ("pip", "install", "--link-mode", "copy", "--compile-bytecode")
 BLOCK_START = "# >>> venastine GitHub installer >>>"
 BLOCK_END = "# <<< venastine GitHub installer <<<"
 # HKCU\Environment, where Windows keeps the user's own PATH.
@@ -99,6 +107,32 @@ def write_json(path, value):
 
 def run(argv, **kwargs):
     subprocess.run(argv, check=True, **kwargs)  # nosec B603 - explicit interpreter and argument list, no shell
+
+
+def runtime_python(runtime):
+    return runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def install_requirements(runtime, requirements, uv=None, cwd=None):
+    """Build the venv at `runtime` with `requirements` in it; return "uv" or "pip".
+
+    `python -m venv` either way, so the runtime holds pip as it always has.
+    A uv that fails -- too old, or blind to a mirror only pip.conf names --
+    costs a fresh venv and a pip install, never the installation. `cwd`
+    keeps uv from reading a project's settings in the caller's directory.
+    """
+    python = runtime_python(runtime)
+    run([sys.executable, "-m", "venv", str(runtime)])
+    if uv:
+        try:
+            run([uv, *UV_INSTALL, "--python", str(python), "-r", str(requirements)], cwd=cwd)
+            return "uv"
+        except (OSError, subprocess.CalledProcessError) as error:
+            print(f"uv could not install them ({error}); starting again with pip.", flush=True)
+            shutil.rmtree(runtime)
+            run([sys.executable, "-m", "venv", str(runtime)])
+    run([str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)])
+    return "pip"
 
 
 def sync_config(python, app, *args):
@@ -268,7 +302,7 @@ def put_on_path(bin_dir, command, modify):
     return True, notes
 
 
-def install(ref, root, bin_dir, modify_path=False):
+def install(ref, root, bin_dir, modify_path=False, uv=None):
     root, bin_dir = root.expanduser().resolve(), bin_dir.expanduser().resolve()
     app = root / "app"
     command = bin_dir / ("venastine.cmd" if os.name == "nt" else "venastine")
@@ -314,11 +348,11 @@ def install(ref, root, bin_dir, modify_path=False):
             # sibling of app/ would leave the imported runtime writable when
             # a user's workspace contains the installation's parent directory.
             runtime = Path.home() / ".config/venastine/runtime" / ("github-" + uuid.uuid4().hex)
-            python = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-            print(f"  version: {version}\n  environment: {runtime}\nInstalling requirements.txt in an isolated environment...", flush=True)
-            run([sys.executable, "-m", "venv", str(runtime)])
-            run([str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(staged / "requirements.txt")])
-            write_json(staged / RUNTIME, {"python": str(python), "commit": commit, "ref": ref})
+            python = runtime_python(runtime)
+            print(f"  version: {version}\n  environment: {runtime}\nInstalling requirements.txt in an isolated environment"
+                  f"{' with uv' if uv else ''}...", flush=True)
+            installer = install_requirements(runtime, staged / "requirements.txt", uv, cwd=temporary)
+            write_json(staged / RUNTIME, {"python": str(python), "commit": commit, "ref": ref, "installer": installer})
             bin_dir.mkdir(parents=True, exist_ok=True)
             first_run = not app.exists()
             backup = root / ("previous-" + uuid.uuid4().hex)
@@ -360,11 +394,15 @@ def main(argv=None):
     parser.add_argument("--no-modify-path", action="store_true",
                         default=os.environ.get(NO_MODIFY_PATH, "") not in ("", "0"),
                         help=f"leave PATH and shell startup files alone (or set {NO_MODIFY_PATH}=1)")
+    parser.add_argument("--no-uv", action="store_true",
+                        default=os.environ.get(NO_UV, "") not in ("", "0"),
+                        help=f"install with pip even when uv is on PATH (or set {NO_UV}=1)")
     args = parser.parse_args(argv)
     if sys.version_info < (3, 11):  # noqa: UP036 - standalone bootstrap must diagnose an older host
         parser.error("Python 3.11+ is required")
     try:
-        install(args.ref, args.install_dir, args.bin_dir, modify_path=not args.no_modify_path)
+        install(args.ref, args.install_dir, args.bin_dir, modify_path=not args.no_modify_path,
+                uv=None if args.no_uv else shutil.which("uv"))
     except (OSError, ValueError, KeyError, zipfile.BadZipFile, subprocess.CalledProcessError) as error:
         print(f"Installation failed: {error}", file=sys.stderr)
         return 1

@@ -222,6 +222,13 @@
     color: $text-muted;
 }
 
+/* ROADMAP_v3 §53 network meters, directly under the usage line it reads
+   with. Hidden while every meter is off. */
+#network-line {
+    height: auto;
+    color: $text-muted;
+}
+
 /* §22 live research view. Auto height so it takes no sidebar space until
    a run starts.
 

@@ -785,6 +785,12 @@ class TestEveryCutInTheSearchToolsRedactsFirst:
         got = _searched(monkeypatch, tool,
                         build("x " + "filler words here " * 400), field)
 
+        if label == "web_search snippet":
+            # Batch 240: a cut snippet ends at a word with an ellipsis, so
+            # it is cut AT the cap and then back to a word, never past it.
+            assert got.endswith(web_search._ELLIPSIS), got[-20:]
+            assert cap * 0.6 <= len(got) <= cap, len(got)
+            return
         assert len(got) == cap, (
             f"{label} came back {len(got)} characters long, so {cap} is "
             f"not the cut this row is about and the sweep above split "

@@ -30353,3 +30353,302 @@ failed too.
   `0.3.8-b.1.pick-instead-of-typing.re6694bf76706`. `main` still carries
   batch 237's beta, because #277's release only rehearsed; this merge's
   `release.yml` run is what should take `main` to 0.3.9.
+
+
+## Batch 239 -- a rolling bound on what the harness pulls and pushes (2026-11-07)
+
+**ROADMAP_v3 §53, IO8-IO15.** The owner asked for another open roadmap
+section and chose §53 from the three: a ceiling on network traffic for a
+metered connection, unlimited by default. IO1-IO7 were already locked; this
+batch settled the five shapes they left open, built it, and amended IO3
+after measuring it.
+
+### Settled with the owner
+
+- **IO8, the window.** One window for all three meters, 24 hours by
+  default. The owner asked whether 6-12 hours was more sensible, so both
+  directions were laid out. A shorter window bounds a burst tightly and
+  frees room sooner but admits 24 / window times the ceiling in a day. A
+  longer one maps onto an allowance and fails loudly. Too short fails
+  silently, so 24 hours.
+- **IO9, the ceilings.** One per meter, in decimal megabytes, covering
+  download and upload together; 0 is off.
+- **IO10, the ledger.** Persisted and machine-wide, in SQLite at
+  `~/.config/venastine/network.db`. The owner's condition: it must not grow
+  with the traffic or thrash the disk. It holds counts in buckets of the
+  window over 1,440, deletes rows past the window on every write, and so
+  stops at about 1,440 rows per meter whatever the volume.
+- **IO11, enforcement.** Checked before a call starts, on what it will send
+  as well as what is used; a response in flight is never cut.
+- **IO12, writes.** At most once a minute, only when something was counted.
+- **IO13, display.** A sidebar line while any meter is on, and `/network`
+  in both shells.
+- **IO15, `web_search`.** See below; the owner chose the amendment.
+
+IO14, hooks rather than a transport and only while a meter is on, follows
+from a measurement rather than a question.
+
+### Built
+
+- **`tools/builtin/_net_common.py`** gained the meter, beside the cache, for
+  IO2's reason: `Meter` (a ceiling read from `config` at call time),
+  `Ledger`, `NetworkLimitReached`, the HTTP/1.1 sizing of an exchange,
+  `stream` and `get` for the tools' own `httpx` calls, the provider and MCP
+  event hooks, `network_report` and `sidebar_text`.
+- **The tools.** `fetch_url` and `arxiv_search` stream through the meter and
+  the scholar lookup gets through it. `web_search` is admitted in
+  `_call_ddgs` and charged the estimate after each attempt. A refusal is
+  raised; `web_search`'s catch-all retry loop re-raises it, the scholar
+  lookup stops at it, and `registry.dispatch` returns its sentence above the
+  crash containment.
+- **The provider.** `core/client.py`'s `_metered` gives each SDK its own
+  `DefaultHttpxClient` with the hooks (anthropic, openai, the ChatGPT plan),
+  or google-genai an httpx2 client that follows redirects, and only while
+  the provider ceiling is set. `core/provider_errors` reads a refusal out of
+  an exception's chain.
+- **MCP.** `mcp_client` puts the counting hooks on the SDK's own client for
+  `http` and `sse` servers and admits a call in `call_tool`. `stdio` is not
+  asked.
+- **What a person reads.** `NetworkLine` under the usage line, held at
+  mount and repainted at most once a second; `/network` in both shells,
+  both printing `network_report()`. `config.yaml`, `CONFIG_ARCHITECTURE.md`
+  and `docs/SECURITY.md` write IO5's list down.
+
+### Measured before it was written
+
+- **The SDKs.** All three take an httpx2 client and call both hooks for a
+  request, a stream and an embedding, so every provider figure is exact and
+  IO4's token-derived branch is unneeded (the section had been written
+  against google-genai 1.0.0). A refusal raised in the hook comes back as
+  itself from openai and google-genai; anthropic wraps it as
+  `APIConnectionError("Connection error.")` after two retries of its own,
+  1.4 s, which is why `provider_errors` reads the chain.
+- **The wire, against a real local server.** A gzipped 50,000-byte page
+  counted 143 bytes; chunked framing is not counted; a redirect hop's body
+  is.
+- **A wrapped transport is wrong both ways** (httpx2 2.16.0). With
+  `HTTPS_PROXY` set and no transport passed, the client mounts a proxy
+  transport a wrapper never sees; pass a transport and the client drops the
+  environment's proxy. Hooks see every hop. The first draft of the code
+  comment claimed the first half as measured before it was; it now says
+  what was.
+- **`web_search` through a counting proxy.** `ddgs` talks through primp,
+  which has no hook. Two live searches cost 85,746 and 206,637 bytes on the
+  wire against 1,967 and 2,445 bytes returned: IO3's "the size of what it
+  returned" would have undercounted 44x and 85x. Put to the owner; IO15
+  charges 21,000 bytes per result asked for, labelled an estimate.
+
+### Caught on the way
+
+- **Truncation.** The first `ceiling()` truncated megabytes times a million,
+  and its test used 0.000003 MB, which happens to be exactly 3.0 in binary
+  floating point -- so mutation M2 survived. 2.01 MB is 2,009,999.9999999998,
+  which truncation makes 2,009,999. Rounded now, and the test uses 2.01.
+- **A mutation the harness called INVALID was a real detection.** Building a
+  provider client with hooks while the meter is off raised an ImportError
+  from the suite's fake SDK; the test now supplies the factory and asserts
+  it is never called, so the same mutation fails on an assertion.
+- **`/network` sorted ahead of `/new`.** `test_tab_completes_while_it_is_open`
+  typed `/n` and expected `/new `; it types `/q` for `/quit` now, a prefix
+  one command has.
+
+### Not changed
+
+Recorded in §53's gap register: anthropic's two retries of a refusal (1.4 s,
+zero bytes); concurrent calls can both be admitted against the same room;
+two installs with different windows prune to the shorter; the sidebar does
+not see another process until an event repaints it; bytes already in a
+socket buffer when `fetch_url` stops at its cap. The ceilings are not
+authority keys: a ceiling decides how much may be spent, `ensemble_mode`'s
+side of the line.
+
+### Verified
+
+- **Tests:** 70 new in `tests/test_network_limit.py`. `test_config_edit.py`'s
+  settable-scalar count went from 152 to 156, and ARCHITECTURE.md's figure
+  with it; `test_tab_completes_while_it_is_open` changed its prefix.
+- **Mutations:** 43 on an export of the working tree, every one red on its
+  assertion, and a reworded comment as a green control. `__pycache__` was
+  removed from the export and bytecode writing turned off, so no stale
+  `.pyc` could un-apply a same-length mutation.
+- **Full suite** (the batch 234 venv): 8983 passed, 79 skipped, with
+  `AGENT_WORKSPACE` unset. The first run failed five: four documentation
+  gates this batch owed (the count, the tree, the new decision ids, the
+  held-widget count) and the tab-completion test above. The second failed
+  one: the held-set gate's word parser stopped at twelve, and its message
+  says to extend `_SMALL_NUMBERS`, which now has thirteen.
+- **Static checks:**
+  - ruff is clean.
+  - bandit as CI runs it, new files included: the first pass found one new
+    B110, a `try/except/pass` around httpx's raising `Response.request`.
+    Replaced with an accessor that returns None, not baselined: 0 new, 47
+    live, as before.
+  - gitleaks with `.github/gitleaks.toml`, as CI runs it, on an export of
+    the tracked and new files: no leaks. Run without that config it flags
+    the public `hf_oauth_client_id`, on `main` as well.
+  - pip-audit not re-run: no requirements file changed.
+- **Version**, by `scripts/version.py branch` then `bump`:
+  `0.3.9-b.1.network-byte-limit.r9cd3a68c74e1`.
+
+
+## Batch 240 -- a page read as its text, and a PDF read at all (2026-11-07)
+
+**ROADMAP_v3 §92, PT1-PT10.** On the §53 branch, before its PR, the owner
+asked two things. First, whether §53 had set a default cap -- it had not,
+and should not, since a research run may be asked to download a large
+model; every ceiling ships at 0. Second, to check `web_search` and
+`fetch_url` for defects and to strip the boilerplate and metadata that bloat
+or confuse a result.
+
+### Measured first
+
+Both tools, run as they are, on live pages and searches:
+
+- `fetch_url` returned raw HTML: the first page was 80-96% markup on seven
+  sites, and the readable text 1-25% of the HTML.
+- Wikipedia refused httpx's default agent with 403, and its article sat past
+  the 64 KB read cap (PG6) at HTML character 73,396.
+- A PDF came back as binary (2,731 replacement and control characters on
+  page one of arXiv's 1706.03762), and no content type was checked.
+- `web_search` retried ddgs's `DDGSException("No results found.")` twice and
+  called it a failure, retried a rate limit at once, and spent 361 of a
+  result's 2,651 characters on a null date and false flags.
+
+### Settled with the owner
+
+- **PT1-PT3:** main-content extraction with the stdlib; links as `[L<n>]`
+  markers with their URLs listed per page; HTML read to 2 MB
+  (`fetch_max_html_mb`), amending PG6, with other text kept at 64 KB.
+- **PT4:** pypdf, after a measurement on three arXiv papers. pypdf kept whole
+  sentences on one- and two-column layouts; markitdown[pdf] ran words
+  together on all three and turned BERT's columns into a table, at 188 MB of
+  dependencies. Then pip-audit found seven advisories in the two-weeks-old
+  6.21.2 -- infinite loops and memory exhaustion on crafted PDFs -- and the
+  owner chose 6.21.4, which fixes them and extracted identically.
+- **PT5, PT6:** parsed in `tools/isolation`'s killable child; up to 32 MB,
+  configurable (`fetch_max_pdf_mb`).
+- **PT7:** 200,000 characters held, and the rest reachable by offset: a page
+  past the window re-fetches, and a digest of the whole document says when
+  it changed between the two fetches.
+
+PT8-PT10 (a descriptive agent, binary refused with a reason, the search
+fixes) follow from the measurements.
+
+### Built
+
+- `tools/builtin/_page_text.py`: the extractor, two `html.parser` passes,
+  total over malformed HTML.
+- `tools/builtin/_pdf_text.py`: the child's handler, redacting before it
+  cuts the window.
+- `fetch_url.py`: body kinds, a bound per kind, the held window and the
+  re-fetch past it, per-page links, `title`/`format`/`pages`.
+- `web_search.py`: PT10.
+- `_net_common.USER_AGENT`, shared by `fetch_url` and the scholar lookup.
+
+### Measured after
+
+On the same live pages, every first page was under 6% markup: Wikipedia
+840 KB of HTML to 79,573 characters of article, MDN 210 KB to 1,831. The
+arXiv PDF came back as 15 pages, 39,721 characters, through the real child.
+A PNG was refused with a reason. The same search's dead-field characters
+fell from 361 to 81, and an empty search returned at once.
+
+Three rounds of the extractor against those pages found what the first
+draft kept:
+
+- Wikipedia's language list, inside `<main>`, used all 200 link numbers.
+- Sphinx's `¶` heading links survived.
+- Table layouts left empty ` | ` cells.
+
+Each fix is a furniture entry or a tidy rule with the site named.
+
+### Caught on the way
+
+- A body shorter than the 1 KB sniff window was typed after the read loop
+  and never held to its limit (`test_the_byte_cap_alone_marks_a_page_
+  truncated`).
+- The test PDF stores its text uncompressed, so a PDF wrongly read as plain
+  text still contained the expected words: mutation M24 survived. The test
+  now asserts the format, for three declared types.
+- A bash heredoc mangled a regex patch; its assert stopped the write, and the
+  edit was made with the Edit tool.
+- `[L12]` in a docstring was read by the decision-id gate as an id; markers
+  are written `[L<n>]` in prose now.
+
+### Verified
+
+- **Tests:** 87 new in `tests/test_page_text.py`, one through the real
+  isolated child. Four existing tests moved (two absent-unless-true flags, a
+  snippet cut back to a word in two places) and the settable-scalar count
+  went from 156 to 158.
+- **Mutations:** 43, every one red on its assertion after M24's test was
+  strengthened, and a green control.
+- **pip-audit** on `requirements.txt`: no known vulnerabilities.
+- **Version:** `0.3.9-b.2.network-byte-limit.r9cd3a68c74e1`.
+
+## Batch 241 -- uv where pip was slow: CI, and the installers when it is there (2026-11-07)
+
+**ROADMAP_v3 §93, UV1-UV7.** On the §53 branch, before its PR, the owner asked
+whether uv would make the CI runners faster than pip, and for the curlable
+installers to use uv when it is available, if that adds no friction. Midway
+they asked whether compiling bytecode could breach LGPL-3's terms; it cannot
+-- pip already compiles every package, the `.pyc` files sit beside each
+library's own source, and nothing is merged or distributed.
+
+### Measured first
+
+- **CI's own timings:** the install step took 18-29 s on every Ubuntu job and
+  49-54 s on Windows; in the pytest job, 14.5 s of 23 was pip's serial
+  unpacking and bytecode compile.
+- **A 4-core Ubuntu box** (WSL under `taskset`, three rounds): pip 14.1-14.3 s
+  warm; uv 0.1 s, but its first collection then paid 2-4 s back; uv with
+  `--compile-bytecode` 2.6-2.7 s and nothing paid back. Empty caches: pip
+  37.0-41.4 s, uv 10.2-13.1 s.
+- **Windows, this machine:** a first install as `install.py` builds it, 255.6
+  and 257.4 s with pip, 39.7 and 48.7 s with uv copying and compiling.
+- **The same set:** pip and uv installed the identical 76 distributions at
+  identical versions.
+- **The link:** uv's default made an installed file's `st_nlink` 2 on Linux and
+  Windows, 1 with `--link-mode copy`. The runtime sits in the protected user
+  tier and `~/.cache/uv` does not, so copying is not optional.
+- **`uv python find`** without `--system` answered with the `.venv` in the
+  current directory, on 0.13.4 and on the owner's 0.12.5.
+
+### Settled with the owner
+
+uv from PyPI in the seven suite jobs, no third-party action and no uv cache
+(UV1); one pin, 0.13.4 (UV2); in the installers, uv when it is on PATH with pip
+as the fallback and `VENASTINE_NO_UV=1` to opt out (UV3, UV5); the npm launcher
+the same (UV7); and the shims asking uv for a Python when PATH has none (UV6).
+UV4, the copy, follows from the measurement.
+
+### Built
+
+- `scripts/install.py`: `install_requirements()`, `--no-uv`, `installer` in
+  the runtime record; `bin/venastine.py`'s doctor prints it.
+- `install.sh`, `install.ps1`: `uv python find` last.
+- `bin/venastine.mjs`: `findUv()`, `installRequirements()`, the doctor's line.
+- `tests.yml`, `compat.yml`, `publish.yml`: uv in the install step.
+
+### Verified
+
+- **Tests:** 22 new in `tests/test_installers.py`, three of them `integration`
+  tests against a real uv; one docs-consistency gate. One existing test moved
+  (the opt-out test's fake takes `uv`).
+- **Real runs:** the integration tests against uv 0.13.4 and 0.12.5 on Windows;
+  `install.sh` and the npm launcher against a fake uv in WSL; `install.ps1`
+  under Windows PowerShell 5.1. No machine here has PowerShell 7, so its run
+  is CI's.
+- **Mutations:** 39, each red on its assertion on every platform it ran on --
+  25 on Windows (the real uv, Windows PowerShell), 35 in WSL with the pinned
+  uv on PATH -- and two green controls. The real-uv rows are the ones only a
+  real uv can see: `--link-mode hardlink` named outright turned only the
+  `st_nlink` test red, on both.
+- **A trap on the way:** the first full run used the system Python, whose
+  SDKs are from July (openai 2.45.0), and failed seven `test_sdk_conformance`
+  tests on an `httpx2` client the old SDK refuses. Nothing in this batch
+  touches them; the suite runs in the venv that holds the pins.
+- **Full suite** there, `AGENT_WORKSPACE` unset: 9081 passed, 88 skipped.
+  ruff clean, bandit 0 new, gitleaks clean with CI's config; the requirement
+  files are unchanged, and uv 0.13.4 has no OSV advisory.
+- **Version:** `0.3.9-b.3.network-byte-limit.r9cd3a68c74e1`.

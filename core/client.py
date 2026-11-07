@@ -70,10 +70,11 @@ def api_initialization(provider_name: str):
         client = _chatgpt_client()
     elif entry.get("is_v1_compatible", False):
         from openai import OpenAI
-        client = OpenAI(base_url=entry["API_URL"], api_key=entry["API_KEY"])
+        client = OpenAI(base_url=entry["API_URL"], api_key=entry["API_KEY"],
+                        **_metered("openai"))
     elif provider_name == "GOOGLE":
         from google import genai
-        client = genai.Client(api_key=entry["API_KEY"])
+        client = genai.Client(api_key=entry["API_KEY"], **_metered("google"))
     elif provider_name == "ANTHROPIC":
         # Batch 234. Refused HERE, before a client exists, because the SDK
         # no longer says what is wrong: 2.x sends the key as `Bearer <key>`,
@@ -85,7 +86,7 @@ def api_initialization(provider_name: str):
         if not entry.get("API_KEY"):
             raise ValueError(credentials.empty_key_refusal(provider_name))
         from anthropic import Anthropic
-        client = Anthropic(api_key=entry["API_KEY"])
+        client = Anthropic(api_key=entry["API_KEY"], **_metered("anthropic"))
         # Add further proprietary API formats here
     else:
         raise ValueError(f"Provider {provider_name} is not currently supported")
@@ -122,7 +123,47 @@ def _chatgpt_client():
     from core import chatgpt_auth
 
     return OpenAI(base_url=chatgpt_auth.RESOURCE,
-                  api_key=chatgpt_auth.access_token, max_retries=0)
+                  api_key=chatgpt_auth.access_token, max_retries=0,
+                  **_metered("openai"))
+
+
+def _metered(sdk: str) -> dict:
+    """The extra constructor arguments that put the provider meter on a
+    client (ROADMAP_v3 §53, IO4) -- `{}` while that meter is off.
+
+    EMPTY BY DEFAULT, AND THAT IS THE POINT: with no provider ceiling every
+    SDK builds the client it always built, so nobody who has not set a
+    limit runs a different HTTP stack because this exists.
+
+    THE SDK'S OWN DEFAULT CLIENT, WITH HOOKS, where the SDK offers one.
+    `DefaultHttpxClient` carries anthropic's and openai's timeouts,
+    connection limits and redirect setting; a bare `httpx2.Client` would
+    have brought httpx2's five-second timeout to a model call. google-genai
+    has no such class: its own client is an httpx one that follows
+    redirects and takes its timeout per request, so an httpx2 client set
+    to follow redirects is the same behaviour (measured: plain, streamed
+    and embedding calls all pass through it).
+
+    The client is built once per provider -- `_client_cache` -- and the
+    ceiling is read when a request is made, so the hooks stay right for
+    the life of the client.
+    """
+    from tools.builtin import _net_common
+
+    if not _net_common.PROVIDER.enabled():
+        return {}
+    hooks = _net_common.provider_event_hooks()
+    if sdk == "google":
+        import httpx2
+        from google.genai import types
+
+        return {"http_options": types.HttpOptions(httpx_client=httpx2.Client(
+            follow_redirects=True, event_hooks=hooks))}
+    if sdk == "anthropic":
+        from anthropic import DefaultHttpxClient
+    else:
+        from openai import DefaultHttpxClient
+    return {"http_client": DefaultHttpxClient(event_hooks=hooks)}
 
 
 def forget_client(provider_name: str) -> None:
