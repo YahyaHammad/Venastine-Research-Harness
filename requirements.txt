@@ -21,10 +21,10 @@
 # test_sdk_conformance.py re-checks the shapes. What to re-measure when
 # these move: that the stream, the effort query and the error types still
 # match, since the suite fakes both packages everywhere else.
-anthropic==2.1.0
-ddgs==9.16.0
+anthropic==2.4.0
+ddgs==9.16.1
 httpx==0.28.1
-openai==3.36.0
+openai==3.45.0
 # ROADMAP_v3 §82 (GS1), batch 172: 1.0.0 -> 2.29.0, the owner's choice.
 # Gemini 3 refuses a request whose current turn holds a function call
 # without the thought signature it came with; 1.0.0's Part had no field
@@ -37,7 +37,7 @@ openai==3.36.0
 # transport is httpx now, not requests. 2.32.0 since batch 234, the newest
 # release at least two weeks old; test_sdk_conformance.py is the evidence,
 # with no live Gemini call (no key on this machine).
-google-genai==2.32.0
+google-genai==2.34.0
 # Batch 208, from Dependabot's group, the owner's choice of which: the
 # packages below are ones the suite runs for real rather than faking, so
 # a green suite is evidence about them, and each release was at least two
@@ -52,7 +52,7 @@ google-genai==2.32.0
 # core/reasoning/output_writer.py draws the chart as SVG with the standard
 # library now. pillow's floor (batch 201) went with it: nothing else here
 # reaches pillow.
-pydantic==2.14.1
+pydantic==2.14.2
 sympy==1.14.0
 # 0.0.48 since batch 234: test_storage_e2e.py runs it for real.
 sqlmodel==0.0.48
@@ -122,7 +122,7 @@ textual==8.2.8
 # without declaring, i.e. the one place such a migration would be silent.
 # The FLOOR is textual's, not a guess: 8.2.8 requires `rich>=14.2.0`, so
 # `>=13` stated a version this project can no longer be installed with.
-rich>=14.2,<16
+rich>=15.0.0,<16
 
 # ROADMAP_v2 §17 MCP client. Upper-bounded per D22 -- and D22 exists
 # BECAUSE of this package: it was mid-major-version transition when §17
@@ -239,7 +239,7 @@ google-re2==1.1.20251105
 # message (the store relies on the three failure causes being
 # indistinguishable), and the wheel list still covers this project's
 # platforms.
-cryptography>=50.0.0,<52
+cryptography>=50.0.2,<52
 
 # ROADMAP_v3 §83 (CG6, CG16). Checks the ID token a ChatGPT-plan sign-in
 # returns against OpenAI's published keys: RS256, issuer, audience, expiry
@@ -266,7 +266,7 @@ cryptography>=50.0.0,<52
 # moves: `jwt.decode` still refuses an algorithm outside the list it is
 # given (the `none` and HS256 tests in tests/test_chatgpt_auth.py), and
 # `PyJWKSet` still reads OpenAI's JWKS.
-PyJWT>=2.15.0,<3
+PyJWT>=2.15.1,<3
 
 # TECHNICAL_DEBT 18, batch 116. A PRODUCTION dependency: `arxiv.py` imports
 # it at module load, and pyproject.toml reads this file for its dependency
