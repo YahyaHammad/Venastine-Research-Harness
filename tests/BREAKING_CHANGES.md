@@ -24,6 +24,12 @@ other name.
 | Drop either autouse guard or the root conftest's `_throwaway_home`, or let a guard pass a test it should fail | `test_suite_isolation.py::test_each_guard_fails_exactly_the_test_that_crossed_it` | Put it back |
 | Rename `VENASTINE_SUITE_HOME` in one of the two conftests | `TestTheThrowawayHome::test_every_spelling_of_home_is_the_throwaway`, with a KeyError | Spell it the same in both: the root conftest cannot be imported from `tests/conftest.py` |
 
+## Hosted browser notices and asset scope (batch 242)
+
+| Change | Test | Fix |
+|---|---|---|
+| Serve a new Textual Serve bundle, remove its inline notices, or expose the wheel's fonts/images | `test_browser_copies_carry_notices_and_unused_assets_are_unreachable` | Review the exact JS/CSS bytes and embedded components, update the hashes and full license texts together, and keep public routes limited to the used assets and notices |
+
 ## anthropic 2.x and openai 3.x (batch 234)
 
 anthropic 2.1.0 sends API version 2026-10-21 and the key as

@@ -30653,6 +30653,47 @@ UV4, the copy, follows from the measurement.
   files are unchanged, and uv 0.13.4 has no OSV advisory.
 - **Version:** `0.3.9-b.3.network-byte-limit.r9cd3a68c74e1`.
 
+## Batch 242 -- license notices delivered with hosted browser copies (2026-11-07)
+
+The dependency license report was checked against current main and the PyPI
+Textual Serve 1.1.3 wheel. Its SHA-256 matched
+`207a472bc6604e725b1adab4ab8bf12f4c4dc25b04eea31e4d04731d8bf30f18`.
+The JavaScript lacked Textualize's MIT notice; the mounted fonts identified
+Apache-2.0 in their name tables but had no accompanying license copy. The
+terminal used neither wheel font nor its background image. The owner chose
+to restrict the public assets to the used JS, CSS and notices.
+
+The bridge now allows only those three URLs. Every JS response includes the
+full Textualize, xterm.js/addon, js-base64 and webpack loader/runtime notices;
+the terminal links the same text separately. The BSD-3-Clause js-base64 3.7.7
+component was identified by its embedded version and implementation. The
+upstream wheel carries no frontend lockfile, so exact versions of every
+embedded component remain unestablished. Reviewed JS/CSS hashes prevent a
+changed bundle from silently retaining this assessment.
+
+Root NOTICE and THIRD_PARTY_NOTICES distinguish source installs from browser
+copies and installed container images. All 32 distinct direct declarations now
+have rows, including defusedxml, pypdf, starlette and setuptools. Protobuf's
+pinned wheel identifies BSD-3-Clause. Transitive MPL, optional PDF/Windows and
+native-library terms are scoped separately. No deployed ModelScope image was
+obtained; no image compliance or violation claim is made.
+
+Validation includes the hosted route regression, the exact wheel served through
+Starlette (including JavaScript syntax validation), npm's dry-run file inventory,
+and selection of both notice files into the hosted bundle. The source package
+contains no wheel/font/deploy assets. The hosted/bundle/docs run passed 255 tests (4 narrow-run skips); the
+standalone documentation gate passed 92 (1 full-session skip). Ruff, Bandit's
+baseline and count checks, and Gitleaks on a clean staged export passed.
+
+The full run passed 9085, skipped 46 and failed 39. Three documentation count
+failures were corrected and the documentation gate rerun successfully. The
+other 36 failures matched exactly on an archive of unchanged main
+`3cdb625`: the mocked web tests use DNS for example.com, unavailable here,
+and config-update tests try to write the sandbox's read-only home directory.
+Those environment failures are not changes made by this batch.
+
+Branch version: `0.3.10-b.1.codex-dependency-license-fixes.rbd51e3728512`.
+
 ## Batch 243 -- the suite offline and out of the home (2026-11-07)
 
 **Why.** Codex's draft PR #280 ran the full suite in its cloud sandbox and

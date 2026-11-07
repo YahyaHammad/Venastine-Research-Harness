@@ -803,6 +803,49 @@ class TestTheRoutes:
 
         return TestClient(Starlette(routes=bridge.routes()))
 
+    def test_browser_copies_carry_notices_and_unused_assets_are_unreachable(
+            self, tmp_path, monkeypatch):
+        javascript = b"window.terminalLoaded = true;"
+        css = b"/* upstream MIT notice */ .xterm {}"
+        for asset, data in (("js/textual.js", javascript), ("css/xterm.css", css)):
+            path = tmp_path / asset
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            monkeypatch.setitem(web.BROWSER_ASSETS, asset,
+                                hashlib.sha256(data).hexdigest())
+        # Files exist on disk: 404 must come from the public allowlist.
+        for asset in ("fonts/RobotoMono-VariableFont_wght.ttf",
+                      "fonts/RobotoMono-Italic-VariableFont_wght.ttf",
+                      "images/background.png", "js/new.js"):
+            path = tmp_path / asset
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"not public")
+        bridge = web.Bridge(_supervisor(tmp_path), static_dir=tmp_path)
+        with self._client(bridge) as client:
+            notices = client.get("/venastine-static/NOTICE.txt")
+            assert notices.status_code == 200
+            for text in ("Copyright (c) 2024 Textualize", "The xterm.js authors",
+                         "Dan Kogai", "JS Foundation", "Permission is hereby",
+                         "Redistribution and use", "THE SOFTWARE IS PROVIDED"):
+                assert text in notices.text
+            response = client.get("/venastine-static/js/textual.js")
+            assert response.status_code == 200
+            assert response.content == b"/*!\n" + notices.content + b"\n*/\n" + javascript
+            assert response.headers["content-type"].startswith("application/javascript")
+            assert response.headers["x-content-type-options"] == "nosniff"
+            assert 'rel="license"' in response.headers["link"]
+            assert client.get("/venastine-static/css/xterm.css").content == css
+            for asset in ("fonts/RobotoMono-VariableFont_wght.ttf",
+                          "fonts/RobotoMono-Italic-VariableFont_wght.ttf",
+                          "images/background.png", "js/new.js", "js/textual.js.map"):
+                assert client.get("/venastine-static/" + asset).status_code == 404
+            assert '/venastine-static/NOTICE.txt' in client.get("/terminal").text
+            # An upgraded or modified wheel must not silently reuse old notices.
+            (tmp_path / "js/textual.js").write_bytes(b"different bundle")
+            assert client.get("/venastine-static/js/textual.js").status_code == 503
+            (tmp_path / "css/xterm.css").write_bytes(b"different CSS")
+            assert client.get("/venastine-static/css/xterm.css").status_code == 503
+
     def test_end_to_end(self, tmp_path):
         from starlette.websockets import WebSocketDisconnect
 

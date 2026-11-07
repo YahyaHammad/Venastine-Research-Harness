@@ -64,7 +64,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 9192 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 9193 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -3195,15 +3195,17 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   and source files are out of scope entirely — widening to those turns it into
   `read` with no gate. But the set is not small: the tool takes a PATH, resolves
   anywhere under the project, and admits `.md`/`.markdown`/`.rst`/`.txt` plus ten
-  named build files, which on a clean checkout of this repository is **63 files
+  named build files, which on a clean checkout of this repository is **64 files
   and under 6 MB at depths 0-3**, including every agent and skill body under
   `agents/builtin/` and `skills/builtin/` and the whole of `docs/`. The 61st is
   `docs/REVIEW_MARATHON.md` (batch 129), and the per-scope review reports it
   governs are deliberately NOT tracked, so they do not move this figure at
   all -- that decision is recorded there and this is the number it was taken
   against. The 63rd is `deploy/hosted/requirements.txt` (batch 165), read
-  before it was counted: two pinned package names and why each is there --
-  what the hosted demo's bridge installs, nothing a pass could use. **It said 40
+  before it was counted: pinned package names and why each is there --
+  what the hosted demo's bridge installs. The 64th is
+  `deploy/hosted/browser-NOTICES.txt` (batch 242), the reviewed third-party
+  browser license texts, with no configuration or executable content. **It said 40
   files and ~1.1 MB until batch 128**, when it was re-measured through the
   tool's own `is_readable_doc` at 60 files and 3.58 MB -- a 3.3x
   understatement, and almost all of the growth is this record: `DEVLOG.md`

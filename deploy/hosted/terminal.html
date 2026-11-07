@@ -23,6 +23,8 @@
     .ended { display: none; }
     body.-closed .ended { display: flex; }
     body.-closed .starting { display: none; }
+    .licenses { position: absolute; bottom: 2px; right: 8px; z-index: 11;
+      color: #9fd3ff; font: 11px sans-serif; }
   </style>
 </head>
 <body>
@@ -33,6 +35,8 @@
   </div></div>
   <div id="terminal" class="textual-terminal" data-ticket="$ticket"
        data-font-size="16"></div>
+  <a class="licenses" href="$static/NOTICE.txt" target="_blank"
+     rel="noopener">Third-party licenses</a>
   <script>
     // textual.js connects on window.onload to `data-session-websocket-url`
     // plus "?width=..&height=..", so the ticket travels in the path. The
