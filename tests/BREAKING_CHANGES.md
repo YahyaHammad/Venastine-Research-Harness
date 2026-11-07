@@ -15,6 +15,15 @@ other name.
 
 ---
 
+## No real name lookups, and a throwaway home (batch 243)
+
+| Change | Test | Fix |
+|---|---|---|
+| A test reaches a real DNS lookup -- `fetch_url`, or anything behind `is_url_permitted(resolve=True)` | The test itself, at teardown: "looked up [...] through the real resolver" | Request `public_dns`, or patch `socket.getaddrinfo` in the test |
+| A test writes through HOME or USERPROFILE, or through a module path computed from the home at import | The test itself, at teardown: "wrote [...] into the home folder" -- or the next one, at setup, when a fixture wider than a test wrote it | Redirect HOME and USERPROFILE to `tmp_path`, or move the module path, as `test_config_update.py`'s `install` moves `config_update.CONFIG_HOME` |
+| Drop either autouse guard or the root conftest's `_throwaway_home`, or let a guard pass a test it should fail | `test_suite_isolation.py::test_each_guard_fails_exactly_the_test_that_crossed_it` | Put it back |
+| Rename `VENASTINE_SUITE_HOME` in one of the two conftests | `TestTheThrowawayHome::test_every_spelling_of_home_is_the_throwaway`, with a KeyError | Spell it the same in both: the root conftest cannot be imported from `tests/conftest.py` |
+
 ## anthropic 2.x and openai 3.x (batch 234)
 
 anthropic 2.1.0 sends API version 2026-10-21 and the key as
