@@ -30808,4 +30808,37 @@ across parallel workers).
   ruff clean, bandit 0 new (47 live) and its count check green, gitleaks
   clean on an export with CI's config; no requirement changed.
 
-- **Version:** `0.3.10-b.1.offline-suite.r917a9c2e519c`.
+**After the push (PR #281).**
+- **Opened into `codex/dependency-license-fixes`, not `main`,** at the
+  owner's request, so the two branches meet before either lands. Batch 242
+  was merged in: seven conflicts, all bookkeeping -- the stated count
+  (recounted: 9193, main's 9169 + 23 here + 1 there), both DEVLOG
+  sections (242, then 243), both BREAKING_CHANGES sections (newest first)
+  and the beta version (this branch's).
+- **CI's integration job failed on the guard, which was doing its job.**
+  `test_demo_bundle.py::test_the_image_holds_exactly_the_bundles_files`
+  wrote 338 files of uv's cache into the throwaway home: `bundle.build`
+  compiles the locks with a real uv, and uv keeps its cache under the home
+  on Linux and macOS (`~/.cache/uv`), but under `LOCALAPPDATA` on
+  Windows, which the redirect does not move. The test needs a Docker
+  daemon, so both local runs had skipped it. Fixed in the test --
+  `UV_CACHE_DIR` goes to `tmp_path`, as `test_installers.py`'s real-uv
+  tests already send it -- not in the root conftest: uv runs on an empty
+  cache, where rustup and Docker need their real homes. Reproduced in WSL
+  without Docker, since the failure is in the lock step that runs before
+  Docker is asked: a scratch probe calling `bundle.build` wrote
+  `.cache/uv` and failed `nothing_written_to_home`, and the same call with
+  the cache moved passed.
+- **And the pytest job, on two tests no machine here can run.**
+  `TestThePowerShellInstallerAsksUvForAPython` runs install.ps1 under
+  PowerShell 7 on Linux CI, and pwsh wrote its start-up cache
+  (`~/.cache/powershell`, with a telemetry id) and
+  `~/.local/share/powershell/Modules` into the home it inherited. Its
+  `_run` now gives pwsh a home in `tmp_path`, as `_run_launcher` already
+  does. Here the class runs on Windows PowerShell and still passes; the
+  pwsh half is proved by CI alone. The full Linux suite otherwise passed
+  on the runner: 9157 passed, 35 skipped, these 2 errors.
+- **The merged tree on Windows**, pinned venv, `AGENT_WORKSPACE` unset:
+  9105 passed, 88 skipped.
+
+- **Version:** `0.3.10-b.2.offline-suite.r917a9c2e519c`.
