@@ -31,6 +31,7 @@ import httpx
 from defusedxml import DefusedXmlException
 from pydantic import BaseModel, Field, field_validator
 
+from tools.builtin import _net_common
 from tools.builtin._net_common import MAX_URL_CHARS, ThirdPartyText, TTLCache
 
 logger = logging.getLogger(__name__)
@@ -241,7 +242,10 @@ def _call_arxiv_api(search_query: str, max_results: int, sort_by: str,
     is already in memory. Returns `str` as it always did, so every test that
     patches this function is unaffected by the change underneath it.
     """
-    with httpx.stream(
+    # ROADMAP_v3 §53: `httpx.stream`, admitted and counted against the tool
+    # meter. A refusal raises through `run()`'s except clauses, which name
+    # httpx's and the parser's errors only, to dispatch.
+    with _net_common.stream(
         "GET",
         ARXIV_API_URL,
         params={

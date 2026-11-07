@@ -73,6 +73,7 @@ from tools.builtin import (
     todo,
     web_search,
 )
+from tools.builtin._net_common import NetworkLimitReached
 
 logger = logging.getLogger(__name__)
 
@@ -891,6 +892,15 @@ class ToolRegistry:
                     tool_name=tool_name)
             else:
                 result = spec.handler(params, **injected)
+        except NetworkLimitReached as e:
+            # ROADMAP_v3 §53 (IO6). A refusal, not a failure: the model
+            # reads the meter's own sentence, which says what is full and
+            # when room returns, rather than "<tool> failed: ...". No
+            # traceback -- nothing is broken -- and no warning here, because
+            # the meter has already said it once for the whole run of
+            # refusals. ABOVE the containment below, which would otherwise
+            # log it as a crash.
+            result = {"error": e.reason}
         except Exception as e:  # noqa: BLE001 -- contained on purpose
             # A raising tool used to take the whole run down with it. In
             # chat that is a lost turn; in the research pipeline it is a

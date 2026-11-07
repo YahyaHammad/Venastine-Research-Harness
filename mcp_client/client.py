@@ -57,6 +57,7 @@ from mcp.shared.exceptions import MCPError
 
 import config as _harness_config
 from safety.policy_enforcement import TOKEN_CHARS, fragment_end
+from tools.builtin import _net_common
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,20 @@ class _TrackClose:
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _thread: Optional[threading.Thread] = None
 _loop_lock = threading.Lock()
+
+
+def _metered_mcp_client(headers=None, timeout=None, auth=None):
+    """The SDK's own MCP client, with the MCP meter's hooks on it (§53).
+
+    `sse_client`'s `httpx_client_factory` signature, so the one function
+    serves both HTTP transports. The SDK builds the client -- its timeouts,
+    its redirect rule -- and `event_hooks` is public on an httpx2 client,
+    so nothing here re-states what the SDK already decides.
+    """
+    client = create_mcp_http_client(headers=headers, timeout=timeout,
+                                    auth=auth)
+    client.event_hooks = _net_common.mcp_event_hooks()
+    return client
 
 
 def _ensure_loop() -> asyncio.AbstractEventLoop:
@@ -425,6 +440,16 @@ class MCPClient:
             # create_mcp_http_client defaults -- so an Authorization
             # header authenticates here too, never discarded (M19's
             # property holds on both HTTP transports).
+            #
+            # ROADMAP_v3 §53: with the MCP meter on, the SDK's own factory
+            # builds the client and the meter's hooks go on it, so its
+            # timeouts are the SDK's and only the counting is ours.
+            if _net_common.MCP.enabled():
+                return sse_client(
+                    cfg.url,
+                    headers=dict(cfg.headers) or None,
+                    httpx_client_factory=_metered_mcp_client,
+                )
             return sse_client(
                 cfg.url,
                 headers=dict(cfg.headers) or None,
@@ -449,10 +474,20 @@ class MCPClient:
             # whole (CONFIG_ARCHITECTURE.md has the measurement). The legacy
             # "sse" branch above keeps the SDK's fixed 1 MiB: `sse_client`
             # takes no size.
+            #
+            # ROADMAP_v3 §53: with the MCP meter on there is ALWAYS a client
+            # of ours, headers or not, because the hooks have to be on it.
+            # Built by the SDK's helper either way, so its timeouts hold.
+            if _net_common.MCP.enabled():
+                http_client = _metered_mcp_client(
+                    headers=dict(cfg.headers) or None)
+            elif cfg.headers:
+                http_client = create_mcp_http_client(headers=dict(cfg.headers))
+            else:
+                http_client = None
             return streamable_http_client(
                 cfg.url,
-                http_client=(create_mcp_http_client(headers=dict(cfg.headers))
-                             if cfg.headers else None),
+                http_client=http_client,
                 max_sse_event_size=_harness_config.MCP_MAX_EVENT_BYTES,
             )
         raise ValueError(cfg.error or "unusable server configuration")
@@ -616,6 +651,18 @@ class MCPClient:
         if client is None:
             reason = self.failures.get(server_name, "not connected")
             return {"error": f"MCP server {server_name!r} is unavailable: {reason}"}
+
+        # ROADMAP_v3 §53 (IO11). Admitted HERE, before anything is sent, and
+        # never in the HTTP hooks: a refusal raised inside the SDK would
+        # surface in its background writer and read as a timeout. Only the
+        # servers the meter can see are asked -- a "stdio" server's traffic
+        # is its own process's, and IO5 says so rather than pretending.
+        cfg = self.server_configs.get(server_name)
+        if getattr(cfg, "transport", None) in ("http", "sse"):
+            try:
+                _net_common.MCP.admit(_net_common.mcp_call_bytes(params))
+            except _net_common.NetworkLimitReached as e:
+                return {"error": e.reason}
 
         loop = _ensure_loop()
         protocol_timeout = max(1.0, timeout - _TIMEOUT_MARGIN_S)

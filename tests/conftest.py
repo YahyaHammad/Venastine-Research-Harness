@@ -744,6 +744,36 @@ def clear_network_tool_caches():
     drop()
 
 
+@pytest.fixture(autouse=True)
+def isolated_network_ledger(tmp_path_factory, monkeypatch):
+    """A fresh, TIMERLESS network ledger for every test (ROADMAP_v3 §53).
+
+    Every meter ships off, so most tests never touch this. It exists for
+    the ones that turn a meter on, and for two failures they would
+    otherwise reach. The module's own ledger is written into the user's
+    `~/.config/venastine`, which no test may touch; and its flush runs on a
+    real sixty-second timer, which is the wall-clock half of the TUI-flake
+    pair -- a flush firing into the next test, or a daemon thread left
+    holding the lock at the end of the run. A test that needs time to move
+    builds its own `Ledger` with a fake clock.
+
+    UNDER THE SESSION'S BASE TEMP, NOT `tmp_path`: requesting `tmp_path`
+    here would create a directory for each of nine thousand tests to hold a
+    file almost none of them write, and would put that file in the one
+    directory a test may list. The ledger makes its directory only when it
+    first flushes.
+    """
+    import uuid
+
+    from tools.builtin import _net_common
+
+    where = tmp_path_factory.getbasetemp() / f"ledger-{uuid.uuid4().hex}"
+    ledger = _net_common.Ledger(path=str(where / "network.db"),
+                                timers=False)
+    monkeypatch.setattr(_net_common, "LEDGER", ledger)
+    yield ledger
+
+
 def _clear(*names):
     """A reset for memos that are containers: empty each in place, so a
     name some other module imported keeps pointing at the live object."""

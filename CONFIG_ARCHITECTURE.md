@@ -191,6 +191,7 @@ list which is a decision rather than an omission.
 - [File-ops workspace (ROADMAP §6)](#file-ops-workspace-roadmap-6)
 - [/init (ROADMAP_v2 §24)](#init-roadmap_v2-24)
 - [MCP teardown (ROADMAP_v2 §37 F6, #64)](#mcp-teardown-roadmap_v2-37-f6-64)
+- [Network limits (ROADMAP_v3 §53)](#network-limits-roadmap_v3-53)
 - [Shell / sandbox (ROADMAP §7)](#shell-sandbox-roadmap-7)
 - [Output redaction (#167/#49, batch 20)](#output-redaction-16749-batch-20)
 - [Compaction (ROADMAP_v2 §21)](#compaction-roadmap_v2-21)
@@ -930,6 +931,89 @@ Streamable HTTP branches, because a bare URL takes the SDK's default. The
 legacy "sse" transport keeps the SDK's fixed 1 MiB: `sse_client` takes no
 size. An ordinary key rather than harness authority, like
 `max_read_chars`: it is a resource bound, not a permission.
+
+## Network limits (ROADMAP_v3 §53)
+
+Four keys: one window and three ceilings. Every ceiling ships at 0, and a
+meter at 0 admits every call, counts nothing and never opens the ledger, so
+a harness nobody has configured behaves exactly as it did before §53 and
+writes no file for it (IO1).
+
+### `network_window_hours`
+
+24, the owner's choice (IO8), and one window for all three meters rather
+than one each, also the owner's. No span of this length may exceed a
+meter's ceiling.
+
+The length was weighed both ways. A shorter window bounds a burst more
+tightly and frees room sooner, but over a day it lets through 24 / window
+times the ceiling: a "250 MB" read as per day is 1 GB a day at 6 hours,
+which a user finds out about by running out of data. A longer window maps
+straight onto an allowance, and its failure is loud instead -- a refusal
+that says when room returns, after a wait that can be the whole window.
+24 hours is the shortest period allowances are commonly sold in.
+
+The ledger's buckets are this window over 1,440 and never narrower than a
+minute (IO10): 60 s at 24 hours, 30 minutes at 30 days. A bucket that
+straddles the window's old edge counts whole, so a figure errs high by at
+most one bucket and never low.
+
+### `network_limit_tools_mb`
+
+The tool meter's ceiling. `fetch_url`, `arxiv_search` and the scholar
+lookup are counted at the wire through `_net_common.stream` and
+`_net_common.get`. `web_search` is charged an ESTIMATE, 21,000 bytes per
+result asked for (IO15, amending IO3), because `ddgs` talks through
+primp, which has no hook. Measured live through a counting proxy, five
+and ten results cost 85,746 and 206,637 bytes on the wire; IO3's "the size
+of what it returned" would have counted 1,967 and 2,445. Re-measure when
+`ddgs` moves, since which backends it queries decides the number.
+
+### `network_limit_provider_mb`
+
+The provider meter's ceiling: every model call -- chat, the research
+passes, the critic, the embedder -- through event hooks on each SDK's own
+HTTP client, which `core/client.py` builds with hooks only while this is
+set. The upload is the large part, because every step re-sends the thread,
+so this meter is admitted on what a request will SEND as well as on what is
+already used: an upload that would pass the ceiling is refused whole,
+before it leaves.
+
+### `network_limit_mcp_mb`
+
+The MCP meter's ceiling, for servers reached over `http` or `sse`. A
+`stdio` server is a child process whose sockets are its own, and is not
+counted. Admitted in `mcp_client.call_tool`, before a call is sent; the
+hooks on the client only count.
+
+**What all three share.** Decimal megabytes (1 MB = 1,000,000 bytes, as a
+carrier counts), and download and upload together, the way an allowance is
+charged (IO9). 0 is off, so each meter is enabled separately (IO1): a
+local Ollama or a local MCP server costs no allowance and should not be
+charged against one bought for a tether.
+
+**A call is checked before it starts** (IO11): refused when its meter is
+full or, where what it will send is known, when sending it would pass the
+ceiling. A response already in flight completes and is counted, so a meter
+can end a window over its ceiling by one response, and no body is ever cut
+part-way (IO6). A tool refusal reaches the model as the meter's own
+sentence, a provider refusal ends the turn with it and is never retried,
+and the transcript gets one warning for each run of refusals.
+
+**The ledger** is `~/.config/venastine/network.db`, shared by every
+harness process and subagent (IO10). It holds counts, never traffic, and
+deletes rows past the window on every write, so it stops at about 1,440
+rows per meter however much traffic there was. Counts reach it at most once
+a minute and only when something was counted (IO12); a crash loses at most
+that minute. A file that cannot be read or written does not turn a meter
+off: the process's own counts still enforce, and `/network` says the
+ledger is not in use.
+
+Not authority keys: a ceiling decides how much may be spent, which is
+`ensemble_mode`'s side of the line, not what may run. What none of them can
+count (IO5): shell commands (containers, WSL, SSH), `stdio` MCP servers,
+sign-in and token-refresh traffic, and TLS and TCP overhead. `/network`
+lists every meter, what it has used and when room returns.
 
 ## Shell / sandbox (ROADMAP §7)
 

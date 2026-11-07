@@ -6527,10 +6527,14 @@ class TestTheKeysWhileThePanelIsOpen:
             panel = app.query_one("#slash-suggest")
             prompt = app.query_one("#prompt")
 
-            await pilot.press("slash", "n")
+            # A prefix exactly one command has. This typed `/n` for `/new`
+            # until ROADMAP_v3 §53's `/network` sorted ahead of it (batch
+            # 239): the test is about tab completing, not about which
+            # command the alphabet puts first.
+            await pilot.press("slash", "q")
             assert await settle(pilot, lambda: panel.display)
             await pilot.press("tab")
-            assert await settle(pilot, lambda: prompt.value == "/new ")
+            assert await settle(pilot, lambda: prompt.value == "/quit ")
             assert app.focused is prompt, (
                 "tab moved focus as well as completing")
 

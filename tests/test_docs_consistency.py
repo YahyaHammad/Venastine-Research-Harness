@@ -2936,7 +2936,8 @@ def test_the_launcher_and_python_agree_about_the_config_state():
 # ---------------------------------------------------------------------------
 
 _SMALL_NUMBERS = {
-    "three": 3, "nine": 9, "eleven": 11, "twelve": 12, "fifteen": 15,
+    "three": 3, "nine": 9, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fifteen": 15,
     "nineteen": 19, "twenty-one": 21, "thirty-five": 35,
 }
 

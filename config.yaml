@@ -596,6 +596,39 @@ teardown_budget_s: 10.0
 mcp_max_event_bytes: 16777216
 
 # ======================================================================
+# Network limits
+# ======================================================================
+
+# A ceiling on what the harness pulls and pushes over any rolling window,
+# for a metered connection. Every ceiling ships at 0, which means no limit,
+# no counting and no file. Each one is in decimal megabytes (1 MB =
+# 1,000,000 bytes, the way carriers count) and covers both directions.
+#
+# Three meters, enabled separately, because they are not the same kind of
+# traffic: a local Ollama or a local MCP server costs no allowance.
+#   tools     fetch_url, arxiv_search, web_search and the scholar lookup.
+#   provider  every model call: chat, the research passes, the embedder.
+#             The upload is the big part, since every step re-sends the
+#             thread.
+#   mcp       MCP servers reached over "http" or "sse".
+#
+# A call is checked before it starts. One that would pass its ceiling is
+# refused with a reason, and one already running is never cut off, so a
+# meter can end up over by one response. Counts are kept in
+# ~/.config/venastine/network.db, shared by every harness process, and
+# written at most once a minute. Entries older than the window are deleted.
+#
+# What these CANNOT count: shell commands (containers, WSL, SSH), "stdio"
+# MCP servers, sign-in and token-refresh traffic, and TLS/TCP overhead.
+# web_search's figure is an estimate, measured at about 21 kB per result
+# asked for, because its client has no way to count. /network shows every
+# meter, what it has used, and when room returns.
+network_window_hours: 24
+network_limit_tools_mb: 0
+network_limit_provider_mb: 0
+network_limit_mcp_mb: 0
+
+# ======================================================================
 # Shell and sandbox
 # ======================================================================
 

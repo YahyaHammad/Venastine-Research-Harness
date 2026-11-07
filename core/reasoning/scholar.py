@@ -51,7 +51,8 @@ import re
 from datetime import date, timedelta
 
 import config
-from tools.builtin._net_common import TTLCache
+from tools.builtin import _net_common
+from tools.builtin._net_common import NetworkLimitReached, TTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -233,9 +234,11 @@ class ScholarLookup:
         INJECTABLE, and every test injects: the suite runs offline, and a
         scoring rule tested through a real socket is a scoring rule tested
         on somebody's connection.
-        """
-        import httpx
 
+        `_net_common.get` is `httpx.get`, admitted and counted against the
+        tool meter (ROADMAP_v3 §53), which imports httpx lazily for the
+        reason this function used to.
+        """
         from safety.policy_enforcement import is_url_permitted
 
         url = f"{config.SCHOLAR_API_URL.rstrip('/')}/{path.lstrip('/')}"
@@ -247,7 +250,7 @@ class ScholarLookup:
             # git config or an environment variable is not a rate-limit
             # optimisation, it is an unasked-for disclosure.
             params = {**params, "mailto": config.SCHOLAR_MAILTO}
-        response = httpx.get(
+        response = _net_common.get(
             url, params=params, timeout=config.SCHOLAR_TIMEOUT_S,
             headers={"User-Agent": "venastine-research-harness/1.0"},
             follow_redirects=True)
@@ -267,6 +270,12 @@ class ScholarLookup:
         for _ in range(config.SCHOLAR_MAX_RETRIES + 1):
             try:
                 payload = self._fetch(path, params)
+            except NetworkLimitReached as exc:
+                # §53. Refused the same way on every attempt, so not
+                # retried; the lookup degrades for this run as an outage
+                # does, and the meter has already said why, once.
+                last = exc
+                break
             except Exception as exc:  # noqa: BLE001 - degraded, never fatal
                 last = exc
                 continue

@@ -12,7 +12,13 @@ from ddgs import DDGS
 from pydantic import BaseModel, Field, field_validator
 
 from safety.policy_enforcement import is_url_permitted
-from tools.builtin._net_common import MAX_URL_CHARS, ThirdPartyText, TTLCache
+from tools.builtin import _net_common
+from tools.builtin._net_common import (
+    MAX_URL_CHARS,
+    NetworkLimitReached,
+    ThirdPartyText,
+    TTLCache,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,8 +133,17 @@ def _call_ddgs(query: str, num_results: int, page: int = 1) -> list[dict]:
     same day: zero overlap), so a page here is "more results", not "the next
     five distinct results", and nothing downstream may assume otherwise.
     """
-    with DDGS(timeout=REQUEST_TIMEOUT_S) as ddgs_client:
-        return ddgs_client.text(query, max_results=num_results, page=page)
+    # ROADMAP_v3 §53. Admitted against the tool meter before the search,
+    # and charged IO15's measured estimate after it, success or not: a
+    # failed attempt still spent most of what a good one does. `ddgs` talks
+    # through primp, which has no hook, so this is the one tool whose figure
+    # is not counted at the wire.
+    _net_common.TOOLS.admit()
+    try:
+        with DDGS(timeout=REQUEST_TIMEOUT_S) as ddgs_client:
+            return ddgs_client.text(query, max_results=num_results, page=page)
+    finally:
+        _net_common.record_web_search(num_results)
 
 
 def _normalize(raw: list[dict]) -> list[SearchResult]:
@@ -284,6 +299,11 @@ def run(params: dict) -> dict:
                 results = _kept(_normalize(raw), parsed.num_results)
                 _cache.set(cache_key, results)
                 break
+            except NetworkLimitReached:
+                # §53 (IO6). A full meter is not weather: another attempt
+                # is refused the same way. Raised on, for dispatch to turn
+                # into the result the model reads.
+                raise
             except Exception as e: # Simpler to try again then elaborate on every error type
                 last_exc = e
                 logger.warning(

@@ -6,6 +6,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from safety.policy_enforcement import is_url_permitted, redact_output_text
+from tools.builtin import _net_common
 from tools.builtin._net_common import MAX_URL_CHARS, TTLCache
 
 logger = logging.getLogger(__name__)
@@ -317,8 +318,10 @@ def run(params: dict) -> dict:
             # MAX_CONTENT_BYTES instead of being buffered whole and then
             # sliced. read_run's guard is the model: bound before, not
             # after.
-            with httpx.stream("GET", url, timeout=REQUEST_TIMEOUT_S,
-                              follow_redirects=False) as response:
+            # ROADMAP_v3 §53: `_net_common.stream` is `httpx.stream`,
+            # admitted and counted against the tool meter, once per hop.
+            with _net_common.stream("GET", url, timeout=REQUEST_TIMEOUT_S,
+                                    follow_redirects=False) as response:
                 if response.is_redirect:
                     # .next_request is None on a redirect with no usable
                     # Location; treat that as the end of the chain rather

@@ -43,6 +43,18 @@ Everything else is NOT: a bad request, an auth failure or an unknown model
 fails identically on every attempt, and a harness error -- D21's
 RuntimeError, a ValueError from message translation -- is a bug, not
 weather, and retrying it would only delay the traceback.
+
+A NETWORK-LIMIT REFUSAL IS NEVER TRANSIENT, AND IT IS FOUND IN THE CHAIN
+(ROADMAP_v3 §53, batch 239). The provider meter refuses inside the SDK's
+own HTTP client, and the SDKs do not agree on what that looks like from
+here: openai and google-genai raise the refusal itself, while anthropic
+wraps it -- measured -- as `APIConnectionError("Connection error.")`, its
+cause the refusal, after two retries of its own that the meter refuses at
+zero bytes. Read at the top only, that is a connection failure, retried
+twice more here with a wait, and then described as "Connection error.",
+which says nothing true. So both questions this module answers walk
+`__cause__` / `__context__` first: a refusal anywhere in the chain is not
+worth another attempt, and its own sentence is the description.
 """
 
 from random import random
@@ -90,6 +102,27 @@ _NEVER_TRANSIENT_NAMES = frozenset({"APIResponseValidationError"})
 
 def _names(exc: BaseException) -> set:
     return {cls.__name__ for cls in type(exc).__mro__}
+
+
+#: By NAME, for the reason above: this module imports nothing of the
+#: harness's tools either, and the class lives in `tools/builtin/_net_common`.
+_REFUSAL_NAME = "NetworkLimitReached"
+
+
+def network_refusal(exc: BaseException) -> Optional[BaseException]:
+    """The network-limit refusal in `exc`'s chain, or None (§53).
+
+    Bounded, because a chain can be a cycle: an exception raised while
+    handling itself is its own `__context__`.
+    """
+    seen: set = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        if _REFUSAL_NAME in _names(current):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
 
 
 def _as_status(value) -> Optional[int]:
@@ -141,6 +174,8 @@ def _body_verdict(body) -> Optional[bool]:
 
 def is_transient(exc: BaseException) -> bool:
     """Would the same call plausibly succeed if simply made again?"""
+    if network_refusal(exc) is not None:
+        return False
     names = _names(exc)
     if names & _NEVER_TRANSIENT_NAMES:
         return False
@@ -226,7 +261,12 @@ def describe(exc: BaseException) -> str:
     and the retry warning, so the three never describe the same exception
     three ways. Not redacted: every caller that shows or
     stores it redacts the whole line it is part of.
+
+    A network-limit refusal is described as ITSELF wherever it sits in the
+    chain (§53): under anthropic the top of the chain is a connection error
+    whose message is "Connection error.", and the refusal is the cause.
     """
+    exc = network_refusal(exc) or exc
     text = " ".join(str(exc).split())
     if len(text) > DESCRIBE_LIMIT:
         text = text[:DESCRIBE_LIMIT - 1].rstrip() + "…"

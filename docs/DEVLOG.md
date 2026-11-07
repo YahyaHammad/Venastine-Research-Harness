@@ -30353,3 +30353,139 @@ failed too.
   `0.3.8-b.1.pick-instead-of-typing.re6694bf76706`. `main` still carries
   batch 237's beta, because #277's release only rehearsed; this merge's
   `release.yml` run is what should take `main` to 0.3.9.
+
+
+## Batch 239 -- a rolling bound on what the harness pulls and pushes (2026-11-07)
+
+**ROADMAP_v3 §53, IO8-IO15.** The owner asked for another open roadmap
+section and chose §53 from the three: a ceiling on network traffic for a
+metered connection, unlimited by default. IO1-IO7 were already locked; this
+batch settled the five shapes they left open, built it, and amended IO3
+after measuring it.
+
+### Settled with the owner
+
+- **IO8, the window.** One window for all three meters, 24 hours by
+  default. The owner asked whether 6-12 hours was more sensible, so both
+  directions were laid out. A shorter window bounds a burst tightly and
+  frees room sooner but admits 24 / window times the ceiling in a day. A
+  longer one maps onto an allowance and fails loudly. Too short fails
+  silently, so 24 hours.
+- **IO9, the ceilings.** One per meter, in decimal megabytes, covering
+  download and upload together; 0 is off.
+- **IO10, the ledger.** Persisted and machine-wide, in SQLite at
+  `~/.config/venastine/network.db`. The owner's condition: it must not grow
+  with the traffic or thrash the disk. It holds counts in buckets of the
+  window over 1,440, deletes rows past the window on every write, and so
+  stops at about 1,440 rows per meter whatever the volume.
+- **IO11, enforcement.** Checked before a call starts, on what it will send
+  as well as what is used; a response in flight is never cut.
+- **IO12, writes.** At most once a minute, only when something was counted.
+- **IO13, display.** A sidebar line while any meter is on, and `/network`
+  in both shells.
+- **IO15, `web_search`.** See below; the owner chose the amendment.
+
+IO14, hooks rather than a transport and only while a meter is on, follows
+from a measurement rather than a question.
+
+### Built
+
+- **`tools/builtin/_net_common.py`** gained the meter, beside the cache, for
+  IO2's reason: `Meter` (a ceiling read from `config` at call time),
+  `Ledger`, `NetworkLimitReached`, the HTTP/1.1 sizing of an exchange,
+  `stream` and `get` for the tools' own `httpx` calls, the provider and MCP
+  event hooks, `network_report` and `sidebar_text`.
+- **The tools.** `fetch_url` and `arxiv_search` stream through the meter and
+  the scholar lookup gets through it. `web_search` is admitted in
+  `_call_ddgs` and charged the estimate after each attempt. A refusal is
+  raised; `web_search`'s catch-all retry loop re-raises it, the scholar
+  lookup stops at it, and `registry.dispatch` returns its sentence above the
+  crash containment.
+- **The provider.** `core/client.py`'s `_metered` gives each SDK its own
+  `DefaultHttpxClient` with the hooks (anthropic, openai, the ChatGPT plan),
+  or google-genai an httpx2 client that follows redirects, and only while
+  the provider ceiling is set. `core/provider_errors` reads a refusal out of
+  an exception's chain.
+- **MCP.** `mcp_client` puts the counting hooks on the SDK's own client for
+  `http` and `sse` servers and admits a call in `call_tool`. `stdio` is not
+  asked.
+- **What a person reads.** `NetworkLine` under the usage line, held at
+  mount and repainted at most once a second; `/network` in both shells,
+  both printing `network_report()`. `config.yaml`, `CONFIG_ARCHITECTURE.md`
+  and `docs/SECURITY.md` write IO5's list down.
+
+### Measured before it was written
+
+- **The SDKs.** All three take an httpx2 client and call both hooks for a
+  request, a stream and an embedding, so every provider figure is exact and
+  IO4's token-derived branch is unneeded (the section had been written
+  against google-genai 1.0.0). A refusal raised in the hook comes back as
+  itself from openai and google-genai; anthropic wraps it as
+  `APIConnectionError("Connection error.")` after two retries of its own,
+  1.4 s, which is why `provider_errors` reads the chain.
+- **The wire, against a real local server.** A gzipped 50,000-byte page
+  counted 143 bytes; chunked framing is not counted; a redirect hop's body
+  is.
+- **A wrapped transport is wrong both ways** (httpx2 2.16.0). With
+  `HTTPS_PROXY` set and no transport passed, the client mounts a proxy
+  transport a wrapper never sees; pass a transport and the client drops the
+  environment's proxy. Hooks see every hop. The first draft of the code
+  comment claimed the first half as measured before it was; it now says
+  what was.
+- **`web_search` through a counting proxy.** `ddgs` talks through primp,
+  which has no hook. Two live searches cost 85,746 and 206,637 bytes on the
+  wire against 1,967 and 2,445 bytes returned: IO3's "the size of what it
+  returned" would have undercounted 44x and 85x. Put to the owner; IO15
+  charges 21,000 bytes per result asked for, labelled an estimate.
+
+### Caught on the way
+
+- **Truncation.** The first `ceiling()` truncated megabytes times a million,
+  and its test used 0.000003 MB, which happens to be exactly 3.0 in binary
+  floating point -- so mutation M2 survived. 2.01 MB is 2,009,999.9999999998,
+  which truncation makes 2,009,999. Rounded now, and the test uses 2.01.
+- **A mutation the harness called INVALID was a real detection.** Building a
+  provider client with hooks while the meter is off raised an ImportError
+  from the suite's fake SDK; the test now supplies the factory and asserts
+  it is never called, so the same mutation fails on an assertion.
+- **`/network` sorted ahead of `/new`.** `test_tab_completes_while_it_is_open`
+  typed `/n` and expected `/new `; it types `/q` for `/quit` now, a prefix
+  one command has.
+
+### Not changed
+
+Recorded in §53's gap register: anthropic's two retries of a refusal (1.4 s,
+zero bytes); concurrent calls can both be admitted against the same room;
+two installs with different windows prune to the shorter; the sidebar does
+not see another process until an event repaints it; bytes already in a
+socket buffer when `fetch_url` stops at its cap. The ceilings are not
+authority keys: a ceiling decides how much may be spent, `ensemble_mode`'s
+side of the line.
+
+### Verified
+
+- **Tests:** 70 new in `tests/test_network_limit.py`. `test_config_edit.py`'s
+  settable-scalar count went from 152 to 156, and ARCHITECTURE.md's figure
+  with it; `test_tab_completes_while_it_is_open` changed its prefix.
+- **Mutations:** 43 on an export of the working tree, every one red on its
+  assertion, and a reworded comment as a green control. `__pycache__` was
+  removed from the export and bytecode writing turned off, so no stale
+  `.pyc` could un-apply a same-length mutation.
+- **Full suite** (the batch 234 venv): 8983 passed, 79 skipped, with
+  `AGENT_WORKSPACE` unset. The first run failed five: four documentation
+  gates this batch owed (the count, the tree, the new decision ids, the
+  held-widget count) and the tab-completion test above. The second failed
+  one: the held-set gate's word parser stopped at twelve, and its message
+  says to extend `_SMALL_NUMBERS`, which now has thirteen.
+- **Static checks:**
+  - ruff is clean.
+  - bandit as CI runs it, new files included: the first pass found one new
+    B110, a `try/except/pass` around httpx's raising `Response.request`.
+    Replaced with an accessor that returns None, not baselined: 0 new, 47
+    live, as before.
+  - gitleaks with `.github/gitleaks.toml`, as CI runs it, on an export of
+    the tracked and new files: no leaks. Run without that config it flags
+    the public `hf_oauth_client_id`, on `main` as well.
+  - pip-audit not re-run: no requirements file changed.
+- **Version**, by `scripts/version.py branch` then `bump`:
+  `0.3.9-b.1.network-byte-limit.r9cd3a68c74e1`.

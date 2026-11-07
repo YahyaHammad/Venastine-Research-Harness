@@ -126,6 +126,7 @@ from tui.widgets import (
     CallSelected,
     EffortRaven,
     GoalBanner,
+    NetworkLine,
     PostureBadge,
     PromptInput,
     RavenPanel,
@@ -990,6 +991,10 @@ class VenastineApp(App):
         # gated call of a session died in refresh_usage_line with
         # NoMatches. None until mounted, like the four above.
         self._usage_widget: UsageLine | None = None
+        # ROADMAP_v3 §53, held for the same reason, and refreshed from the
+        # same per-event path at most once a second (`_network_drawn_at`).
+        self._network_widget: NetworkLine | None = None
+        self._network_drawn_at = 0.0
         self._raven_widget: RavenPanel | None = None
         # Goal banner, checklist and research progress, held for the same
         # reason: refresh_goal_banner/refresh_todo_panel run off notice
@@ -1237,6 +1242,9 @@ class VenastineApp(App):
                 # #4: billed-since-resume and current context size, one
                 # line. Hidden until a turn produces figures.
                 yield UsageLine(id="usage-line")
+                # ROADMAP_v3 §53: the network meters, under the figures
+                # they read with. Hidden while every meter is off.
+                yield NetworkLine(id="network-line")
                 if self._todo_position not in ("top", "bottom"):
                     yield TodoPanel(id="todo-panel")
                 yield ResearchProgress(id="research-progress")
@@ -1250,6 +1258,7 @@ class VenastineApp(App):
         # what makes that survivable.
         self._transcript_widget = self.query_one("#transcript", Transcript)
         self._usage_widget = self.query_one("#usage-line", UsageLine)
+        self._network_widget = self.query_one("#network-line", NetworkLine)
         self._raven_widget = self.query_one("#raven", RavenPanel)
         self._goal_widget = self.query_one("#goal-banner", GoalBanner)
         self._todo_widget = self.query_one("#todo-panel", TodoPanel)
@@ -1293,6 +1302,8 @@ class VenastineApp(App):
         self.refresh_todo_panel()
         self.refresh_agent_panel()
         self.refresh_status()
+        # A meter already full from an earlier session shows at once.
+        self.refresh_network_line(force=True)
         # §79. A hosted session's screen goes to a browser over the
         # network, and a blinking cursor is two redraws a second to a tab
         # nobody is typing in (RavenPanel's `still_when_idle` says what that
@@ -3583,6 +3594,33 @@ class VenastineApp(App):
             self._memory.billed_tokens, self._memory.last_input_tokens,
             ceiling, overridden, window)
 
+    def refresh_network_line(self, force: bool = False) -> None:
+        """ROADMAP_v3 §53 (IO13): repaint the network meters' line.
+
+        AT MOST ONCE A SECOND unless forced. The per-event path calls this
+        on every token delta, and a meter's state is a walk over its
+        buckets -- cheap once, not cheap a hundred times a second for a
+        figure that only moves when a request starts or a chunk lands.
+        Forced on mount and on a final response, so a turn always ends
+        with the line current.
+
+        Contained, like the usage line: a sidebar figure must never be the
+        reason a turn dies.
+        """
+        widget = self._network_widget
+        if widget is None:
+            return
+        now = monotonic()
+        if not force and now - self._network_drawn_at < 1.0:
+            return
+        self._network_drawn_at = now
+        try:
+            from tools.builtin import _net_common
+
+            widget.update_meters(_net_common.states())
+        except Exception:  # noqa: BLE001 -- see above
+            logger.debug("network line refresh failed", exc_info=True)
+
     def on_agent_stack_changed(self, message: AgentStackChanged) -> None:
         """The sink spoke. Runs on the UI thread."""
         self._agent_stack = message.stack
@@ -3739,6 +3777,7 @@ class VenastineApp(App):
             logger.debug("loop event [%s] with %d screen(s) on the stack",
                          kinds, depth)
         self.refresh_usage_line()
+        self.refresh_network_line(force=event.final_response is not None)
         # Batch 61. Counted whether or not the renderer draws it: the
         # commit cap withholds a table from its header row with no
         # HOLD_LIMIT to bound it, and a figure that stopped there
@@ -6100,6 +6139,20 @@ def _cmd_window(app: VenastineApp, args: str) -> None:
             "value.")
 
 
+def _cmd_network(app: VenastineApp, args: str) -> None:
+    """ROADMAP_v3 §53 (IO13): every network meter, its use and its room.
+
+    The lines are `_net_common.network_report`'s, which the CLI prints
+    too. Read-only: a ceiling is set in config.yaml, like every other
+    limit, so there is no argument to take.
+    """
+    from tools.builtin import _net_common
+
+    for line in _net_common.network_report():
+        app._transcript.write_system(line)
+    app.refresh_network_line(force=True)
+
+
 def _cmd_trigger(app: VenastineApp, args: str) -> None:
     """Override the working-set compaction ceiling for this session.
 
@@ -8273,6 +8326,7 @@ def register_builtin_commands() -> None:
         bind("compact", _cmd_compact),
         bind("window", _cmd_window),
         bind("trigger", _cmd_trigger),
+        bind("network", _cmd_network),
         bind("config", _cmd_config, complete=_config_rows),
         bind("secrets", _cmd_secrets),
         bind("claims", _cmd_claims),

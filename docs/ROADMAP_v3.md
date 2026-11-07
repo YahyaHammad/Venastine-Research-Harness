@@ -34,7 +34,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§50. Declared network for a shell command** — **(BUILT in batch 99)** (the network detector reads command TEXT against a fourteen-word list, so a command it cannot see is auto-approved into `--network none` and fails with no way for the user to have allowed it)
 - **§51. Paging for network tool results** — **(BUILT in batch 105)** (`fetch_url` and `arxiv_search` truncate with no offset, so the agent cannot reach past the first page without shelling out to a raw HTTP request)
 - **§52. Redact before the cut, and a bound on the held body** — **(BUILT in batch 106)** (§51 cut the page out of the body before the redactor saw it, so a credential straddling character 5,000 reached the corpus whole; and the body it began holding was unredacted, in a cache whose entry count nothing bounded)
-- **§53. A rolling bound on what the harness pulls and pushes** — **(NOT BUILT: requested batch 122, specified, not designed)** (nothing anywhere counts a byte over the wire, so a user on a metered connection has no ceiling and a tool that fetches something enormous is bounded only by one tool's own per-request cap)
+- **§53. A rolling bound on what the harness pulls and pushes** — **(BUILT in batch 239)** (nothing anywhere counts a byte over the wire, so a user on a metered connection has no ceiling and a tool that fetches something enormous is bounded only by one tool's own per-request cap)
 - **§54. `@` names a file, and the tree is read once** — **(BUILT in batch 204)** (project paths and folders complete in the existing panel; names guide the agent to read, without loading contents)
 - **§55. The whole command, and what it printed** — **(BUILT in batch 125)** (a shell call shows a 140-character digest and its output is never rendered at all, so what the agent ran and what came back are both off screen)
 - **§56. A decision model as the shell classifier** — **(NOT BUILT: requested batch 122, specified, not designed)** (the gate decides from a word list and a token scan, so every judgement it cannot express as a rule costs an approval prompt, and the rules cannot be tuned per user)
@@ -954,6 +954,9 @@ default: a ceiling for users on a metered connection, and defence in depth again
 pushing something enormous. Specified here to the depth the owner's answers support; the design
 round that locks the remaining shapes happens when it is picked up (the §49 cycle).
 
+**Designed with the owner and built in batch 239** -- the five open questions below are IO8-IO13,
+and a live measurement of `web_search` amended IO3 as IO15.
+
 ### What the code does today
 
 - **Nothing counts a byte.** There is no rate limiter, quota, budget or byte accounting anywhere in
@@ -996,6 +999,72 @@ round that locks the remaining shapes happens when it is picked up (the §49 cyc
   "how much has this cost" instruments already live.
 - Whether a refusal stops the one tool or every network tool for the rest of the window.
 
+### Settled with the owner (batch 239, IO8-IO15)
+
+The five questions above were put to the owner with the code they depend on. The window's length
+was discussed in both directions first, and the ledger's answer came with a condition of the
+owner's own: that it must not grow with the traffic or wear the disk. A live measurement then
+contradicted IO3's estimate, and the owner chose the amendment (IO15).
+
+| # | Decision |
+|---|---|
+| **IO8** | **One window for all three meters, 24 hours by default** (`network_window_hours`). The owner asked whether 6-12 hours was more sensible, and the two directions were weighed. A shorter window bounds a burst more tightly and frees room sooner, but over a day it admits 24 / window times the ceiling, so a "250 MB" read as per day is 1 GB a day at 6 hours -- a failure nobody sees until the allowance is gone. A longer one maps straight onto an allowance and fails LOUDLY instead, with a refusal that says when room returns. Too short fails silently and too long fails loudly, which is the asymmetry this project always resolves the same way. 24 hours is the shortest period allowances are commonly sold in |
+| **IO9** | **One ceiling per meter, in decimal megabytes, covering both directions; 0 is off.** Per meter, so a runaway MCP server cannot starve the model calls and a refusal can name what is full; the allowance is their sum. Both directions in one ceiling, the way an allowance is charged -- and the provider's traffic is mostly upload, because every step re-sends the thread, which a download-only cap would never see. Decimal, because carriers count that way |
+| **IO10** | **The ledger is persisted and machine-wide: `~/.config/venastine/network.db`, shared by every harness process and subagent.** A counter in memory is emptied by quitting, which is the per-run reset IO7 rejects. SQLite rather than a JSON file, because two processes flushing one bucket must BOTH count, and an atomic replace of a read-modify-write keeps only the last writer's figure. THE OWNER'S CONDITION: it holds counts, never traffic, in buckets of the window over 1,440 (never under a minute), and rows past the window are deleted on every write -- so it stops at about 1,440 rows per meter whatever the volume, and 50 MB a day adds to an integer rather than to the file |
+| **IO11** | **A call is checked BEFORE it starts, and never cut once running.** Refused when its meter is full or, where what it will send is known, when sending it would pass the ceiling -- which is exact for the provider, whose request is sized in the hook before it leaves. A response already in flight completes and is counted, so a meter can end a window over by one response. A half-read body is the spliced-document failure PG5 exists to prevent, and a model stream stopped halfway ends a turn on a refusal partway through an answer |
+| **IO12** | **Written at most once a minute, and never while idle.** Counts gather in memory; the first one after a flush starts a one-shot timer, and the flush is one transaction of a few rows. A refusal decision reads memory, never the disk, and the file is read again only when the last read is a minute old. The owner's other condition, about write wear: the worst case is about 1,440 small commits a day, and with every meter off there is no file at all. The cost is stated: another process's traffic can be a minute late here, and a crash loses at most a minute of counts |
+| **IO13** | **The figure is shown in the sidebar and by `/network`, in both shells.** A `net · tools 1.2M/500M · per 24 h` line under the usage line while any meter is on, hidden otherwise, coloured as a warning when a meter is full; `/network` lists each meter's use, its ceiling, what of it is an estimate and when room returns, then IO5's list |
+| **IO14** | **Event hooks on each SDK's own HTTP client, and only while that meter is on.** Not a wrapped transport, and both halves of the reason were measured on httpx2 2.16.0: with `HTTPS_PROXY` set the client mounts a proxy transport of its own, which a wrapper on the default one never sees, and passing a transport instead makes the client DROP the environment's proxy. With the meter off, every SDK builds the client it always built -- nobody who has not set a limit runs a different HTTP stack because this exists |
+| **IO15** | **`web_search` is charged 21,000 bytes per result asked for, amending IO3** (the owner's choice). IO3 said its figure is "the size of what it returned". Measured live through a counting CONNECT proxy, five and ten results cost 85,746 and 206,637 bytes on the wire against 1,967 and 2,445 bytes of rows returned -- an undercount of 44x and 85x, which is IO3's own argument against it: a cap that silently undercounts one of its inputs is found out by overrunning the allowance. The higher ratio, rounded up, so the estimate leans high. Still labelled an estimate wherever it is shown, and re-measured when `ddgs` moves |
+
+### Built and measured (batch 239, 2026-11-07)
+
+- **The meter** is `tools/builtin/_net_common.py`'s (IO2): `Meter`, `Ledger`, `NetworkLimitReached`,
+  the sizing functions and the report. A meter reads its ceiling from `config` at call time; with
+  no ceiling it admits everything, counts nothing and never opens the ledger.
+- **The tools.** `fetch_url` and `arxiv_search` stream through `_net_common.stream` and the scholar
+  lookup reads through `_net_common.get`, which admit, call `httpx`, and count every hop off the
+  response: request line, headers and body, status line, headers, and `num_bytes_downloaded`.
+  `web_search` is admitted in `_call_ddgs` and charged IO15's estimate after the call, success or
+  not. A refusal is RAISED, and three places stop it being retried or flattened: `web_search`'s
+  retry loop re-raises it, the scholar lookup stops at it, and `registry.dispatch` returns its own
+  sentence as the result, above the containment that would log it as a crash.
+- **The provider.** `core/client.py`'s `_metered` hands each SDK its own `DefaultHttpxClient`
+  (anthropic, openai, and the ChatGPT plan's openai client) or, for google-genai, an httpx2 client
+  that follows redirects as genai's own does, each with `provider_event_hooks`. `core/
+  provider_errors` finds a refusal anywhere in an exception's chain: never transient, described
+  in its own words.
+- **MCP.** `mcp_client` puts `mcp_event_hooks` on the SDK's own client for `http` and `sse`
+  servers, through `create_mcp_http_client` so the timeouts stay the SDK's, and admits a call in
+  `call_tool` before anything is sent. A `stdio` server is not asked.
+- **What a person reads.** `tui/widgets.py`'s `NetworkLine`, held at mount like the usage line and
+  repainted from the same per-event path at most once a second; `/network` in both shells, which
+  both print `network_report()`.
+- **Not authority keys.** A ceiling decides how much may be spent, which is the side of the line
+  `ensemble_mode` sits on, not what may run.
+
+Measured before it was written, all against the suite's pins (anthropic 2.1.0, openai 3.36.0,
+google-genai 2.32.0, httpx2 2.16.0, mcp 2.3.0, ddgs 9.16.0):
+
+- **The SDKs and their clients.** All three accept an httpx2 client (google-genai an httpx one as
+  well), and all three call both hooks for an ordinary request, a stream and an embedding -- so
+  IO4's "derived from token counts" branch is not needed: every provider figure is exact. The
+  `google-genai==1.0.0` this section was written against has since moved to 2.32.0. A refusal
+  raised in the request hook: openai and google-genai raise it as itself, at once; anthropic wraps
+  it as `APIConnectionError("Connection error.")`, its cause the refusal, after two retries of its
+  own that the meter refuses at zero bytes (1.4 s) -- which is why `provider_errors` reads the
+  chain.
+- **The wire, against a real local server.** A 50,000-byte page served gzipped counted 143 bytes
+  in the hook and in `num_bytes_downloaded`; a chunked body counted its payload without the
+  framing; a redirect hop's 5-byte body was counted. A `MockTransport` response built with
+  `content=` is read at construction and counts nothing, so the tests stream their bodies.
+- **`ddgs` speaks through primp**, a Rust HTTP client with no hook, which is IO3's premise; and the
+  wire cost per result that became IO15.
+
+70 tests in `tests/test_network_limit.py`. Two existing tests moved: `test_config_edit.py`'s
+settable-scalar count went from 152 to 156, and `test_tab_completes_while_it_is_open` types `/q`
+for `/quit`, because `/network` now sorts ahead of `/new` under `/n`.
+
 ### Gap register
 
 - **The estimate and the exact figure are added together.** IO3 is honest about which input is which,
@@ -1004,6 +1073,21 @@ round that locks the remaining shapes happens when it is picked up (the §49 cyc
 - **A limit protects the allowance, not the machine.** It cannot stop a shell command, which is where
   an agent would reach for a large download if the tool route refused it. §50's declared-network flag
   is the control on that path and it is binary.
+- **anthropic retries a refusal twice before it surfaces.** The meter refuses each retry at zero
+  bytes, so nothing is spent, but the refusal reaches the transcript about 1.4 s late. The SDK's
+  own retry decides that; passing `max_retries=0` would also remove its retries of real failures.
+- **Concurrent calls can both be admitted.** Admission and counting are two steps, so subagents
+  running in parallel can each be admitted against the same room. The overshoot is bounded by
+  `subagent_max_parallel` responses.
+- **Two installs with different windows prune to the shorter one.** The ledger is machine-wide and
+  each process deletes what is past ITS window, so a longer window set elsewhere loses history
+  older than the shorter one.
+- **The sidebar does not see another process's traffic until an event repaints it.** It refreshes
+  on this process's loop events; a timer would be a wall-clock repaint in every test. `/network`
+  reads the ledger afresh.
+- **Bytes the kernel received after a read stopped early are not counted.** `fetch_url` stops at its
+  64 KB cap and closes; what was already in the socket buffer crossed the wire and is in no
+  figure. IO5's list says so.
 
 ---
 
