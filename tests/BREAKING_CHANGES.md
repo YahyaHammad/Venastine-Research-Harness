@@ -15,6 +15,13 @@ other name.
 
 ---
 
+## yarn, bun and pnpm installs in README (batch 245)
+
+| Change | Test | Fix |
+|---|---|---|
+| Drop `--backend=copyfile` from README's bun install or `--config.package-import-method=copy` from its pnpm install | `test_readme_has_bun_and_pnpm_copy_the_package_rather_than_link_it` | Put the flag back: without it the package is hardlinked out of that manager's cache, outside the protected install tree |
+| Remove one of the three package managers from README, or name another package | `test_readme_has_bun_and_pnpm_copy_the_package_rather_than_link_it` | Keep yarn, bun and pnpm, each installing package.json's name, or change the test's expected set with the reason |
+
 ## Badges, keywords and llms.txt held to the package metadata (batch 244)
 
 | Change | Test | Fix |

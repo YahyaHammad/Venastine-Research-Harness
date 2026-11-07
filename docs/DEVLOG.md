@@ -30957,7 +30957,7 @@ since it barely touches what a user runs.
 
 - **Version:** `0.3.11`, unchanged; label the pull request `release:skip`.
 
-## Batch 245 -- the title and the badges above the screenshot (2026-11-08)
+## Batch 245 -- the badges above the screenshot, and installing with yarn, bun or pnpm (2026-11-08)
 
 **Why.** After PR #282 merged, the owner asked whether the badges belonged
 at the top. In the owner's screenshot of the GitHub page, the terminal
@@ -30978,10 +30978,55 @@ domain sciences: tool-using chat plus a ten-pass pipeline that fact-checks
 and scores its own claims." The website field and the topics were proposed
 too and are unchanged.
 
+**Then the install section.** Before the push, the owner asked for bun and
+the other package managers that install from the npm registry beside npm.
+Each was measured before it was written down, on Windows, against the
+packed 0.3.11 tarball and a second one versioned 0.3.12-probe.0 for the
+update, with HOME, USERPROFILE, AppData and every manager's own folder in a
+sandbox: yarn 1.22.22 and pnpm 12.18.0 through corepack, bun 1.4.4 from npm.
+Each was asked for `--venastine-doctor` after installing and after updating;
+the owner's real `installs.json` kept its timestamp from the day before.
+
+- **yarn** (`yarn global add`): a stable path, plain copies (`st_nlink` 1),
+  so it behaves as npm does. Yarn 2 and later have no global install.
+- **bun** (`bun add -g`): a stable path across the update, but every file
+  HARDLINKED out of bun's cache (`st_nlink` 2), so the install tree
+  `security/protected_paths.py` protects had a second, unprotected name:
+  AGENTS.md's reason for making uv copy. `--backend=copyfile` gave 1. With
+  Node on PATH its command ran the launcher under Node; with none, under
+  bun's own runtime, where a whole first launch (`--venastine-yes --help`:
+  the venv, 19 requirements with uv, the config adoption, `main.py`) exited
+  0 in 65 s.
+- **pnpm** (`pnpm add -g`): hardlinked out of its store (`st_nlink` 2, 3
+  after the update shared the unchanged files), and
+  `--config.package-import-method=copy` gave 1. But every `add -g` lands in
+  a new directory (`global/v11/<id>-<n>/`, or a versioned path in the store
+  by default), with the hoisted linker and with the global virtual store off
+  alike. `config_update.py` keys saved values by the install's real path, so
+  a pnpm update adopts the shipped `config.yaml` as new instead of merging.
+
+**The owner's decisions.** pnpm is listed with that caveat in one sentence
+(the alternatives were leaving it out, or a design batch on the keying,
+which AGENTS.md records as keyed by the install on purpose). bun is listed
+with `--backend=copyfile`, and Node 18+ stays the stated requirement: only
+the non-interactive path was measured without Node, not the consent prompt
+or the TUI.
+
+**Built.** README's "From npm" ends with "With yarn, bun or pnpm": the three
+commands, updates as the same command with `@latest`, and the copy flags and
+pnpm's update caveat, each with its reason. AGENTS.md's distribution section
+records the measurement. One test (9198 to 9199) holds the three commands to
+package.json's name and the two flags in place; 5 of 5 mutations turned it
+red (each flag dropped, pnpm's set to `hardlink`, yarn's package renamed,
+pnpm's block removed).
+
 **Verification.** Full suite on Windows in the pinned venv, `AGENT_WORKSPACE`
-unset: 9110 passed, 88 skipped, none failed. ruff clean. The top 30 lines
-through `gh api markdown` render the title, the definition, the centred
-badges and then the screenshot, in that order; no Python changed.
+unset: 9111 passed, 88 skipped, none failed; 9199 collected, the stated
+count. ruff clean; bandit 0 new against the rewritten baseline and its
+count check green; gitleaks clean on an export. Through `gh api markdown`
+the top 30 lines render the title, the definition, the centred badges and
+then the screenshot, in that order, and the install section its heading,
+the three commands as separate code blocks and the three points.
 
 - **Version:** `0.3.11`, unchanged, as in batch 244; label the pull request
   `release:skip`.
