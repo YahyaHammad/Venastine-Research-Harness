@@ -1,5 +1,3 @@
-![The Venastine Research Harness terminal interface: a chat turn showing the model's reasoning and a rendered Markdown table](docs/assets/Venastine_Research_Harness_Demo_Photo.png)
-
 # Venastine Research Harness
 
 **Venastine Research Harness is an open-source, security-first agentic harness for large language models: a tool-using chat assistant and a ten-pass deep-research pipeline that fact-checks, critiques and scores its own claims, in your terminal or in the browser.**
@@ -16,6 +14,8 @@
 <a href="#setup"><img alt="Python 3.11, 3.12 and 3.13" src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776AB?logo=python&amp;logoColor=white"></a>
 <a href="./LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-F5DE53"></a>
 </p>
+
+![The Venastine Research Harness terminal interface: a chat turn showing the model's reasoning and a rendered Markdown table](docs/assets/Venastine_Research_Harness_Demo_Photo.png)
 
 An agentic harness built from scratch — no LangChain, no agent framework — with two modes that share the same machinery:
 

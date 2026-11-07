@@ -75,7 +75,7 @@ Venastine Research Harness/
 │   └── assets/
 │       ├── Venastine_Research_Harness_Cover.png       # batch 198: the cover, 1280x640; the Space's README names its address on `main` as its `thumbnail`
 │       ├── Venastine_Research_Harness_Cover.html      # the page the cover is rendered from, by a headless Chromium; says how, and that its terminal is a sample run
-│       ├── Venastine_Research_Harness_Demo_Photo.png  # README.md line 1, its only reference
+│       ├── Venastine_Research_Harness_Demo_Photo.png  # README.md's screenshot, below the title, the one-sentence definition and the badges since batch 245; its only reference
 │       └── research-mode-birds-eye.mermaid           # the research pipeline as a diagram; referenced by no code
 │
 ├── bin/                            # batch 35: the npm channel's entry point. The package ships as a FOLDER OF SOURCE -- no bundle, no binary

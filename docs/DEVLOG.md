@@ -30956,3 +30956,32 @@ since it barely touches what a user runs.
   capitalised.
 
 - **Version:** `0.3.11`, unchanged; label the pull request `release:skip`.
+
+## Batch 245 -- the title and the badges above the screenshot (2026-11-08)
+
+**Why.** After PR #282 merged, the owner asked whether the badges belonged
+at the top. In the owner's screenshot of the GitHub page, the terminal
+screenshot filled the first screen above everything else, so it came alone:
+no name, no definition, no badges, and a terminal transcript with nothing to
+say what it was. The reference model card the badges were modelled on puts
+a small logo first, not a full-width image.
+
+**Built.** README.md now opens with the title, the one-sentence definition
+and both rows of badges, then the screenshot, then the text that followed it
+before. Nothing else moved; ARCHITECTURE's note on the image, which said
+"README.md line 1", now says where it is.
+
+**Also from the owner, outside the repository.** The GitHub About
+description is now the batch-244 proposal: "Security-first agentic harness
+for LLMs, built for long-horizon research in math, computer science and the
+domain sciences: tool-using chat plus a ten-pass pipeline that fact-checks
+and scores its own claims." The website field and the topics were proposed
+too and are unchanged.
+
+**Verification.** Full suite on Windows in the pinned venv, `AGENT_WORKSPACE`
+unset: 9110 passed, 88 skipped, none failed. ruff clean. The top 30 lines
+through `gh api markdown` render the title, the definition, the centred
+badges and then the screenshot, in that order; no Python changed.
+
+- **Version:** `0.3.11`, unchanged, as in batch 244; label the pull request
+  `release:skip`.
