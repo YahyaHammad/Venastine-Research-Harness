@@ -1,5 +1,3 @@
-![The Venastine Research Harness terminal interface: a chat turn showing the model's reasoning and a rendered Markdown table](docs/assets/Venastine_Research_Harness_Demo_Photo.png)
-
 # Venastine Research Harness
 
 **Venastine Research Harness is an open-source, security-first agentic harness for large language models: a tool-using chat assistant and a ten-pass deep-research pipeline that fact-checks, critiques and scores its own claims, in your terminal or in the browser.**
@@ -16,6 +14,8 @@
 <a href="#setup"><img alt="Python 3.11, 3.12 and 3.13" src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776AB?logo=python&amp;logoColor=white"></a>
 <a href="./LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-F5DE53"></a>
 </p>
+
+![The Venastine Research Harness terminal interface: a chat turn showing the model's reasoning and a rendered Markdown table](docs/assets/Venastine_Research_Harness_Demo_Photo.png)
 
 An agentic harness built from scratch — no LangChain, no agent framework — with two modes that share the same machinery:
 
@@ -136,6 +136,40 @@ Two things differ from a clone, both to make a command you run from anywhere beh
 **Updating keeps your settings.** `npm update` replaces the package directory wholesale, `config.yaml` with it, so the launcher merges your own values back in before the harness starts and prints what it kept. Settings you never touched pick up the new version's defaults, and keys the new version adds arrive at theirs; a value the new version no longer accepts is dropped on its own and named, rather than costing you the rest. It works for values set with `/config` and for ones you edited in the file by hand, which is the only way to set a list like `ensemble_models`. The one case it cannot help with is an edit made after your last session and never launched before you updated -- npm has already replaced the file by the time anything of ours runs.
 
 `venastine --venastine-doctor` prints every one of those resolved paths, plus the interpreter and environment it found.
+
+#### With yarn, bun or pnpm
+
+The same package installs from the npm registry with the other package
+managers, and everything above about the launcher applies to each. The
+launcher still needs Node.js 18 or newer, and the harness Python 3.11 or newer.
+
+```bash
+yarn global add @yahyahammad/venastine
+```
+
+```bash
+bun add -g --backend=copyfile @yahyahammad/venastine
+```
+
+```bash
+pnpm add -g --config.package-import-method=copy @yahyahammad/venastine
+```
+
+To update, run the same command with `@latest` after the package name.
+
+* **yarn means Yarn 1 (classic).** Yarn 2 and later have no global install.
+* **bun and pnpm need the copy flag, on updates too.** By default both
+  hardlink the package's files out of a shared cache or store, so the
+  harness's own source, which it protects from tool writes, would have a
+  second name in a folder it does not protect. The flag makes them copy,
+  as npm and yarn do.
+* **pnpm does not carry `config.yaml` edits across an update.** It puts
+  every install in a new directory, and the harness keys your saved
+  `config.yaml` values by the install's directory, so after an update the
+  values you set with `/config` or by editing that file are back at the
+  shipped defaults. What lives in `~/.config/venastine` (`settings.json`,
+  keys, conversations and memories) is unaffected. If you rely on
+  `config.yaml` edits, install with npm, yarn or bun instead.
 
 ### From a clone
 
@@ -1030,7 +1064,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 9198 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
+Run the test suite with `pytest` — 9199 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
 
 ## Documentation
 

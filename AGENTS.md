@@ -64,7 +64,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 9198 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 9199 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -215,6 +215,22 @@ under `~/.config/venastine/runtime/github-*`, inside the already-protected
 user tier; never put imported dependencies in an unprotected sibling of the
 source. Prior app trees and runtimes remain available for recovery. Never replace an unmanaged folder
 or command. Both shell scripts keep the download separate from execution.
+
+**yarn, bun and pnpm install the same npm package** (batch 245, measured on
+Windows against a packed tarball with yarn 1.22.22, bun 1.4.4 and pnpm
+12.18.0, each with HOME in a sandbox). yarn behaves as npm does. bun and pnpm
+HARDLINK the package out of their cache or store by default (`st_nlink` 2,
+and 3 after an update), giving the protected install tree a second,
+unprotected name -- uv's problem below -- so README gives them
+`--backend=copyfile` and `--config.package-import-method=copy`, and a
+docs-consistency test holds both flags there. pnpm also puts every
+`add -g` in a new directory whatever its settings, and `config_update.py`
+keys the saved values by the install's real path, so a pnpm update starts
+from the shipped `config.yaml`; README says so, and nothing here changes
+that keying. With no Node on PATH, bun runs the launcher on its own
+runtime: a whole non-interactive first launch passed; the consent prompt
+and the TUI under bun alone are unmeasured, so README keeps Node 18+ as
+the requirement.
 
 **uv builds the runtime when it is on PATH, and it COPIES** (ROADMAP_v3 §93,
 UV3–UV7). `scripts/install.py` and `bin/venastine.mjs` run `python -m venv` as

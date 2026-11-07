@@ -4319,3 +4319,38 @@ def test_llms_txt_indexes_this_projects_tracked_documents():
     tracked = set(listed.stdout.splitlines())
     missing = [path for path in documents if path not in tracked]
     assert not missing, f"llms.txt links untracked documents: {missing}"
+
+
+#: What each package manager README names must be told so that it COPIES the
+#: package into place rather than hardlinking it out of a shared cache.
+_COPY_FLAGS = {"bun": "--backend=copyfile",
+               "pnpm": "--config.package-import-method=copy"}
+
+
+def test_readme_has_bun_and_pnpm_copy_the_package_rather_than_link_it():
+    """Batch 245, measured on Windows: by default bun 1.4.4 and pnpm 12.18.0
+    hardlink the installed files out of their cache or store (`st_nlink` 2),
+    so the harness's protected install tree has a second name in a folder
+    nothing protects -- the reason AGENTS.md makes uv copy. README's
+    commands carry the flag that makes each copy, and this keeps every
+    global install command there carrying it, and naming this package."""
+    name = _package_json()["name"]
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    commands = [line.split() for line in lines
+                if re.match(r"(bun|pnpm|yarn)\s+(global\s+)?(add|install|i)\b",
+                            line)]
+    seen = set()
+    for words in commands:
+        manager = words[0]
+        seen.add(manager)
+        assert words[-1] == name, (
+            f"README's {manager} command installs {words[-1]!r}, not "
+            f"package.json's {name!r}: {' '.join(words)}")
+        if manager in _COPY_FLAGS:
+            assert _COPY_FLAGS[manager] in words, (
+                f"README's {manager} install lost {_COPY_FLAGS[manager]}: "
+                f"{' '.join(words)}. Without it the package is hardlinked "
+                f"out of {manager}'s cache, outside what the harness protects.")
+    assert seen == {"bun", "pnpm", "yarn"}, (
+        f"expected README to install with yarn, bun and pnpm; found {seen}")
