@@ -1,6 +1,21 @@
-![Venastine Research Harness Screenshot](docs/assets/Venastine_Research_Harness_Demo_Photo.png)
+![The Venastine Research Harness terminal interface: a chat turn showing the model's reasoning and a rendered Markdown table](docs/assets/Venastine_Research_Harness_Demo_Photo.png)
 
 # Venastine Research Harness
+
+**Venastine Research Harness is an open-source, security-first agentic harness for large language models: a tool-using chat assistant and a ten-pass deep-research pipeline that fact-checks, critiques and scores its own claims, in your terminal or in the browser.**
+
+<p align="center">
+<a href="https://huggingface.co/spaces/SolenopsisCampo/VenastineHarnessDemo"><img alt="Try the demo on a Hugging Face Space" src="https://img.shields.io/badge/Demo-Hugging%20Face%20Space-1783FF?logo=huggingface&amp;logoColor=white"></a>
+<a href="https://www.modelscope.ai/studios/Venastine-Research/VenastineHarnessDemo"><img alt="Try the demo on a ModelScope Studio" src="https://img.shields.io/badge/Demo-ModelScope%20Studio-1783FF?logo=modelscope&amp;logoColor=white"></a>
+<a href="https://huggingface.co/Venastine-Research"><img alt="Venastine-Research on Hugging Face" src="https://img.shields.io/badge/Hugging%20Face-Venastine--Research-FFC107?logo=huggingface&amp;logoColor=white"></a>
+<a href="https://www.modelscope.ai/organization/Venastine-Research"><img alt="Venastine-Research on ModelScope" src="https://img.shields.io/badge/ModelScope-Venastine--Research-624AFF?logo=modelscope&amp;logoColor=white"></a>
+<br>
+<a href="https://github.com/YahyaHammad/Venastine-Research-Harness/releases/latest"><img alt="Latest GitHub release" src="https://img.shields.io/github/v/release/YahyaHammad/Venastine-Research-Harness?logo=github&amp;label=release"></a>
+<a href="https://www.npmjs.com/package/@yahyahammad/venastine"><img alt="npm package @yahyahammad/venastine" src="https://img.shields.io/npm/v/%40yahyahammad%2Fvenastine?logo=npm&amp;label=npm"></a>
+<a href="https://github.com/YahyaHammad/Venastine-Research-Harness/actions/workflows/tests.yml"><img alt="Tests on main" src="https://img.shields.io/github/actions/workflow/status/YahyaHammad/Venastine-Research-Harness/tests.yml?branch=main&amp;label=tests&amp;logo=githubactions&amp;logoColor=white"></a>
+<a href="#setup"><img alt="Python 3.11, 3.12 and 3.13" src="https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776AB?logo=python&amp;logoColor=white"></a>
+<a href="./LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-F5DE53"></a>
+</p>
 
 An agentic harness built from scratch — no LangChain, no agent framework — with two modes that share the same machinery:
 
@@ -1015,7 +1030,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 9193 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
+Run the test suite with `pytest` — 9198 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
 
 ## Documentation
 

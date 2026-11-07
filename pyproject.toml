@@ -21,6 +21,14 @@ name = "venastine-research-harness"
 version = "0.3.11"
 description = "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline."
 readme = "README.md"
+# The same words as package.json's `keywords`, in the same order: what a
+# package index searches. test_docs_consistency.py holds the two lists equal.
+keywords = [
+    "agent", "llm", "research", "anthropic", "openai", "mcp", "agentic-ai",
+    "ai-agent", "agent-harness", "llm-agent", "research-agent", "deep-research",
+    "fact-checking", "tool-use", "model-context-protocol", "gemini", "deepseek",
+    "openrouter", "hugging-face", "modelscope", "security", "cli", "tui",
+]
 requires-python = ">=3.11"
 # PEP 639: a bare SPDX expression, not the deprecated `{ text = ... }` table, and no
 # `License :: OSI Approved ::` classifier -- PEP 639 supersedes those and setuptools warns on
@@ -39,6 +47,9 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -63,6 +74,9 @@ dynamic = ["dependencies"]
 Homepage = "https://github.com/YahyaHammad/Venastine-Research-Harness"
 Repository = "https://github.com/YahyaHammad/Venastine-Research-Harness"
 Issues = "https://github.com/YahyaHammad/Venastine-Research-Harness/issues"
+Documentation = "https://github.com/YahyaHammad/Venastine-Research-Harness#readme"
+Changelog = "https://github.com/YahyaHammad/Venastine-Research-Harness/releases"
+Demo = "https://huggingface.co/spaces/SolenopsisCampo/VenastineHarnessDemo"
 
 [project.optional-dependencies]
 # markitdown's only consumer is tools/builtin/file_ops.py, which implements

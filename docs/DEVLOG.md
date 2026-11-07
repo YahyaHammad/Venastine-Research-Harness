@@ -30842,3 +30842,117 @@ across parallel workers).
   9105 passed, 88 skipped.
 
 - **Version:** `0.3.10-b.2.offline-suite.r917a9c2e519c`.
+
+## Batch 244 -- what search engines and answer engines read: badges, keywords, llms.txt (2026-11-08)
+
+**Why.** The owner asked for four things on a fresh branch from `main`
+(282f122, 0.3.11): an automatic deploy of the hosted demo to the Hugging
+Face Space; a row of shields.io badges like a reference model card's;
+changes that help search engines and generative or answer engines find
+and describe the project; and no patch release for the pull request,
+since it barely touches what a user runs.
+
+**Measured first.**
+
+- **The automatic deploy already exists, and it runs.** `deploy-demo.yml`
+  (batch 169) wakes each time a CI workflow finishes on a push to `main`
+  and deploys once every check has passed. For 282f122 the gate said
+  `deploy` and `deploy-hf` ran, then printed "no DEMO_HF_SPACE or
+  HF_TOKEN: this is a dry run". Environment `demo` exists now, but holds
+  neither, so every automatic deploy so far has been a rehearsal; the
+  live Space was deployed by hand in earlier batches.
+- **The Space is `SolenopsisCampo/VenastineHarnessDemo`, and it is public
+  now** (the Hub's API: `private: False`). The `Venastine-Research`
+  organisation on the Hub holds only its card. The Studio is
+  `Venastine-Research/VenastineHarnessDemo` on modelscope.ai, read through
+  its studio API: running, organisation Venastine-Research. That site
+  answers 200 for any path, an organisation that does not exist included,
+  so the organisation page's address, `/organization/Venastine-Research`,
+  was taken from the description the site serves on it; the browser pane
+  may not open modelscope.ai.
+- **npm's registry has `@yahyahammad/venastine` at 0.3.11; PyPI has no
+  `venastine-research-harness`.** So the npm badge is live and the python
+  badge is static, written from pyproject's classifiers.
+
+**The owner's decisions.**
+
+- **The autodeploy: no code change.** A second workflow would duplicate or
+  bypass HD9's every-check gate. A `::warning` from `deploy_demo.py` when a
+  push to `main` deploys dry was offered and not taken. What is left is
+  the owner's: the secret `HF_TOKEN` (fine-grained, write access to the one
+  Space) and the variable `DEMO_HF_SPACE` set to
+  `SolenopsisCampo/VenastineHarnessDemo`, both in environment `demo`.
+- **The version: this branch keeps main's `0.3.11` and takes no beta
+  identity, and its pull request is labelled `release:skip`.**
+  `release_after_merge.py` plans `skip` for that label and pushes nothing,
+  so `main` stays 0.3.11: no commit, no tag, no npm publish, no GitHub
+  release. The alternative, a beta here and `version.py set` on `main`
+  after the merge, still writes 0.3.12 into both files, because `set`
+  refuses anything not above v0.3.11. This is an exception to batch 202's
+  rule that every branch takes a beta identity, made for this branch;
+  AGENTS.md's rule is unchanged. Merged without the label, the pull request
+  releases 0.3.12 as any other would.
+
+**Built.**
+
+- **README:** the screenshot's alt text says what it shows, and under the
+  title one bold sentence defines the project (what it is, its two modes,
+  where it runs), the shape an answer engine quotes. Then two centred rows
+  of badges, written as `<a><img>` so each carries alt text: the demo on
+  the Space and on the Studio, the Hugging Face and ModelScope
+  organisations; the latest GitHub release, the npm version, tests on
+  `main`, the python versions and the license.
+- **Package metadata:** `package.json`'s keywords go from 6 to 23, and
+  pyproject takes the same list as `keywords`, three more classifiers
+  (`Environment :: Console`, `Operating System :: OS Independent`,
+  `Intended Audience :: Developers`) and project URLs for the
+  documentation, the changelog and the demo.
+- **The Space's README** carries `tags` (`build_demo_bundle.TAGS`), which
+  the Hub's Space search filters on. ModelScope's README stays plain, as
+  `test_modelscope_takes_no_frontmatter` holds it.
+- **`llms.txt`** at the root, in the llmstxt.org shape: package.json's
+  summary as the blockquote, a paragraph on what the harness is and how
+  to install it, and links to the raw documents on `main`, the two demos,
+  npm and the releases. `read_project_doc` can read it, so AGENTS.md's
+  doc-bound figure is 65 files.
+- **Five tests (9193 to 9198).** In `test_docs_consistency.py`:
+  pyproject's keywords are package.json's; every README badge names
+  package.json's package and repository and a workflow that exists; the
+  python badge is pyproject's classifiers, the oldest equal to
+  requires-python's floor, and the license badge is the license both files
+  state; llms.txt opens with README's title and package.json's summary and
+  links only tracked documents of this repository. In
+  `test_demo_bundle.py`: the Space's tags, Hub-shaped, on Hugging Face
+  only. Each restates package metadata somewhere nobody re-reads when it
+  changes, which is the drift v0.3.0 and v0.3.1 already showed.
+
+**Not done, and why.**
+
+- **GitHub's own description, topics and website field** are repository
+  settings and public, so they are the owner's to change; suggested in the
+  summary rather than set.
+- **No X or Discord badge.** The reference card had both; nothing in the
+  repository names an account on either.
+
+**Verification.**
+
+- **Full suite** on Windows in the pinned venv, `AGENT_WORKSPACE` unset:
+  9109 passed, 88 skipped, and one failure,
+  `test_a_crlf_checkout_stays_crlf`, because the branch's fresh checkout
+  left `config.yaml` CRLF in the worktree. Its content is main's; with it
+  LF, as the shared checkout and CI have it, that class passes 5 of 5.
+  9198 collected, the stated count. ruff clean; bandit 0 new against the
+  baseline rewritten to Windows paths, and its count check green;
+  gitleaks clean on an export with CI's config. No requirement changed.
+- **README through `gh api markdown`** (gfm, this repository's context):
+  the centred block survives, with ten images, each with its alt text,
+  and every link. A headless Edge screenshot of the render shows the two
+  rows of two-tone badges with their logos.
+- Mutations, one at a time on the worktree and restored after each:
+  13 of 13 turned their test red -- a keyword dropped from one file, the
+  npm name, the CI badge's workflow and its link, the release badge's
+  repository, a python version, the license, an llms.txt link, its
+  summary, its title and its npm link, and the Space's tags removed or
+  capitalised.
+
+- **Version:** `0.3.11`, unchanged; label the pull request `release:skip`.

@@ -109,6 +109,10 @@ PLATFORM_MANAGED = frozenset({"gradio", "spaces", "huggingface-hub"})
 
 TITLE = "Venastine Research Harness"
 SHORT_DESCRIPTION = "Agentic research harness with a self-checking pipeline"
+# What the Hub's Space search filters on (batch 244): lowercase and
+# hyphenated, the shape the Hub's own tags take.
+TAGS = ("agents", "agentic-ai", "llm", "deep-research", "research-agent",
+        "fact-checking", "mcp", "tui", "terminal")
 # The image a shared link to the Space shows (batch 198, the owner's
 # request): Hugging Face's `thumbnail`, which takes a URL. docs/assets is
 # not in the bundle, so it is the file on GitHub's `main` -- the owner's
@@ -480,7 +484,9 @@ def readme(platform: str, pkg: dict, info: dict) -> str:
         f"short_description: {SHORT_DESCRIPTION}\n"
         f"thumbnail: {THUMBNAIL}\n"
         f"license: {str(pkg.get('license', 'apache-2.0')).lower()}\n"
-        "pinned: false\n"
+        "tags:\n"
+        + "".join(f"- {tag}\n" for tag in TAGS)
+        + "pinned: false\n"
         "---\n\n")
     return front + body
 
