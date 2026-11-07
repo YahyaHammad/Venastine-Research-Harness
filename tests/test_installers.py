@@ -607,7 +607,14 @@ exit 0
 
 class TestThePowerShellInstallerAsksUvForAPython:
     """UV6, install.ps1's half: pwsh on Linux CI, Windows PowerShell here.
-    Invoke-WebRequest is shadowed by a function that writes the helper."""
+    Invoke-WebRequest is shadowed by a function that writes the helper.
+
+    HOME IS tmp_path's (batch 243). PowerShell 7 writes its start-up cache
+    under the home (`~/.cache/powershell`, with a telemetry id) and makes
+    `~/.local/share/powershell/Modules`, so on CI's first run of PR #281 both
+    tests failed `nothing_written_to_home` -- no machine here has pwsh, so
+    only CI runs them. The home goes to `tmp_path`, as `_run_launcher`
+    sends it."""
 
     def _run(self, tmp_path, **env):
         shell = shutil.which("pwsh") or (shutil.which("powershell") if os.name == "nt" else None)
@@ -622,9 +629,11 @@ class TestThePowerShellInstallerAsksUvForAPython:
             path = os.pathsep.join([str(bin_dir), os.path.join(os.environ["SystemRoot"], "System32")])
         else:
             path = str(_fake_bin(tmp_path))
+        home = tmp_path / "home"
+        home.mkdir()
         environment = {k: v for k, v in os.environ.items() if not k.startswith("VENASTINE_")}
-        environment.update(PATH=path, FAKE_HELPER=_HELPER, FAKE_UV_CALLS=str(tmp_path / "uv-calls"),
-                           FAKE_UV_PYTHON=sys.executable, **env)
+        environment.update(PATH=path, HOME=str(home), USERPROFILE=str(home), FAKE_HELPER=_HELPER,
+                           FAKE_UV_CALLS=str(tmp_path / "uv-calls"), FAKE_UV_PYTHON=sys.executable, **env)
         command = ("function Invoke-WebRequest { param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile) "
                    "Set-Content -LiteralPath $OutFile -Value $env:FAKE_HELPER -Encoding ascii }; "
                    f"& '{REPO / 'install.ps1'}'")

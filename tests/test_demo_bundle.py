@@ -540,18 +540,27 @@ def test_only_a_linux_daemon_builds_the_bundles_image(monkeypatch, os_type,
 
 
 @pytest.mark.integration
-def test_the_image_holds_exactly_the_bundles_files(tmp_path):
+def test_the_image_holds_exactly_the_bundles_files(tmp_path, monkeypatch):
     """The .dockerignore, proved on a real image (batch 166 did this by hand
     before trusting it). ModelScope builds from a git clone of the Studio,
     so the context holds more than the bundle: its `.git`, and whatever a
     platform or a careless hand leaves. Every one of those is planted here,
     and the image must hold exactly the bundle's own files and nothing
-    else. Needs a Docker daemon, uv and the network (the real locks)."""
+    else. Needs a Docker daemon, uv and the network (the real locks).
+
+    UV'S CACHE MOVES TOO (batch 243). The locks are compiled by a real uv on
+    this machine, and uv's cache lives under the home on Linux and macOS
+    (`~/.cache/uv`), which the suite has made a throwaway folder: CI's first
+    run wrote 338 files there and failed `nothing_written_to_home`. The cache
+    goes to `tmp_path`, as `test_installers.py`'s real-uv tests already
+    send it; uv runs on an empty cache, where rustup and Docker need their
+    real homes."""
     docker = _docker()
     if not docker:
         pytest.skip("no Docker daemon running Linux containers answers")
     if shutil.which("git") is None:
         pytest.skip("git is not installed")
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
     out = tmp_path / "bundle"
     written = bundle.build("modelscope", out, root=ROOT)
     planted = {

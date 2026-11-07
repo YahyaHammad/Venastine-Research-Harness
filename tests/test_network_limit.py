@@ -665,7 +665,12 @@ def _fill_tools(monkeypatch):
     _net_common.TOOLS.record(5000)
 
 
+@pytest.mark.usefixtures("public_dns")
 class TestTheTools:
+    """`fetch_url`'s host is cleared by a lookup before the meter is asked
+    (batch 243), so without `public_dns` the policy check refused the URL
+    offline and the meter was never reached."""
+
     def test_fetch_url_is_refused_before_any_request(self, monkeypatch, http):
         from tools.builtin import fetch_url
 
