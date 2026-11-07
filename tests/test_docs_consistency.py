@@ -4155,3 +4155,167 @@ def test_the_file_agents_md_promises_is_inside_the_trust_hash(tmp_path):
         f"file that no longer exists. A promise about a file outside the "
         f"hash is not a weaker guarantee, it is no guarantee, and it reads "
         f"exactly like the real one.")
+
+
+# ---------------------------------------------------------------------------
+# Batch 244: what a search engine or an answer engine reads about this
+# project -- the README's badges, the package indexes' keywords and
+# llms.txt. Each restates something package.json or pyproject.toml owns, in a
+# place nobody re-reads when the owner changes, and restated package metadata
+# has drifted here before: v0.3.0 and v0.3.1 were tagged with both files at
+# 0.2.0. So each is held to its owner, never to another hand-written copy.
+# ---------------------------------------------------------------------------
+
+def _pyproject() -> dict:
+    import tomllib
+
+    with open(os.path.join(ROOT, "pyproject.toml"), "rb") as f:
+        return tomllib.load(f)
+
+
+def _repository_slug() -> str:
+    """OWNER/NAME, read from package.json's repository URL."""
+    url = _package_json()["repository"]["url"]
+    match = re.fullmatch(r"git\+https://github\.com/([^/]+/[^/]+?)\.git", url)
+    assert match, f"package.json's repository URL has a new shape: {url!r}"
+    return match.group(1)
+
+
+def _readme_badges() -> list:
+    """(link, image URL) for each shields.io badge in README.md, with the
+    HTML entities the attributes are written in decoded."""
+    import html
+
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+        text = f.read()
+    pairs = re.findall(r'<a href="([^"]+)"><img alt="[^"]*" '
+                       r'src="(https://img\.shields\.io/[^"]+)"></a>', text)
+    return [(html.unescape(href), html.unescape(src)) for href, src in pairs]
+
+
+def _static_badge(src: str):
+    """(label, message, colour) of a shields.io static badge, or None. The
+    path spells a literal hyphen `--`, so the fields split on a lone one."""
+    from urllib.parse import unquote, urlsplit
+
+    path = unquote(urlsplit(src).path)
+    if not path.startswith("/badge/"):
+        return None
+    fields = re.split(r"(?<!-)-(?!-)", path.removeprefix("/badge/"))
+    assert len(fields) == 3, f"a static badge that does not parse: {src}"
+    return tuple(field.replace("--", "-") for field in fields)
+
+
+def test_package_json_and_pyproject_carry_one_keyword_list():
+    npm = _package_json()["keywords"]
+    python = _pyproject()["project"]["keywords"]
+    assert python == npm, (
+        f"pyproject.toml's keywords {python} are not package.json's {npm}. "
+        f"They are one list the two package indexes search, in two files "
+        f"that cannot share it; change both, in the same order.")
+    assert len(set(npm)) == len(npm), f"a keyword is listed twice: {npm}"
+
+
+def test_the_readme_badges_name_this_package_and_this_repository():
+    from urllib.parse import unquote, urlsplit
+
+    name = _package_json()["name"]
+    slug = _repository_slug()
+    badges = _readme_badges()
+    assert len(badges) >= 9, (
+        f"README.md has {len(badges)} badges in the shape this test reads; "
+        f"it had 9 when the test was written, so the markup changed and "
+        f"the checks below may be reading nothing.")
+
+    kinds = Counter()
+    for href, src in badges:
+        path = unquote(urlsplit(src).path)
+        if path.startswith("/npm/"):
+            kinds["npm"] += 1
+            assert path.endswith("/" + name), (src, name)
+            assert href == f"https://www.npmjs.com/package/{name}", href
+        elif path.startswith("/github/actions/workflow/status/"):
+            kinds["workflow"] += 1
+            workflow = path.removeprefix(
+                f"/github/actions/workflow/status/{slug}/")
+            assert workflow != path, (src, slug)
+            assert os.path.isfile(os.path.join(
+                ROOT, ".github", "workflows", workflow)), workflow
+            assert href == (f"https://github.com/{slug}/actions/workflows/"
+                            f"{workflow}"), href
+        elif path.startswith("/github/"):
+            kinds["github"] += 1
+            assert path.endswith("/" + slug), (src, slug)
+        if urlsplit(href).netloc == "github.com":
+            assert href.startswith(f"https://github.com/{slug}/"), (
+                f"{href} links a repository that is not package.json's "
+                f"{slug}")
+    assert kinds["npm"] and kinds["workflow"] and kinds["github"], (
+        f"expected an npm, a CI and a GitHub release badge; found {kinds}")
+
+
+def test_the_readme_python_and_license_badges_state_the_metadata():
+    project = _pyproject()["project"]
+    minors = [c.rsplit(" :: ", 1)[1] for c in project["classifiers"]
+              if re.fullmatch(r"Programming Language :: Python :: 3\.\d+", c)]
+    statics = {fields[0]: fields[1] for fields in
+               (_static_badge(src) for _, src in _readme_badges()) if fields}
+
+    assert statics.get("python") == " | ".join(minors), (
+        f"README's python badge says {statics.get('python')!r} and "
+        f"pyproject.toml's classifiers name {minors}.")
+    assert project["requires-python"] == ">=" + minors[0], (
+        f"the oldest classifier {minors[0]} is not requires-python's floor "
+        f"{project['requires-python']}, so the badge's first version is "
+        f"one an install refuses or one it allows without saying so")
+    assert statics.get("license") == _package_json()["license"] \
+        == project["license"], (statics.get("license"),
+                                _package_json()["license"], project["license"])
+
+
+def test_llms_txt_indexes_this_projects_tracked_documents():
+    """llms.txt (llmstxt.org): an H1, a one-line summary as a blockquote,
+    then sections of links. The name and summary are the ones the package
+    indexes show, and every document it links on `main` is a tracked file,
+    since an index that sends a model to a 404 tells it nothing."""
+    from urllib.parse import urlsplit
+
+    with open(os.path.join(ROOT, "llms.txt"), encoding="utf-8") as f:
+        text = f.read()
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+        title = next(line for line in f if line.startswith("# "))
+    lines = text.splitlines()
+    assert lines[0] == title.rstrip("\n"), (lines[0], title)
+
+    pkg = _package_json()
+    assert pkg["description"] == _pyproject()["project"]["description"]
+    first_section = next(i for i, line in enumerate(lines)
+                         if line.startswith("## "))
+    quoted = [line for line in lines[:first_section] if line.startswith("> ")]
+    assert quoted == ["> " + pkg["description"]], quoted
+
+    slug = _repository_slug()
+    raw = f"https://raw.githubusercontent.com/{slug}/main/"
+    links = re.findall(r"\]\((https://[^)\s]+)\)", text)
+    documents = [url.removeprefix(raw) for url in links if url.startswith(raw)]
+    assert documents, "llms.txt links no document on main"
+    for url in links:
+        host = urlsplit(url).netloc
+        if host == "raw.githubusercontent.com":
+            assert url.startswith(raw), url
+        elif host == "github.com":
+            assert url == f"https://github.com/{slug}" or url.startswith(
+                f"https://github.com/{slug}/"), url
+        elif host == "www.npmjs.com":
+            assert url == f"https://www.npmjs.com/package/{pkg['name']}", url
+
+    try:
+        listed = subprocess.run(["git", "ls-files"], cwd=ROOT,  # nosec B603, B607 - `git ls-files`, fixed argv
+                                capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        pytest.skip("git is not available to ask what is tracked")
+    if listed.returncode != 0:  # pragma: no cover
+        pytest.skip("not a git checkout")
+    tracked = set(listed.stdout.splitlines())
+    missing = [path for path in documents if path not in tracked]
+    assert not missing, f"llms.txt links untracked documents: {missing}"

@@ -15,6 +15,17 @@ other name.
 
 ---
 
+## Badges, keywords and llms.txt held to the package metadata (batch 244)
+
+| Change | Test | Fix |
+|---|---|---|
+| Rename the npm package or move the repository | `test_the_readme_badges_name_this_package_and_this_repository`, `test_llms_txt_indexes_this_projects_tracked_documents` | Change README's badge URLs and links and llms.txt's links to package.json's new name and repository |
+| Add or drop a `Programming Language :: Python :: 3.N` classifier, or move `requires-python` | `test_the_readme_python_and_license_badges_state_the_metadata` | Change README's python badge, and its alt text, to the classifiers; the oldest is the floor |
+| Change a keyword in package.json or pyproject.toml only | `test_package_json_and_pyproject_carry_one_keyword_list` | The same list, in the same order, in both |
+| Move or rename a document llms.txt links, or change README's title or package.json's description | `test_llms_txt_indexes_this_projects_tracked_documents` | Change llms.txt to match |
+| Rewrite the badges in another markup, such as Markdown image links | `test_the_readme_badges_name_this_package_and_this_repository`, on its floor of nine badges | Change `_readme_badges`' pattern to read the new markup |
+| Drop `build_demo_bundle.TAGS` from the Space's frontmatter, or add a tag with capitals or spaces | `TestTheGeneratedFiles::test_the_space_readme_carries_the_search_tags` | Lowercase words joined by hyphens, each once |
+
 ## No real name lookups, and a throwaway home (batch 243)
 
 | Change | Test | Fix |

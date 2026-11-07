@@ -254,6 +254,18 @@ class TestTheGeneratedFiles:
         assert bundle.THUMBNAIL == (
             f"https://raw.githubusercontent.com/{repo}/main/{bundle.COVER}")
 
+    def test_the_space_readme_carries_the_search_tags(self):
+        """Batch 244. The Hub's Space search filters on `tags`, a YAML list
+        in the frontmatter. Each one is the Hub's own shape, lowercase words
+        joined by hyphens, and none twice; ModelScope's README stays plain."""
+        front = _front(bundle.readme("hf", PKG, self.INFO))
+        assert front["tags"] == list(bundle.TAGS)
+        assert len(set(bundle.TAGS)) == len(bundle.TAGS)
+        for tag in bundle.TAGS:
+            assert tag == tag.lower() and all(
+                part.isalnum() and part.isascii() for part in tag.split("-")), tag
+        assert "tags:" not in bundle.readme("modelscope", PKG, self.INFO)
+
     def test_the_cover_is_a_png_github_takes_as_a_social_preview(self):
         """The address resolves only if the file is committed, and a CI
         checkout holds tracked files alone, so finding it there is finding

@@ -1,0 +1,36 @@
+# Venastine Research Harness
+
+> A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline.
+
+Venastine Research Harness is an open-source, security-first agentic harness for large language models, written in Python without LangChain or any agent framework. It has two modes that share the same machinery:
+
+- Chat: a tool-using assistant loop, in a plain command line or a Textual terminal interface (`--tui`).
+- Research: a ten-pass pipeline that writes an answer, then fact-checks and critiques its own claims, audits the assumptions underneath them, scores every claim by a fixed formula rather than by asking the model how sure it is, and revises only what came back flagged.
+
+It works with Anthropic, any OpenAI-compatible provider (OpenAI, DeepSeek, Groq, Mistral, local endpoints) and Google Gemini. In the terminal interface, `/connect` signs in to Hugging Face and OpenRouter instead of taking a pasted key. Tools are gated by declared costs, approvals and a shell command classifier, and a project directory is untrusted until the user trusts it.
+
+Install with Python 3.11 or newer, from GitHub (`install.sh` or `install.ps1`), from npm (`npm install -g @yahyahammad/venastine`, then run `venastine`), or from a clone. A hosted demo runs the same harness in the browser with nothing to install. Licensed under Apache-2.0; written by Yahya Hammad.
+
+## Docs
+
+- [README](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/README.md): what it is, installing and running it, how the research pipeline scores claims, the security model, and every setting
+- [Configuration rationale](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/CONFIG_ARCHITECTURE.md): why each value in `config.yaml` is what it is
+- [Security policy](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/docs/SECURITY.md): how to report a vulnerability, and what is in scope
+- [Privacy](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/docs/PRIVACY.md): what is stored locally, what leaves the machine, and the hosted demo
+- [Contributing](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/docs/CONTRIBUTING.md): license, setup, the test loop, and the issue and pull request format
+
+## Try it
+
+- [Hugging Face Space](https://huggingface.co/spaces/SolenopsisCampo/VenastineHarnessDemo): the hosted demo in the browser
+- [ModelScope Studio](https://www.modelscope.ai/studios/Venastine-Research/VenastineHarnessDemo): the same demo on ModelScope
+- [npm package](https://www.npmjs.com/package/@yahyahammad/venastine): `@yahyahammad/venastine`, which installs the `venastine` command
+- [Releases](https://github.com/YahyaHammad/Venastine-Research-Harness/releases): every release and its notes
+- [Source code](https://github.com/YahyaHammad/Venastine-Research-Harness): the GitHub repository
+
+## Optional
+
+- [Agent context](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/AGENTS.md): the locked design decisions and invariants, for working on the code
+- [Architecture](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/docs/ARCHITECTURE.md): file-by-file contracts and known gotchas
+- [Roadmap, v3](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/docs/ROADMAP_v3.md): implementation specs and the decision record from section 49 on
+- [Third-party notices](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/docs/THIRD_PARTY_NOTICES.md): every direct dependency and its license
+- [Hugging Face organization](https://huggingface.co/Venastine-Research) and [ModelScope organization](https://www.modelscope.ai/organization/Venastine-Research): Venastine-Research
