@@ -6139,6 +6139,39 @@ def _cmd_window(app: VenastineApp, args: str) -> None:
             "value.")
 
 
+def _cmd_classifier(app: VenastineApp, args: str) -> None:
+    """ROADMAP_v3 §56 (JV19): the shell's decision model -- its settings
+    and held verdicts, `test <command>` to see a verdict without running
+    anything, `clear` to ask it again. The text is
+    `core.decision_classifier`'s, which the CLI prints too; `test` is a
+    network call, so it runs in a worker."""
+    from core import decision_classifier
+
+    word, _, rest = args.strip().partition(" ")
+    if word != "test":
+        for line in decision_classifier.command_lines(args):
+            app._transcript.write_system(line)
+        return
+    command = rest.strip()
+    if not command:
+        app._transcript.write_system(decision_classifier.USAGE)
+        return
+
+    def show(lines: list) -> None:
+        for line in lines:
+            app._transcript.write_system(line)
+
+    def work() -> None:
+        try:
+            lines = decision_classifier.test_lines(command)
+        except Exception as exc:  # noqa: BLE001 - reported to the user
+            lines = [f"/classifier test failed: {exc}"]
+        app.call_from_thread(show, lines)
+
+    app.run_worker(work, thread=True, exit_on_error=False,
+                   name="classifier-test")
+
+
 def _cmd_network(app: VenastineApp, args: str) -> None:
     """ROADMAP_v3 §53 (IO13): every network meter, its use and its room.
 
@@ -8327,6 +8360,7 @@ def register_builtin_commands() -> None:
         bind("window", _cmd_window),
         bind("trigger", _cmd_trigger),
         bind("network", _cmd_network),
+        bind("classifier", _cmd_classifier),
         bind("config", _cmd_config, complete=_config_rows),
         bind("secrets", _cmd_secrets),
         bind("claims", _cmd_claims),

@@ -31202,3 +31202,120 @@ link to the wiki.
   tables as `main`.
 
 - **Version:** `0.3.12`, unchanged; label the pull request `release:skip`.
+
+---
+
+## Batch 248 -- A decision model as a second opinion on shell approval: the `classified` mode (2026-11-08)
+
+**Asked.** The owner asked to see the open roadmap items and take one. ROADMAP_v3's index marked
+exactly two sections NOT BUILT, §56 and §60, and four built sections carried smaller gaps; the
+owner chose §56, specified in batch 122 with JV1-JV10 locked and five questions open.
+
+**Measured first.**
+
+- **The wire, against the vendors' own pages (2026-11-08).** TypeSafe's documentation and OpenAPI
+  document, and Ollama's `/v1/systemone` reference, agree with §56's record: `POST
+  <base>/v1/systemone` with `{model, state, questions}`, answered by `{model, answers, usage}`.
+  Three facts a client has to handle were not in the record. A `score` answer is the weighted
+  mean of zero-based level indices, not a 0-1 value. A `noul` carries no confidence. TypeSafe's
+  errors are `{"detail": ...}` and Ollama's `{"error": ...}`. TypeSafe's aliases move, so
+  thresholds should name a version. One recorded fact did not check out: no page read publishes
+  the "70-500 ms" latency. TypeSafe's own page on Jev's limits says steering content "can move
+  the answer", which is JV9 in the vendor's words.
+- **ROADMAP_v2 §28 had already spoken.** Its "Deliberately not in §28" records two properties for
+  a model-based judge that §56 never mentions: the model never sees compound shell, and "certain
+  safe" must not authorise a host read. Put to the owner before any code was written.
+- **A `refusal_check` does not deny a call** (`tools/base.py`: the handler still runs). So a
+  `reject` the gate decides has to be enforced in `shell.run` and the session starts, from the
+  verdict the gate saw.
+- **The loop asks the gate twice per call**: `core/loop.py` before the prompt, and `dispatch()`
+  again after the answer. So an error verdict that expired while the person read the prompt would
+  be re-asked, and a FAIL then would refuse a call they had approved. The first design expired
+  errors after 60 s; this is why it went.
+- **`security/` imports `config`, `credentials` and the stdlib and nothing else**
+  (ARCHITECTURE's rule). A client that counts its bytes on §53's meter in `tools/` cannot live
+  there.
+- **The suite replaces `httpx` with a fake** in the root conftest, so a client on `httpx` could
+  only be tested against the fake. The owner chose real mock servers.
+
+**The owner's decisions.** Through the question tool, on 2026-11-08:
+
+- **The mode, JV11.** `classified`, beside `tiered`, which stays exactly as it is. The owner asked
+  for `tiered` to remain available, under its own name or with the new mode named apart.
+- **The scope, JV11 and JV12.** The model is asked only where `tiered` would ask. ROADMAP_v2 §28's
+  two limits are kept, so only a single command that runs in the container is sent.
+- **One verdict, JV14.** Verdicts are reused per process.
+- **The verdict, JV15.** It goes in the prompt and the log, never to the model.
+- **The metrics, JV16.** The four are fixed, in one table in code.
+- **The styles, JV17.** Both `systemone` and `openai_json`.
+- **On failure, JV18.** `on_fail` is one setting and ships `ask`.
+- **The command, JV19.** `/classifier`.
+- **The test route.** Mock servers in both shapes, with a live run owed.
+
+JV20, and JV17's HTTP rules, are adopted defaults the owner may overturn.
+
+**Built.**
+
+- `security/capability.CLASSIFIED_MODE`, and `classified` in `APPROVAL_MODES` and
+  `config_schema.ShellApprovalMode`.
+- Ten `shell_classifier_*` keys in `config.yaml`:
+  - every one an authority key, each marked `AUTHORITY --` with its own `/config` confirmation
+    sentence;
+  - the JV9 warning and the local-model note beside them;
+  - a malformed URL refused at launch.
+- `security/posture.ClassifierSettings`, frozen beside the mode, and the badge line.
+- `security/sandbox.single_command`.
+- In `tools/builtin/shell.py`:
+  - step 4a of the ladder;
+  - `classifier_key` and `classifier_question`, the one decision of whether the model is asked;
+  - `classifier_refusal` in `run` and in background and monitor starts;
+  - the verdict in the approval notice.
+- `core/decision_classifier.py`:
+  - the metric table;
+  - both request bodies and their parsers;
+  - the stdlib HTTP: no redirect followed, the body bounded, no key over plain http to another
+    machine, counted on the provider meter;
+  - the verdict, the cache, and `/classifier`'s text for both shells.
+- `/classifier` bound in the TUI (`test` in a worker) and the CLI.
+
+**Not changed.** `always`, `tiered`, `contained` and `never` decide exactly as before, and the
+default is `tiered`. An interactive session is never classified. Nothing is added to
+`providers.json.example`: a TypeSafe key is an entry the user names. The verdict is not rendered
+in `core/replay.py`.
+
+**Verification.**
+
+- **Full suite:**
+  - Run on Windows, in a venv built from `main`'s requirements, with `AGENT_WORKSPACE` unset.
+  - The worktree had `providers.json` copied from its template and `config.yaml` given LF
+    endings, as tests.yml's checkout has them.
+  - Result: 9222 passed, 88 skipped, none failed. That is 9310, the stated count.
+- **The first full run failed 11 tests, all in `tests/test_tui.py`,** and none was a behaviour
+  break:
+  - the slash panel's pinned windows, because `/classifier` sorts in at index 2 of the
+    bare-slash list and is a seventh command starting with `c`;
+  - `/config`'s list of mode words, which gains `classified`.
+  - The windows were re-pinned one step along, and the step that drops one entry and gains two
+    still does.
+- **Breakages:** 20 of 20 deliberate breakages each turned a named test red, after a first pass
+  scored 18:
+  - **M11 was a real gap.** urllib refuses a 307 or 308 to a POST on its own, so a test of 307
+    alone passed whether or not redirects were refused. It follows a 301, 302 or 303 as a GET
+    that still carries the `Authorization` header. The test now covers all five codes and
+    records GETs.
+  - **M16 was an equivalent mutation.** `"" or "" + x` is `x`, so it was replaced.
+- **Other gates:**
+  - ruff is clean on the whole tree.
+  - bandit has 0 new findings against the rewritten baseline, with the new files scanned, and
+    its count check is green. It first could not print its report: three escapes in the new
+    test file had been written as the characters themselves, a right-to-left override among
+    them, which is what B613 exists to catch. They are escapes now.
+  - gitleaks is clean on an export of the tracked and new files, with CI's config.
+  - pip-audit was not run, since no dependency moved.
+- **Not done here:**
+  - no live classifier answered (the owner's choice);
+  - no Linux run, which CI does;
+  - no TUI screenshot.
+
+- **Version:** the branch's beta identity, `0.3.12-b.1.decision-classifier.r221ab7fae163`, so the
+  merge releases the next patch.

@@ -15,6 +15,23 @@ other name.
 
 ---
 
+## The `classified` shell approval mode (batch 248)
+
+| Change | Test | Fix |
+|---|---|---|
+| Send a compound command, a host read, the fallback, WSL or SSH to the decision model | `TestWhatTheModelNeverSees` | Keep `classifier_question`'s checks; ROADMAP_v2 §28 recorded both limits and the owner kept them (JV12) |
+| Put anything but the command and the project path into the state, the rationale above all | `test_the_rationale_never_reaches_the_model`, `test_a_pass_sends_the_documented_body_and_reads_it_back` | `build_state` is the only producer (JV4) |
+| Let no verdict, or an error, run a command | `test_no_verdict_asks_even_under_reject`, `test_both_vendors_errors_are_read_and_ask` | ERROR asks under both `on_fail` values (JV10, JV13) |
+| Expire held verdicts, or re-ask the model after the person answered | `test_a_human_yes_after_no_verdict_still_runs_under_reject` | Every verdict is held for the process (JV14) |
+| Stop enforcing `reject` in `run` or a session start | `test_a_reject_is_refused_by_run_without_a_number`, `test_a_background_start_is_refused_under_reject` | A `refusal_check` does not deny; the handler reads the held verdict |
+| Put a verdict's numbers into a tool result or a refusal | `test_a_reject_is_refused_by_run_without_a_number`, `test_a_pass_runs_and_its_result_carries_no_verdict` | They belong in the prompt and the log only (JV15) |
+| Add a sixth approval mode, or move `classified` | `test_the_shipped_default_is_tiered`, `test_classified_is_a_mode_between_tiered_and_contained` | Update `APPROVAL_MODES`, `ShellApprovalMode`, the badge and `/config`'s vocabulary together |
+| Add a `shell_classifier_*` key | `test_the_config_command_gates_every_posture_key`, `test_config_yaml_marks_every_authority_key_and_no_others`, `test_every_classifier_key_is_an_authority_key` | Mark it `AUTHORITY --` in `config.yaml`, add it to `HARNESS_AUTHORITY_KEYS` with an `AUTHORITY_EFFECT` sentence, and update the counts (21 keys, 168 settable scalars) |
+| Rename a metric or its config key | `test_the_posture_names_the_metrics_the_client_asks` | `security/posture.CLASSIFIER_THRESHOLD_KEYS` re-states `METRICS` for the layering rule; change both |
+| Add or rename a command that sorts among the first ten, or a mode | `TestTheWindowSlidesOverTheMatches`, `TestThePanelFitsTheRowsItHas`, `TestThePanelOpensOnWhatIsTyped`, `TestTheKeysWhileThePanelIsOpen`, `TestTheConfigPanelIsTheCommandPanel` in `tests/test_tui.py` | Re-pin the windows and the step counts one place along, and check the drop-one-gain-two step still does that (batch 248 moved them for `/classifier`) |
+
+---
+
 ## README's agent and skill fields (batch 247)
 
 | Change | Test | Fix |

@@ -353,7 +353,7 @@ class TestNothingReachableChangesIt:
         two things that make the gate real: every authority key resolves
         through the gate, and every one of them has an effect sentence.
 
-        Over all eleven rather than over `Posture`'s own fields, because the
+        Over all twenty-one rather than over `Posture`'s own fields, because the
         two do not share a spelling: the dataclass says
         `allow_insecure_fallback` where `config.yaml` says
         `allow_insecure_sandbox_fallback`, and `redact_off_env` is a fact
@@ -366,7 +366,9 @@ class TestNothingReachableChangesIt:
         import config_schema
 
         keys = config_schema.HARNESS_AUTHORITY_KEYS
-        assert len(keys) == 11
+        # 21 since batch 248: ROADMAP_v3 §56's ten `shell_classifier_*`
+        # keys (JV8), which the posture holds as one ClassifierSettings.
+        assert len(keys) == 21
         for key in keys:
             assert config_edit.authority_key(key) == key, (
                 f"{key} does not resolve through the gate, so /config "

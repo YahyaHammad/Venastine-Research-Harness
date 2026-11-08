@@ -191,7 +191,7 @@ class TestTheDescriptionsComeFromTheSchema:
 
     def test_a_closed_vocabulary_lists_its_words(self):
         assert config_edit.find("shell_approval_mode").values == (
-            "always | tiered | contained | never")
+            "always | tiered | classified | contained | never")
         assert config_edit.find("compaction_strategy").values == (
             "rederive | chain")
 
@@ -319,8 +319,9 @@ class TestTheRoundTripIsLossless:
         # `init_diff_shown_lines`, /init's bounds on the existing hub (#226).
         # 156 since batch 239: ROADMAP_v3 §53's window and its three meter
         # ceilings (IO8, IO9). 158 since batch 240: fetch_url's two read
-        # bounds, `fetch_max_html_mb` and `fetch_max_pdf_mb`.
-        assert touched == 158, f"{touched} settable scalars, expected 158"
+        # bounds, `fetch_max_html_mb` and `fetch_max_pdf_mb`. 168 since
+        # batch 248: ROADMAP_v3 §56's ten `shell_classifier_*` keys.
+        assert touched == 168, f"{touched} settable scalars, expected 168"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

@@ -1138,7 +1138,9 @@ class TestTheModeIsTheGateAndTheFieldIsTheRatchet:
         # used to carry a second copy that nothing enforced, so this line
         # could have passed against a tuple the gate never consulted.
         from security.capability import APPROVAL_MODES
-        assert APPROVAL_MODES == ("always", "tiered", "contained", "never")
+        # `classified` since batch 248 (ROADMAP_v3 §56, JV11).
+        assert APPROVAL_MODES == ("always", "tiered", "classified",
+                                  "contained", "never")
         assert fresh.SHELL_APPROVAL_MODE in APPROVAL_MODES
 
     def test_shell_has_no_approvals_field_only_a_mode(self):

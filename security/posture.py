@@ -112,6 +112,67 @@ import config
 
 
 @dataclass(frozen=True)
+class ClassifierSettings:
+    """The `classified` mode's decision model, as launch bound it
+    (ROADMAP_v3 §56, JV8).
+
+    Frozen here beside `shell_approval_mode`, and for its reason: every one
+    of these is an authority key, and a value bound at import cannot be
+    moved by an environment variable or a `config.X = ...` later in the
+    process. `core/decision_classifier.py` is what asks the model; this is
+    only what it is told. No key: `credential` NAMES the providers.json
+    entry, which is read when a request is made and never held.
+    """
+
+    style: str = "systemone"
+    url: str = ""
+    model: str = ""
+    credential: str = ""
+    timeout_s: float = 10.0
+    on_fail: str = "ask"
+    # ((metric name, threshold), ...), in core/decision_classifier.METRICS
+    # order. A test holds the names and keys below against that table.
+    thresholds: tuple = ()
+
+    @property
+    def configured(self) -> bool:
+        """Whether there is anything to ask. An unconfigured classifier is
+        not a launch failure (JV20): every question it would have answered
+        asks, which is `tiered`, and `/classifier` and the badge say so."""
+        return bool(self.url.strip() and self.model.strip())
+
+    def threshold(self, name: str) -> float:
+        for metric_name, value in self.thresholds:
+            if metric_name == name:
+                return float(value)
+        raise KeyError(name)
+
+
+#: (metric name, config.py name) for the four thresholds. The metric names
+#: are core/decision_classifier.METRICS's, re-stated rather than imported
+#: for the layering reason in ClassifierSettings' docstring, and pinned.
+CLASSIFIER_THRESHOLD_KEYS = (
+    ("containedness", "SHELL_CLASSIFIER_MIN_CONTAINEDNESS"),
+    ("risk", "SHELL_CLASSIFIER_MAX_RISK"),
+    ("modification", "SHELL_CLASSIFIER_MAX_MODIFICATION"),
+    ("network", "SHELL_CLASSIFIER_MAX_NETWORK"),
+)
+
+
+def classifier_from_config() -> ClassifierSettings:
+    return ClassifierSettings(
+        style=config.SHELL_CLASSIFIER_STYLE,
+        url=config.SHELL_CLASSIFIER_URL,
+        model=config.SHELL_CLASSIFIER_MODEL,
+        credential=config.SHELL_CLASSIFIER_CREDENTIAL,
+        timeout_s=float(config.SHELL_CLASSIFIER_TIMEOUT_S),
+        on_fail=config.SHELL_CLASSIFIER_ON_FAIL,
+        thresholds=tuple((name, float(getattr(config, key)))
+                         for name, key in CLASSIFIER_THRESHOLD_KEYS),
+    )
+
+
+@dataclass(frozen=True)
 class Posture:
     """What this process is allowed to do to itself and its host.
 
@@ -120,7 +181,8 @@ class Posture:
     legal statement anywhere in the process.
     """
 
-    # "always" / "tiered" / "contained" / "never" -- validated at bind time, so a typo
+    # "always" / "tiered" / "classified" / "contained" / "never" --
+    # validated at bind time, so a typo
     # is a startup failure and never a policy that quietly means
     # something else (the argument capability.validate_mode makes).
     shell_approval_mode: str
@@ -160,6 +222,11 @@ class Posture:
     # real distinction: the constant is the permanent answer and this is
     # one run's, and the environment may only ever turn redaction OFF.
     redact_off_env: bool
+    # ROADMAP_v3 §56 (JV8). The decision model `classified` asks. Defaulted,
+    # unlike the fields above, because it is read only under one mode and
+    # every other mode is complete without it; `_from_config` always
+    # supplies it.
+    shell_classifier: ClassifierSettings = ClassifierSettings()
 
     def unsafe_reasons(self) -> list[tuple[str, str]]:
         """Every active posture that weakens the shipped defaults, as
@@ -201,6 +268,22 @@ class Posture:
                 "in the container without network runs without asking, "
                 "including code the agent wrote itself; host reads and "
                 "network commands still ask"))
+        elif self.shell_approval_mode == "classified":
+            # ROADMAP_v3 §56 (JV11, JV12). The first layer in the harness
+            # that WIDENS rather than tightens, by design -- so it is on the
+            # badge whenever it is on, and says who decides.
+            settings = self.shell_classifier
+            who = (f"{settings.model} at {settings.url}"
+                   if settings.configured else
+                   "none is configured yet, so everything it would answer "
+                   "asks, as under tiered")
+            reasons.append((
+                "shell: classified",
+                "SHELL_APPROVAL_MODE is 'classified' -- a decision model "
+                f"({who}) decides whether a single command that runs in the "
+                "container, and that tiered would ask about, runs without "
+                "asking; compound commands, host reads, the host fallback, "
+                "WSL and SSH still ask"))
         # §48 (CE6). Under "always" the pair is NOT "no ask": the mode check
         # returns before the fallback opt-in is ever read, so every command
         # asks, the host fallback included. Measured, and the badge said
@@ -305,6 +388,7 @@ def _from_config() -> Posture:
         allow_ssh_backend=bool(config.ALLOW_SSH_BACKEND),
         redact_tool_outputs=bool(config.REDACT_TOOL_OUTPUTS),
         redact_off_env=_redact_off_from_env(),
+        shell_classifier=classifier_from_config(),
     )
 
 

@@ -156,7 +156,30 @@ NonNegativeNumber = Annotated[float, BeforeValidator(_number_only),
 #: startup failure and never a policy that quietly means something else --
 #: one direction of a fallback asks about everything and the other about
 #: nothing, and a typo cannot pick.
-ShellApprovalMode = Literal["always", "tiered", "contained", "never"]
+ShellApprovalMode = Literal["always", "tiered", "classified", "contained",
+                            "never"]
+
+#: ROADMAP_v3 §56 (JV7): which wire the decision model speaks, named and
+#: never probed -- a probe is a network call at launch and a guess about a
+#: security control.
+ShellClassifierStyle = Literal["systemone", "openai_json"]
+
+#: ROADMAP_v3 §56 (JV6, JV18): what a call outside a threshold does.
+ShellClassifierOnFail = Literal["ask", "reject"]
+
+
+def _http_url_or_empty(value: Any) -> Any:
+    """Empty, or an http(s) URL. A typo in the endpoint that decides
+    whether a human is asked is a startup failure, not a classifier that
+    silently errors on every call."""
+    if isinstance(value, str) and value.strip() and not (
+            value.startswith("https://") or value.startswith("http://")):
+        raise ValueError("must be empty or start with https:// or http://")
+    return value
+
+
+#: `shell_classifier_url`: empty (not configured) or an http(s) base URL.
+ClassifierUrl = Annotated[str, BeforeValidator(_http_url_or_empty)]
 
 #: "rederive" / "chain". Validated here AND in
 #: `config_loader.effective_compaction`, which checks the value a
@@ -440,6 +463,22 @@ class HarnessConfig(_Model):
     ssh_host_key: str
     ssh_binary: str
     shell_approval_mode: ShellApprovalMode
+    # ROADMAP_v3 §56 (JV8, JV11). The decision model the `classified` mode
+    # asks. Every one is an authority key: the URL decides who answers,
+    # the credential NAME decides which providers.json key is sent there,
+    # and the four numbers decide whether a human is asked. Flat scalars,
+    # the SSH backend's shape (SS36): one classifier, a fact about this
+    # machine and not about any one command.
+    shell_classifier_style: ShellClassifierStyle
+    shell_classifier_url: ClassifierUrl
+    shell_classifier_model: str
+    shell_classifier_credential: str
+    shell_classifier_timeout_s: PositiveNumber
+    shell_classifier_on_fail: ShellClassifierOnFail
+    shell_classifier_min_containedness: Unit
+    shell_classifier_max_risk: Unit
+    shell_classifier_max_modification: Unit
+    shell_classifier_max_network: Unit
     sandbox_docker_image: str
     sandbox_timeout_seconds: PositiveInt
     sandbox_memory_mb: PositiveInt
@@ -655,6 +694,19 @@ DERIVED_VALUES = ("OUTPUT_DIR", "WORKSPACE_DIR_EXPLICIT")
 #: authority and cost.
 HARNESS_AUTHORITY_KEYS = frozenset({
     "shell_approval_mode",
+    # ROADMAP_v3 §56 (JV8): the decision model's endpoint, model, key name,
+    # wait, failure action and thresholds. Each decides whether, or by
+    # whom, a shell command is let through unasked.
+    "shell_classifier_style",
+    "shell_classifier_url",
+    "shell_classifier_model",
+    "shell_classifier_credential",
+    "shell_classifier_timeout_s",
+    "shell_classifier_on_fail",
+    "shell_classifier_min_containedness",
+    "shell_classifier_max_risk",
+    "shell_classifier_max_modification",
+    "shell_classifier_max_network",
     "allow_insecure_sandbox_fallback",
     "auto_approve_sandbox_fallback",
     "allow_wsl_backend",

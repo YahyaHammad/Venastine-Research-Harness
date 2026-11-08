@@ -37,7 +37,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§53. A rolling bound on what the harness pulls and pushes** — **(BUILT in batch 239)** (nothing anywhere counts a byte over the wire, so a user on a metered connection has no ceiling and a tool that fetches something enormous is bounded only by one tool's own per-request cap)
 - **§54. `@` names a file, and the tree is read once** — **(BUILT in batch 204)** (project paths and folders complete in the existing panel; names guide the agent to read, without loading contents)
 - **§55. The whole command, and what it printed** — **(BUILT in batch 125)** (a shell call shows a 140-character digest and its output is never rendered at all, so what the agent ran and what came back are both off screen)
-- **§56. A decision model as the shell classifier** — **(NOT BUILT: requested batch 122, specified, not designed)** (the gate decides from a word list and a token scan, so every judgement it cannot express as a rule costs an approval prompt, and the rules cannot be tuned per user)
+- **§56. A decision model as the shell classifier** — **(BUILT in batch 248)** (the gate decides from a word list and a token scan, so every judgement it cannot express as a rule costs an approval prompt, and the rules cannot be tuned per user. The opt-in `classified` mode now asks a decision model -- TypeSafe's Jev, an Ollama decision model, or any OpenAI-compatible model -- about a single command that runs in the container and that `tiered` would ask about, and runs it unasked only inside every threshold; ROADMAP_v2 §28's two limits hold; JV11-JV20)
 - **§57. One model for the subagents** — **(BUILT in batch 235)** (an agent definition can pin a model and nothing can set one for the subagents as a class, so a cheap child runs on the parent's expensive model)
 - **§58. Who the agent is when you ask it** — **(BUILT in batch 203)** (a short harness identity composed at turn time for ordinary chat, active agents and spawned subagents, naming their effective model/provider; internal compaction, review and research prompts stay task-specific; PR1–PR6)
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
@@ -1326,7 +1326,8 @@ decision model, released 2026-09-15: it takes a piece of state plus named, typed
 returns typed values with calibrated probabilities, never prose. The wire is
 `POST <base>/v1/systemone` with `{"model": ..., "state": ..., "questions": {...}}` and bearer auth;
 the question types are **Choice** (categorical), **Score** (bounded numeric) and **Noul** (yes/no
-probability). Published latency is 70-500 ms.
+probability). Published latency is 70-500 ms. **Not confirmed in batch 248:** no page of TypeSafe's
+documentation read on 2026-11-08 publishes a latency figure, so nothing built relies on one.
 
 The ecosystem matters for the configuration shape. **Ollama 0.35 serves `/v1/systemone` beside
 `/v1/chat/completions` on the same base**, and **OpenJev** and **openjev-sglang** implement the same
@@ -1374,7 +1375,7 @@ request body, which is what JV7 is for.
 | **JV9** | **The `config.yaml` warning states the distinction precisely rather than repeating either side of it.** The vendor's "mathematically impossible to hallucinate" claim is about TYPE conformance -- constrained decoding cannot emit a value outside the schema -- and says nothing about the judgement being correct. The model still reads text an attacker may have influenced, and a confident wrong number is exactly the failure mode a threshold acts on. The warning says that, in those terms |
 | **JV10** | **A classifier that is slow, unreachable or malformed NEVER auto-approves.** It falls back to asking. Which mode it falls back to is open; that it fails closed is not, and it is the one property this whole section rests on: an attacker who can make the endpoint unreachable must not thereby widen what runs unasked |
 
-### What must be settled before this is built
+### Questions recorded before implementation (settled in batch 248 below)
 
 - The TUI command's name. `/classifier` is the obvious parallel to `/model`; something naming the
   decision rather than the mechanism may read better.
@@ -1386,6 +1387,68 @@ request body, which is what JV7 is for.
   verdict is cached per exact command string.
 - Whether the four metrics are fixed or user-extensible in config.
 
+### Settled with the owner (batch 248, JV11-JV20)
+
+The owner chose §56 from the two sections the index still marked NOT BUILT, and answered every
+question above through the harness's question tool on 2026-11-08. Two answers changed the shape
+of the section rather than filling it in: the scope (JV11) and the conflict with ROADMAP_v2 §28,
+found while reading the gate before any code was written (JV12).
+
+| # | Decision |
+|---|---|
+| **JV11** | **`classified` is a fifth mode, beside `tiered`, and `tiered` is unchanged** (owner). It is `tiered` plus the decision model, asked only where `tiered` would ask, so a pass turns a prompt into a run and nothing `tiered` already runs unasked waits on a network call. The owner asked that `tiered` stay available as it is, under its own name or with the new mode named apart; renaming it would have broken every `config.yaml` that says `tiered`, and JV1 had already ruled that out. `APPROVAL_MODES` lists it between `tiered` and `contained`, because it asks about a subset of what `tiered` asks about |
+| **JV12** | **ROADMAP_v2 §28's two recorded limits hold** (owner, once the conflict was put to them). §28's "Deliberately not in §28" recorded, before §56 existed, that "the model never sees compound shell" -- routing compound commands to a model "collapses the injection argument entirely" -- and that "certain safe" must not authorise a host read. §56 said neither. So the model is asked only about a SINGLE command -- no shell metacharacter, quoting or escaping, and no control or invisible character (`security/sandbox.single_command`) -- that runs in the CONTAINER and that the classifier characterised. Compound commands, host reads, the host fallback, WSL and SSH ask exactly as under `tiered`. This is the named decision §28 asked for: the first layer in the harness that widens rather than tightens, which breaks D14's one-way ratchet on purpose and only here |
+| **JV13** | **No verdict asks** -- JV10's open fallback, settled by JV11. The calls the model is asked about are calls `tiered` asks about, so "fall back to `tiered`" and "ask" are one answer. A timeout, an unreachable or unconfigured endpoint, an error status, a redirect, a body over 256 KB, a refused network-meter admission, or an answer that is not exactly the four typed values in range all produce ERROR, and ERROR asks under both `on_fail` settings |
+| **JV14** | **One verdict per call, held for the process** (owner: reuse per process), keyed by the exact command, the project path, the backend and the declared network. `shell.classifier_key` is the one decision of whether the model is asked at all, read by the gate, the handlers and the notice. The gate stores the verdict; `shell.run` and the background and monitor starts read it to refuse a `reject`, because a `refusal_check` does not deny a call -- the handler still runs -- and the notice reads it. **An ERROR is held too, and that is measured rather than tidy:** the loop asks the gate twice for one call, before the prompt and again inside `dispatch()` after the answer, so an error that expired while the person read the prompt would be asked again, and a FAIL then would turn their yes into a refusal. `/classifier clear` drops every verdict; one cleared between the gate and the run refuses with "retry" rather than running unjudged |
+| **JV15** | **The verdict reaches the person and never the model** (owner). The approval prompt shows each value against its threshold and which failed, and every verdict is logged to `logs/app.log`. Neither the tool result nor the refusal the model reads carries a number or a threshold: those are a gradient a hijacked agent could climb. Rendering verdicts in `core/replay.py` is in the gap register |
+| **JV16** | **The four metrics are fixed, in one table in code** (owner): `core/decision_classifier.METRICS`, each row naming its question, its type, its levels, its direction and its config key, so a fifth metric is one row and its test. `config.yaml` holds one threshold per metric. A `score` answer is the probability-weighted mean of zero-based level indices, so it is divided by levels-1 to put every threshold on one 0-1 scale; a `noul` is already a probability. Containedness passes at or above its threshold, the other three at or below |
+| **JV17** | **Both styles are built** (owner). `systemone` POSTs `{model, state, questions}` to `<url>/systemone` and reads TypeSafe's `{"detail": ...}` and Ollama's `{"error": "..."}`; `openai_json` POSTs a strict `json_schema` chat request to `<url>/chat/completions` and reads integer levels and a boolean, with no temperature (§87). **Adopted defaults, the owner may overturn any:** the HTTP is the standard library's, so the suite's fake `httpx` never stands between a test and a real socket; no redirect is followed; the response is read to 256 KB; a key is never sent over plain http to anything but this machine; every request is admitted and counted on §53's provider meter |
+| **JV18** | **`on_fail` is one setting for all four metrics, and ships `ask`** (owner), so the mode works as a filter -- the prompt carries the verdict -- long before anyone trusts it to decide. `reject` refuses a failed command without asking, and says so to the model without a number |
+| **JV19** | **`/classifier`, in both shells** (owner's name, from §56's own suggestion): the settings, which providers.json entry the key comes from (never the key) and whether it holds one, the thresholds and the held verdicts; `test <command>` asks the model now, under any mode, and runs nothing, holding the verdict so the real call agrees with it; `clear` drops the held verdicts. The text is `core/decision_classifier`'s, so the two shells cannot describe it differently (§89) |
+| **JV20** | **An unconfigured classifier is not a launch failure** (adopted default). `classified` with an empty URL or model asks wherever the model would have answered, which is `tiered`, and the badge and `/classifier` say why. A malformed URL IS a launch failure, in `config_schema`, because a typo in the endpoint that decides whether a human is asked must not look like an outage |
+
+### Built and measured (batch 248, 2026-11-08)
+
+**The wire, re-verified before anything was written.** TypeSafe's documentation and its OpenAPI
+document, and Ollama's `/v1/systemone` reference, were read on 2026-11-08. Both serve the shape
+recorded above: `{model, answers, usage}` back, each answer typed like its question; a `score`
+answer is the weighted mean of zero-based level indices (2 to 10 levels), not a 0-1 value; a
+`noul` is the probability of yes and carries no confidence. Their errors differ (`detail` against
+`error`), TypeSafe's aliases move (`jev-latest` and `jev-preview` both name `jev-1.14.0` today),
+and TypeSafe exposes no OpenAI-compatible route. **One recorded fact did not check out:** no page
+read publishes a latency figure, so the "70-500 ms" above is unconfirmed and nothing relies on it.
+TypeSafe's own page on Jev's limits says content written to steer it "can move the answer", which
+is JV9's warning in the vendor's words, and that Jev "leans toward the option that comes first";
+every level list is ordered lowest first, as the wire requires.
+
+**What runs.** `tools/builtin/shell.py`'s ladder gains step 4a, below every refusal and always-ask
+and below the fallback opt-in, and above `contained`'s step. `classifier_key` decides whether the
+model is asked; `classifier_question` is the same decision with its reason, which `/classifier
+test` prints under any mode. The client is `core/decision_classifier.py`, not `security/`, because
+`security/` imports `config`, `credentials` and the stdlib and nothing else, and this module makes
+network calls through `tools/builtin/_net_common`'s meter. Its settings are frozen into the posture
+as `ClassifierSettings` beside `shell_approval_mode`, so no variable or later assignment moves
+them (UN1). The ten `shell_classifier_*` keys are authority keys, each marked in `config.yaml` and
+each with its own confirmation sentence in `/config`. The badge says `classified` is on and who
+decides.
+
+**Measured.** `tests/test_decision_classifier.py`, 104 tests, drives every request across a real
+socket to local servers answering in TypeSafe's shape, Ollama's and an OpenAI-compatible one: the
+body (the state is exactly the command and the project path, and a marker put in the rationale
+never crosses the wire), the key header and its absence, each threshold in its direction and on
+its boundary, five vendor errors, eight malformed answers, every redirect status, whose target receives
+nothing, a timeout, nothing listening, a key refused over plain http before any connection, a
+missing key entry, an oversized body and a refused meter. The gate: a pass, a fail under each
+`on_fail`, no verdict, a reject refused by `run` and by a background start with no number in what
+the model reads, a person's yes honoured under `ask` and after an error, a cleared verdict
+refusing, one request per command, and the prompt showing the numbers without asking again.
+Eleven compound spellings, an inert read, a host read, the host fallback, root, a protected path,
+WSL, SSH and an interactive session each send nothing. Twenty deliberate breakages of the code each
+turned a named test red -- after the first pass found one real gap: urllib refuses a 307 or 308 to
+a POST on its own but FOLLOWS a 301, 302 or 303 as a GET that still carries the Authorization
+header, so a test of 307 alone passed whether or not redirects were refused. It now covers all five. **No live endpoint has answered** -- the owner chose mock servers for this
+batch; see the gap register.
+
 ### Gap register
 
 - **This widens what runs unasked, by design, and the widening is the feature.** JV2's ordering is
@@ -1393,7 +1456,23 @@ request body, which is what JV7 is for.
   relative to this one, and the answer for every refusal and every always-ask is "above".
 - **A local model's judgement is not the hosted one's.** The same thresholds against a 0.8B local
   model and against `jev-latest` are two different policies wearing one set of numbers. Worth saying
-  in the config comment beside JV9's warning.
+  in the config comment beside JV9's warning. **Said there since batch 248**, with the alias that
+  moves: tune against a version (`jev-1.14.0`), not `jev-latest`.
+- **No live endpoint has answered yet** (the owner's choice for batch 248: mock servers in both
+  shapes). The first live run, against TypeSafe with a key or Ollama 0.35+ with a decision model
+  such as `nimble`, should confirm the wire against a real answer and measure the latency this
+  section's first paragraph could not.
+- **An error is held until `/classifier clear`** (JV14's stated cost). After an outage, the exact
+  commands that met it keep asking for the rest of the session; the prompt and `/classifier` say
+  so. Expiring errors was the first design, and the double `approval_needed` is why it went.
+- **Quoting is compound** (JV12's price). `git commit -m "x"` and `python -c '...'` always ask,
+  because a quote is where the classifier and the executor stop agreeing on what the tokens are.
+- **`openai_json`'s numbers are coarser and uncalibrated.** An integer level and a boolean, from a
+  model that was not trained to give probabilities; the config comment says so beside JV9's.
+- **An interactive session is never classified.** Its yes covers lines not yet typed (SS29), so
+  there is nothing to judge; it asks as under `tiered`.
+- **The verdict is not in the replay** (JV15). It is in the prompt and in `logs/app.log`;
+  `core/replay.py` and `/threads` do not show why a command ran unasked.
 
 ---
 

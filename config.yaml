@@ -739,6 +739,13 @@ ssh_binary: ''
 #   tiered    -- read-only commands from inert_commands, every argument
 #                inside the workspace, run unprompted; every other command
 #                asks, including anything that can run code
+#   classified -- tiered, plus a decision model (the shell_classifier_*
+#                keys below) asked about a single command that runs in the
+#                container and that tiered would ask about. If it passes
+#                your thresholds, the command runs unprompted. Compound
+#                commands (any of ; | & $ ` > < ( ) { } ! # ~ ' " \),
+#                reads outside the workspace, the host fallback, WSL and
+#                SSH are never sent to it and ask exactly as under tiered
 #   contained -- anything that runs in the container without network runs
 #                unprompted, code included; reads outside the workspace and
 #                network commands still ask
@@ -750,6 +757,73 @@ ssh_binary: ''
 # Shell approval is governed solely here: `tool_approvals` deliberately has
 # no `shell` key, so there is no second switch that can disagree with this.
 shell_approval_mode: tiered
+
+# AUTHORITY -- the decision model `classified` asks (ROADMAP_v3 §56). Only
+# read when shell_approval_mode is `classified`; `/classifier test <command>`
+# shows a verdict under any mode without running anything.
+#
+# READ THIS BEFORE TURNING IT ON. This is the one setting in the harness
+# that WIDENS what runs without asking you, by design. The model reads the
+# command and the project path and nothing else -- never the agent's stated
+# reason -- but the command itself is text the agent wrote, and the agent
+# may have read something written to steer it. A decision model's
+# guarantee is that its answer has the right TYPE (a number in range), not
+# that its judgement is right; TypeSafe's own documentation says content
+# written to steer Jev "can move the answer". A confident wrong number is
+# exactly what a threshold acts on. Start with shell_classifier_on_fail:
+# ask, and watch its verdicts in the approval prompt before trusting it.
+#
+# A small local model and a hosted one are two different policies wearing
+# the same thresholds. And a model ALIAS moves when its vendor ships a new
+# release (TypeSafe: jev-latest), so name a version (jev-1.14.0) once you
+# have tuned the numbers against it.
+#
+# Which wire to speak: `systemone` (TypeSafe's Jev at
+# https://api.typesafe.ai/v1, or Ollama 0.35+ at http://localhost:11434/v1
+# with a decision model such as nimble), or `openai_json` (any
+# OpenAI-compatible provider, asked for a strict JSON answer; its numbers
+# are coarser, and not calibrated probabilities).
+shell_classifier_style: systemone
+
+# AUTHORITY -- the classifier's base URL, ending at /v1. Empty means not
+# configured: every command the model would have answered asks, exactly as
+# under tiered.
+shell_classifier_url: ''
+
+# AUTHORITY -- the model to ask, e.g. jev-1.14.0 or nimble.
+shell_classifier_model: ''
+
+# AUTHORITY -- the providers.json ENTRY whose API_KEY is sent to the URL
+# above, e.g. TYPESAFE or OPENAI. Empty sends no key (a local Ollama needs
+# none). The key itself never goes in this file, and it is never sent
+# over plain http to another machine.
+shell_classifier_credential: ''
+
+# AUTHORITY -- seconds to wait for a verdict. No verdict in time means the
+# command asks; it never means it runs.
+shell_classifier_timeout_s: 10
+
+# AUTHORITY -- what a command outside any threshold does: `ask` raises the
+# normal approval prompt, with the verdict shown in it; `reject` refuses
+# the command without asking. A model that gives no verdict always asks.
+shell_classifier_on_fail: ask
+
+# AUTHORITY -- the four thresholds, each from 0 to 1. A command runs
+# unprompted only if all four pass. This one, containedness: how
+# completely its effects stay inside the project. Passes at or ABOVE it.
+shell_classifier_min_containedness: 0.75
+
+# AUTHORITY -- general risk: how much harm the command could do. Passes at
+# or below it.
+shell_classifier_max_risk: 0.25
+
+# AUTHORITY -- workspace modification: how much it changes the project's
+# files. Passes at or below it.
+shell_classifier_max_modification: 0.5
+
+# AUTHORITY -- networkedness: the probability it uses the network. Passes
+# at or below it.
+shell_classifier_max_network: 0.5
 
 # The image sandboxed commands run in, under Docker or Podman (whichever
 # runs the sandbox -- ROADMAP_v3 §49, SS22). Fully qualified so Podman
