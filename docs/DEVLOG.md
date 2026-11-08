@@ -31319,3 +31319,133 @@ in `core/replay.py`.
 
 - **Version:** the branch's beta identity, `0.3.12-b.1.decision-classifier.r221ab7fae163`, so the
   merge releases the next patch.
+
+## Batch 249 -- Plugins, slice 1: the format, the store, `/plugin` and its trust modal (2026-11-08)
+
+**Asked.** The owner asked for a plugin system and described it before any design. A plugin adds
+tools (with their own dependencies), skills, agents, MCP servers and settings of its own. It never
+touches a core file and cannot alter the core runtime. It is pulled from GitHub, since there is no
+serving infrastructure, and the marketplace is this repository's `plugins/` folder, nested to any
+depth. `/plugin install` and `/plugin uninstall` sit behind a trust modal. CI tests only changed
+plugins. A bot flags a pull request that touches `plugins/` and anything else. A plugin-only merge
+is `release:skip`. A scan flags suspicious plugins. External plugins can be installed. There is a
+standard format and a guide. The owner then asked for slice 1 of the six-slice plan they approved.
+ROADMAP_v3 §94 records the whole design.
+
+**Measured first.**
+
+- **Separate containers against one shared container, for plugin tools.** Measured under rootless
+  Podman 5.7 in WSL, then, at the owner's request, under Docker Desktop 29.7.2 once its daemon was
+  up. Each plugin was one idle Python process, which is what a tool runner is between calls.
+  - Podman, separate vs shared: 17 vs 17 MB for three plugins, 38 vs 33 MB for eight.
+  - Docker, separate vs shared: 31 vs 23 MB for three plugins, 72 vs 41 MB for eight. Each
+    container adds a `containerd-shim` of 4.6-7 MB, against Podman's 0.44 MB `conmon`.
+  - A container starts in 0.3-1.0 s; eight start in parallel in about a second.
+  - A kept-alive runner's call through `docker run -i` took 0.6 ms (median).
+  - The owner's rule was separate containers if the difference is minimal, and it is.
+- **Tools load from a static import list** in `tools/registry.py`, so a plugin's tool can only
+  join by a route the harness builds; slice 2's runner is that route.
+- **Skills and agents are discovered once,** in `config_loader.initialize`, and every consumer
+  reads the cached dicts through getters. A refresh that replaces those two dicts is therefore
+  enough for an install to take effect at once.
+- **`~/.config/venastine` is already a protected path**: the shell sandbox mounts it read-only
+  and the file tools refuse to write it unasked. So the store inherits that protection by living
+  there.
+- **GitHub's raw host and its trees API are all the installer needs.** One commit, the root tree
+  and the recursive `plugins` subtree, then each file at that commit, checked against its git
+  blob hash.
+
+**The owner's decisions.** Through the question tool, over four rounds on 2026-11-08:
+
+- tools in a container per plugin by default, from the shell's own image and argv builder, never
+  an image a plugin names, with an authority key to fall back to own process and venv (warned in
+  the modal: no Landlock off Linux);
+- workspace access declared and granted per project; tool calls ask, with a per-plugin opt-out;
+- the `.plugin` suffix, `plugin.yaml`, names prefixed by the plugin;
+- a failing boundary check with a label and a comment, never a closed pull request;
+- high-severity scanner findings fail, and a `plugin:scan-reviewed` label clears a false
+  positive;
+- all plugins tested when the runtime changes and weekly;
+- on everywhere, with `/plugin disable` per project;
+- settings through `/plugin config <id>`, never in `config.yaml`;
+- external plugins in the first version;
+- and for slice 1:
+  - refuse a plugin that ships tools, MCP servers or dependencies;
+  - `plugins_enabled` on by default;
+  - the marketplace as a key;
+  - a reinstall replaces after the modal.
+
+**Built.** Decisions PL1-PL19 in §94.
+
+- **The format module,** `core/plugin_format.py`, pure, so slice 4's scanner can import it:
+  - the id and folder rules;
+  - the manifest, read by a safe YAML loader with aliases and duplicate keys refused;
+  - the file set and its limits;
+  - the settings schema and its parser.
+- **The store,** `core/plugin_store.py`, in `~/.config/venastine/plugins/`:
+  - the registry with every file's SHA-256, so a changed plugin stops loading (PL8);
+  - staging, and a replacement that puts the old files back if the move in fails;
+  - per-project switches and settings.
+- **The fetch,** `core/plugin_source.py`:
+  - the marketplace at one resolved commit, with the tree checked before any download and each
+    file checked against its blob hash;
+  - a folder install, which skips and names `.git/` and `__pycache__/`.
+- **The command,** `core/plugin_commands.py`: `/plugin` with list, info, install, uninstall,
+  disable, enable and config, its trust modal text, and its panel offers.
+- **The loader,** `core/config_loader.py`:
+  - a plugin tier between user and project, with names prefixed;
+  - `refresh_plugins()`;
+  - `preview_plugin()`, which reports a definition the parser would skip with the parser's own
+    sentence.
+- **Two authority keys,** `plugins_enabled` and `plugin_marketplace`.
+- **`/plugin` in both shells.** In the TUI, `list`, `info` and `install` run in a worker and ask
+  through `ConfirmScreen`, with No focused. The CLI prints the modal's text and asks y/N.
+- **The guide,** `docs/PLUGINS.md`, the template `docs/plugin-template/example.plugin`, and
+  `plugins/README.md`.
+
+**Found by running it.** The first run of the settings tests refused a setting named `on`, which
+YAML 1.1 reads as `true`. The refusal was right, and its sentence now says why.
+
+**Not changed.** No tool, MCP or workflow code. Nothing reads a plugin's settings yet. The
+marketplace holds no plugin.
+
+**Verification.**
+
+- **Full suite:**
+  - Run on Windows, in a venv built from `main`'s requirements, with `AGENT_WORKSPACE` unset,
+    after the same setup as tests.yml's checkout (`providers.json` from its template,
+    `config.yaml` with LF endings).
+  - Result: 9383 passed, 89 skipped, none failed. That is 9472, the stated count.
+- **The first full run failed 8 tests,** none a behaviour break:
+  - the settable-scalar count (168 to 170) and the authority-key count (21 to 23);
+  - the decision ids PL1-PL19, before §94 was written;
+  - the ARCHITECTURE tree and the stated test counts;
+  - `plugin_source._trees`, a process-lifetime memo that no fixture reset. It is now in
+    `PROCESS_MEMOS`.
+  - Then `read_project_doc`'s counted bound: 68 documents, not 65. The three new ones (the
+    guide, the marketplace page and the template's README) were read before the number moved,
+    as that paragraph asks. A merged plugin will move the count again; that is in §94's gap
+    register for slice 4.
+- **The new tests:** 162. One skips here: the link test, since this Windows machine cannot make a
+  symbolic link. CI's Linux runs it.
+- **Breakages:** 24 of 24 deliberate breakages each turned a named test red. Two of the test's
+  first answers were wrong and were fixed before the pass:
+  - the first run of the settings tests used a setting named `on`, which the strict reader
+    rightly refused;
+  - drafting the mutation table showed the panel test could not tell a half-typed number. Its
+    input never prefixed the current value, so offering the value anyway would have passed. It
+    now asserts that typing `3` against a current `3` offers nothing.
+- **Other gates:**
+  - ruff is clean on the whole tree.
+  - bandit has 0 new findings against the rewritten baseline, with the new files scanned, and
+    its count check is green.
+  - gitleaks is clean on an export of the tracked and staged files, with CI's config.
+  - pip-audit was not run, since no dependency moved.
+- **End to end, outside the suite:** the template plugin was installed from its folder into a
+  throwaway HOME, declined, accepted, configured, disabled, enabled, replaced and uninstalled.
+  The modal text, the settings carry-over and the store left behind were read rather than
+  assumed.
+- **Not done here:**
+  - no install from the real marketplace, which holds no plugin yet (slice 6);
+  - no Linux run, which CI does;
+  - no TUI screenshot of the modal, which `ConfirmScreen` draws as for `/init` and `/forget`.

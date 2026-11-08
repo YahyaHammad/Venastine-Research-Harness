@@ -38,6 +38,9 @@ python main.py --tui --provider OPENAI --model gpt-4o   # or switch in-session w
 #   keep the session model
 # ROADMAP_v3 §56, both shells: /classifier [test <command>|clear] -- the shell's decision model
 #   under `shell_approval_mode: classified`; `test` asks it under any mode and runs nothing
+# ROADMAP_v3 §94, both shells: /plugin [list|info|install|uninstall|disable|enable|config] --
+#   skills, agents and settings from the marketplace in plugins/ or --from a folder, behind a
+#   trust modal; installed in ~/.config/venastine/plugins/, never beside a core file
 # §79 in the TUI: /connect [name [--key]|custom <NAME> <url>|cancel] -- connect a provider
 #   without editing providers.json: HF and OpenRouter sign in (HD5), and each ModelScope
 #   site (modelscope, modelscope-cn) where a hosted bridge holds its app (HD13); the rest take a key
@@ -66,7 +69,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 9310 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 9472 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -389,7 +392,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§55, §58, §59, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84, §85, §86, §87, §88, §89, §90, §91, §92 and §93 built; §60 recorded from the owner's request in batch 123, specified and not yet designed; §56 recorded in batch 122 and designed with the owner and built in batch 248; §53 recorded in batch 122 and designed with the owner and built in batch 239; §92 asked for and built in batch 240; §93 asked for and built in batch 241; §59 recorded in batch 122 and designed with the owner and built in batch 238; §57 recorded in batch 122 and designed with the owner and built in batch 235; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A90 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85, A81 in §86, A82 in §87, A83 in §88, A84 in §89, A85 in §90, A86, A87, A88, A89 and A90 in §91), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO15 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV20 from §56, SM1–SM11 from §57, PR1–PR6 from §58 UI1–UI8 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82, CG1–CG24 from §83, PT1–PT10 from §92 and UV1–UV7 from §93). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§55, §58, §59, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84, §85, §86, §87, §88, §89, §90, §91, §92 and §93 built; §94 designed with the owner in batch 249, its first slice built then and slices 2-6 not yet; §60 recorded from the owner's request in batch 123, specified and not yet designed; §56 recorded in batch 122 and designed with the owner and built in batch 248; §53 recorded in batch 122 and designed with the owner and built in batch 239; §92 asked for and built in batch 240; §93 asked for and built in batch 241; §59 recorded in batch 122 and designed with the owner and built in batch 238; §57 recorded in batch 122 and designed with the owner and built in batch 235; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A90 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85, A81 in §86, A82 in §87, A83 in §88, A84 in §89, A85 in §90, A86, A87, A88, A89 and A90 in §91), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO15 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV20 from §56, SM1–SM11 from §57, PR1–PR6 from §58 UI1–UI8 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82, CG1–CG24 from §83, PT1–PT10 from §92, UV1–UV7 from §93 and PL1–PL19 from §94). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -420,6 +423,7 @@ for seven weeks after its fix had shipped. Say what the code does and cite the
 issue for why; `test_no_production_comment_says_an_issue_is_open` refuses "tracked
 in #N", "#N is still open" and "when #N closes" in the `.py` and `.mjs` files.
 - **CONFIG_ARCHITECTURE.md** — why every value in `config.yaml` is what it is. `config.py`'s 788 lines of rationale, carried over verbatim when the values moved into YAML, keyed by the YAML's own names. Read the entry for a key before changing it; several of these numbers have already been "corrected" back to a value they were deliberately moved away from.
+- **docs/PLUGINS.md** — the plugin guide: using `/plugin`, the folder convention, the manifest and settings reference, and contributing to the marketplace. `docs/plugin-template/example.plugin` is its worked example, and a test installs it.
 - **docs/DEVLOG.md** — per-section implementation notes: what was followed verbatim, what was deviated from (every deviation was an explicit user decision — do not silently override).
 - **docs/TECHNICAL_DEBT.md** — the register: what a review found and what was deliberately left, each item open or closed with the batch that closed it. Cite an item as `TECHNICAL_DEBT 42`, bare — one form, since three were in use. An entry is evidence, not instruction: batches 126 and 127 each found the ENTRY itself wrong about where its own defect came from, so measure the claim before building the fix it proposes.
 - **docs/REVIEW_MARATHON.md** — the pre-merge review marathon: 19 independent review scopes covering every production module, the finding format every report uses, and the rules of engagement for a read-only reviewer. **Open while it is open** — the run log at the bottom says which scopes have been reviewed. The per-scope reports are NOT in the repository: they go to a gitignored `review/`, because a tracked `.md` moves the gated readable-doc count and because `read_project_doc` would advertise a list of open defects to every run.
@@ -1772,6 +1776,29 @@ would never clear.
 **`_normalize` obeys that rule too, and until batch 150 it obeyed none of it** (A32). The non-text placeholder was guarded by `if not text and blocks`, so it fired only when NO text block produced anything: a result carrying text AND an image dropped the image with no placeholder and no log line, and "Chart generated:" with no chart is a result the model will answer from. The placeholder is now APPENDED to whatever text survived, the dropped kinds come from the blocks the join actually skipped (an empty text block has nothing to drop, and reporting it as non-text was the placeholder contradicting itself), and one WARNING names the tool -- which required making the tool name a PARAMETER, because `_normalize` took the result alone and the rule below was therefore unsatisfiable in the function it applies to. A structured error payload rides in the error STRING rather than a second key, because D23 promises one error shape.
 
 **Nothing an output-policy pass alters is silent, and the redaction has an off switch (#49/#167, batch 20).** Every altered dispatch result logs ONE WARNING naming the tool and what changed — before #49 the depth cap replaced a whole container with a sentence and logged nothing. Credential *shapes* (`password "…"`, `<password>…</password>`, `scheme://user:pass@host`) join the vendor tokens, applied to `param_digest` too (a credentialed URL had been printing its password into both transcripts since §26). The shapes are OUTPUT-ONLY by pinned decision: `_SECRET_PATTERNS` stay `_input_leaf`'s whole vocabulary, because refusing a write whose content is a build file breaks the call the user asked for. `VENASTINE_REDACT_OFF` / `config.REDACT_TOOL_OUTPUTS` disable pattern substitution — never input refusals, never the depth-cap sentinel, never logging_setup's formatter; deliberately not a settings.json key (G7's reason).
+
+### Plugins (`core/plugin_*.py`, ROADMAP_v3 §94)
+
+A plugin is a `<name>.plugin` folder of skills, agents and settings (slice 1; tools and MCP servers
+are later slices), installed with `/plugin install` behind a trust modal. ROADMAP_v3 §94 holds
+PL1-PL19; the four things most likely to be re-derived wrongly:
+
+- **The manifest parser is part of the security boundary** (PL2). `plugin_format.load_yaml` is
+  `yaml.safe_load` with aliases and duplicate keys refused, and `parse_manifest` refuses every
+  unknown key and every field of the wrong type. Do not "simplify" it to `yaml.safe_load`, and do
+  not let a manifest field reach `config.yaml`: the owner kept plugin settings out of the core's
+  config precisely so no plugin can steer the core's parser (PL6).
+- **What loads is what the modal showed** (PL8, PL15). The registry holds every file's SHA-256 and
+  `plugin_store.loadable()` leaves out a plugin whose files changed. The modal is built from the
+  STAGED copy parsed by the loader itself (`config_loader.preview_plugin`), so a definition the
+  parser would skip refuses the install instead of loading as less than was shown.
+- **Names are prefixed, and the tier sits between user and project** (PL4). `math:review`, never
+  `review`: no plugin can shadow a builtin or another plugin, and silence on `spawnable` reads as
+  false as for any non-harness tier. `_discovery_dirs` is where the order lives.
+- **Nothing reaches the network but GitHub's API and raw hosts, at one commit** (PL11, PL12).
+  `plugin_source._get` refuses any other URL and follows no redirect; every file is checked
+  against the tree's git blob hash, and the tree against PL3's limits before anything downloads.
+  `/plugin` downloads are deliberately not on §53's meters (PL14).
 
 ### Reasoning effort
 
@@ -3235,7 +3262,7 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   and source files are out of scope entirely — widening to those turns it into
   `read` with no gate. But the set is not small: the tool takes a PATH, resolves
   anywhere under the project, and admits `.md`/`.markdown`/`.rst`/`.txt` plus ten
-  named build files, which on a clean checkout of this repository is **65 files
+  named build files, which on a clean checkout of this repository is **68 files
   and under 6 MB at depths 0-3**, including every agent and skill body under
   `agents/builtin/` and `skills/builtin/` and the whole of `docs/`. The 61st is
   `docs/REVIEW_MARATHON.md` (batch 129), and the per-scope review reports it
@@ -3247,7 +3274,13 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   `deploy/hosted/browser-NOTICES.txt` (batch 242), the reviewed third-party
   browser license texts, with no configuration or executable content. The 65th
   is `llms.txt` (batch 244), read before it was counted: the summary and
-  links an answer engine reads, no configuration or executable content. **It said 40
+  links an answer engine reads, no configuration or executable content. The
+  66th to 68th are `docs/PLUGINS.md`, `plugins/README.md` and
+  `docs/plugin-template/example.plugin/README.md` (batch 249), read before they
+  were counted: the plugin guide, the marketplace's own page and the worked
+  example's README, prose with no configuration or executable content. A
+  plugin merged into `plugins/` will move this figure too, since its README
+  sits at depth 2 or 3 (ROADMAP_v3 §94's gap register). **It said 40
   files and ~1.1 MB until batch 128**, when it was re-measured through the
   tool's own `is_readable_doc` at 60 files and 3.58 MB -- a 3.3x
   understatement, and almost all of the growth is this record: `DEVLOG.md`

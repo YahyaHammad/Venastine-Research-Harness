@@ -134,6 +134,13 @@ _SPECS = (
     # with its name, inside the slash panel's 50 at 80x24.
     CommandSpec("network", "network data used against its limits"),
     CommandSpec("new", "start a new thread"),
+    # ROADMAP_v3 §94 (PL15-PL19). Both shells: installing is a trust
+    # decision, and a line terminal makes it as much as the TUI does.
+    CommandSpec("plugin", "install and manage plugins: skills and agents "
+                          "from the marketplace or a folder",
+                "[list [category] | info <id> | install <id> | "
+                "install --from <folder> | uninstall <id> [--purge] | "
+                "disable <id> | enable <id> | config <id> [<key> <value>]]"),
     CommandSpec("quit", "exit the harness", aliases=("exit", "bye")),
     CommandSpec("ref", "reference another conversation's summary",
                 "[--list|--clear]"),

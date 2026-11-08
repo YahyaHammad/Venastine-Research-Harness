@@ -368,7 +368,9 @@ class TestNothingReachableChangesIt:
         keys = config_schema.HARNESS_AUTHORITY_KEYS
         # 21 since batch 248: ROADMAP_v3 §56's ten `shell_classifier_*`
         # keys (JV8), which the posture holds as one ClassifierSettings.
-        assert len(keys) == 21
+        # 23 since batch 249: §94's `plugins_enabled` and
+        # `plugin_marketplace` (PL10, PL11).
+        assert len(keys) == 23
         for key in keys:
             assert config_edit.authority_key(key) == key, (
                 f"{key} does not resolve through the gate, so /config "

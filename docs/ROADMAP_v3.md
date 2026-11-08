@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§94. Plugins: skills, agents and settings from a reviewed marketplace** - **(NOT BUILT beyond slice 1: the format, the store, `/plugin` and its trust modal BUILT in batch 249; tools, MCP servers, the CI and the scanner, git URLs and a first plugin to come)** (the owner asked for plugins that add tools, skills, agents, MCP servers and settings without touching a core file, pulled from this repository's nested `plugins/` folder behind a trust modal, tested only when they change, and kept out of any pull request that touches anything else. A `.plugin` folder is a plugin; its manifest is read by the strictest parser in the tree; everything it adds is prefixed with its name; installs come from one resolved commit with every file checked against git's hash, live outside the install, and stop loading if a file changes; PL1-PL19)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
 - **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
@@ -3061,6 +3062,227 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §94. Plugins: skills, agents and settings from a reviewed marketplace
+
+**Added in batch 249, from the owner's request; slice 1 BUILT in batch 249, slices 2-6 NOT
+BUILT.** A plugin adds tools (with their own dependencies), skills, agents, MCP servers and
+settings of its own. It never touches a core file, and it cannot alter the core harness
+runtime; the harness may call into it, and nothing else. Plugins are pulled from GitHub, as the
+installers are, because the owner has no serving infrastructure. The marketplace is this
+repository's `plugins/` folder, nested to any depth so that a narrow plugin need not sit beside
+a broad one. `/plugin install` and `/plugin uninstall` are the whole interface, behind a trust
+modal. CI tests only the plugins a pull request changes. A pull request touching `plugins/` and
+anything else is flagged by a bot. A plugin-only merge releases nothing. The plugins workflow
+flags suspicious content. External plugins can be installed, for research that cannot sit in a
+public repository. There is a standard format and a guide to writing one.
+
+### What the owner decided (batch 249, four rounds, 2026-11-08)
+
+- **Where tools run:** in a container by default, one per plugin. An authority key falls back to
+  each plugin's own process and venv, with a warning in the modal that off Linux the workspace
+  grant cannot be enforced there. The same image and argv builder as the shell, never an image
+  the plugin names, which "lowers security drastically".
+- **What tools can touch:** no workspace access by default. The manifest declares none, read or
+  write, and network yes or no; the grant is per project, on first use. Calls ask by default,
+  with a per-plugin opt-out.
+- **Folders:** a `.plugin` suffix marks a plugin (PL1).
+- **Names:** prefixed by the plugin (PL4).
+- **The manifest:** `plugin.yaml` (PL2).
+- **Mixed pull requests:** a failing `plugin-boundary` check, a label and one comment. The bot
+  never closes the pull request.
+- **Scanner findings:** high-severity ones fail the plugins check, and a `plugin:scan-reviewed`
+  label from someone with write access clears a false positive.
+- **Testing all plugins:** every plugin's tests run when a core change touches the plugin
+  runtime, and weekly.
+- **Where plugins are on:** in every project, with `/plugin disable` per project.
+- **Settings:** each plugin's own, edited with `/plugin config <id>` and never in `config.yaml`,
+  so a plugin cannot inject keys there or steer the core's parser (PL6). Broad plugin settings
+  stay in `config.yaml`.
+- **External plugins:** in the first version.
+- **Slice 1:**
+  - refuses a plugin that ships tools, MCP servers or dependencies (PL5);
+  - `plugins_enabled` is on by default (PL10);
+  - the marketplace is a key, defaulting to this repository (PL11);
+  - a reinstall replaces, after the modal (PL16).
+
+### Measured before deciding: a container per plugin
+
+Each "plugin" was one idle Python process, which is what a tool runner is between calls; a real
+plugin's imports cost the same in either layout. PSS, with shared pages divided fairly:
+
+| plugins | rootless Podman 5.7, separate | Podman, one shared | Docker Desktop 29.7.2, separate | Docker, one shared |
+|---|---|---|---|---|
+| 1 | 9 MB | 9 MB | 13 MB | 14 MB |
+| 3 | 17 MB | 17 MB | 31 MB | 23 MB |
+| 8 | 38 MB | 33 MB | 72 MB | 41 MB |
+
+A container costs Podman's `conmon` 0.44 MB and Docker's `containerd-shim` 4.6-7 MB. One container
+starts in 0.5-1.0 s under Podman and 0.3-0.4 s under Docker; 8 start in parallel in about 1.1 s
+and 0.66 s. A kept-alive runner's call through `docker run -i` took 0.6 ms (median). Docker Desktop's own
+fixed cost, which the shell's sandbox already pays, was about 210 MB in its VM and 700 MB of Windows
+processes. The owner's rule was separate containers if the difference is minimal, and it is.
+
+### The slices
+
+1. **The format, the store, the loader, `/plugin`, the modal and the guide.** BUILT in batch 249,
+   below.
+2. **Tools,** in a container per plugin, with their dependencies in a Linux venv built inside the
+   shell's image at install. Workspace grants are per project, calls ask by default, and
+   `plugin_tool_isolation: container | process` is the fallback key.
+3. **MCP servers** in plugins, a local command running in the plugin's container.
+4. **CI.**
+   - Core workflows skip plugin-only changes.
+   - `plugins.yml` tests the plugins that changed: when a plugin changes, every plugin when the
+     runtime changes, and weekly.
+   - The scanner: high-severity findings fail, and `plugin:scan-reviewed` clears a false positive.
+   - The boundary bot fails, labels and comments, and never checks out the pull request's code.
+   - A plugin-only merge is `release:skip` and doesn't redeploy the demo.
+   - Maintainers get review requests from a workflow, not CODEOWNERS, which would make every
+     plugin PR touch a core file.
+   - This slice edits `.github/workflows/`, so the owner pushes it.
+5. **Install from a git URL.** A private repository is cloned with the user's own credentials.
+6. **A first plugin in the marketplace.**
+
+### Settled for the later slices (batch 249)
+
+The owner's answers above, and the defaults stated to the owner that drew no objection, in the
+detail a slice needs. Ask before departing from any of them.
+
+- **Slice 2, tools.**
+  - **One container per plugin**, from `sandbox_docker_image` through the shell's `_docker_argv`,
+    so a plugin can never run laxer than a shell command. There is **no shared-container key**:
+    the owner's rule was separate containers if the measured difference is minimal, and it was
+    on both runtimes. A shared container would also have to mount every plugin's workspace grant
+    at once.
+  - **No image a plugin names.** The owner: it "lowers security drastically".
+  - **The runner:** one per plugin per session, started lazily on the plugin's first call and kept
+    alive. It is harness-owned and mounted read-only, so no plugin can change how the harness
+    talks to it. It speaks JSON lines over stdin and stdout: 0.6 ms a call, measured. A tool can
+    call neither the model nor another harness tool in this version.
+  - **Dependencies:** installed at install time into a Linux venv inside the shell's image, since
+    a venv built on a Windows host cannot run in a Linux container. Wheels only, exact pins. The
+    plugin's settings are handed to the runner.
+  - **The fallback:** `plugin_tool_isolation: container | process`, an authority key; `process`
+    is the plugin's own process and venv on the host. It is allowed on every platform, and the
+    modal warns that off Linux, which has no Landlock, the workspace grant cannot be enforced there.
+  - **What a plugin's tools may touch:** the manifest declares `workspace: none | read | write`
+    and `network: true | false`. Both default to none. The grant is per project, made the first
+    time the plugin is used there, and the container mounts the workspace read-only or read-write
+    to match. `/plugin access <id> none|read|write` changes the grant. Network is all or nothing,
+    as the shell's declared network is, and a plugin's traffic is not on §53's meters.
+  - **Approval:** a plugin tool's call asks by default, with a per-plugin opt-out, the way an MCP
+    server's `autoApprove` works.
+  - **Names:** tools are `plugin__<name>__<tool>`, held to the providers' 64-character limit.
+- **Slice 3, MCP servers.** A local command runs in the plugin's container. The scanner flags a
+  `npx`, `uvx` or `docker` pull of an unpinned package, and a remote URL.
+- **Slice 4, CI.** This slice edits `.github/workflows/`, which the agent's token cannot push, so
+  the owner pushes it.
+  - **Core workflows** (tests, compat, lint, bandit, codeql) skip a pull request or push whose
+    every file is under `plugins/`.
+  - **`plugins.yml`** works on each changed plugin. It validates the plugin with
+    `core/plugin_format.py`, installs its wheels into a fresh venv and runs its tests, then runs
+    the scanner, pip-audit and gitleaks. It also runs every plugin's tests when a core change
+    touches the plugin runtime, and once a week.
+  - **Releases and the demo:** `release.yml` decides `release:skip` from the file list, and a
+    labeler adds the label so it is visible. `deploy-demo.yml` does not redeploy for a
+    plugin-only merge.
+  - **`plugin-boundary.yml`** runs on `pull_request_target` and reads the file list from the
+    API, never checking out the pull request's code. If the PR touches both sides, it fails the
+    check, adds a label and posts one comment naming the files on each side. It never closes the
+    pull request. Main's ruleset has no required checks, so the owner decides whether this one
+    blocks.
+  - **The scanner** is `scripts/plugin_scan.py`, which the harness also ships, so a `--from`
+    install is scanned on the user's machine. It flags:
+    - links, binaries, oversized and hidden files, and nested plugins;
+    - in code: `exec`, `eval` and `compile`, dynamic imports, `subprocess` and `ctypes`, sockets
+      under `network: false`, reads of credential paths (`providers.json`, `~/.ssh`, key-like
+      environment variables), decode-then-execute chains, and high-entropy blobs;
+    - in text: bidi, zero-width and tag characters, HTML comments, and instructions to ignore
+      rules, turn off approval, exfiltrate or run `curl | sh`;
+    - in dependencies: pins that are not exact, releases under 14 days old, sdist-only packages
+      (an sdist runs code at install), URL and git dependencies, names one edit from a popular
+      package, and known vulnerabilities.
+  - **Scanner findings:** a high-severity finding fails the check, and the pull request is never
+    closed for it. A `plugin:scan-reviewed` label from someone with write access re-runs the
+    check, which then passes and lists what it let through. There is no allowlist file: one
+    outside `plugins/` would make the pull request mixed.
+  - **Review requests:** the manifest's `maintainers` are asked by a workflow, not by
+    CODEOWNERS, which lives outside `plugins/`.
+  - **CI enforces** a version bump whenever a plugin changes, and plugin names unique across the
+    marketplace.
+- **Slice 5, git URLs.** `/plugin install --from <git URL>`. A private repository is cloned with
+  the user's own git credentials, which the harness never handles. The scanner runs locally, and
+  the modal says nobody reviewed the plugin.
+- **Lifecycle, any slice.** `/plugin update` is manual, with no network check at startup; until it
+  exists, a reinstall from the marketplace is the update (PL16).
+
+### Decisions (PL1-PL19)
+
+| id | decision |
+|---|---|
+| **PL1** | **A folder whose name ends in `.plugin` is a plugin, and no other folder is.** The id is its path under `plugins/` without the suffix, so `math.plugin` (`math`) sits beside the category `math/`, which holds `math/calculus.plugin`. Names are lowercase words joined by single hyphens, at most 40 characters, at most 8 folders deep, and a plugin never holds another. A typed `.plugin` is tolerated; anything else is refused before it reaches a URL or the store |
+| **PL2** | **The manifest is `plugin.yaml`, read by the strictest parser in the tree.** YAML's safe loader, with aliases refused, duplicate keys refused, every field typed, and unknown keys refused rather than ignored. The owner's reason for keeping settings out of `config.yaml` was a parser a plugin could steer, and this is the one file every plugin hands the harness to parse. No field may hold control, format (bidi, zero-width) or separator characters. A key YAML reads as a boolean (`on:`) is refused with a sentence that says so, because the file plainly says `on`. Every problem is reported, not the first |
+| **PL3** | **A plugin is `plugin.yaml`, `README.md`, an optional `LICENSE`, `skills/` (`.md`, nested), `agents/` (`.md`, flat) and `tests/`, and nothing else.** File names are portable, with no leading dot, no Windows-reserved name, no case-only collision, and no link. At most 300 files, 1 MB each and 5 MB together, sized from what skills are: the largest shipped skill is under 10 KB |
+| **PL4** | **Everything a plugin adds is prefixed with its name** (`example:checklist`). No plugin can shadow a builtin, a file the user wrote, or another plugin. Plugins are a tier between user and project (harness > user > plugin > project): below what you wrote, and above what arrived with a cloned directory, since a plugin passed its own trust modal. Skills are grouped in the catalog under the plugin's id. A silent `spawnable` reads as false, as for every non-harness tier |
+| **PL5** | **Slice 1 refuses a plugin that ships `tools/`, `mcp.json` or `requirements.txt`,** before the modal, naming what it ships. A plugin whose skills tell the model to call tools that do not exist would be half working, and the model would keep reaching for them (D24's reason) |
+| **PL6** | **Settings are declared in the manifest, up to 32, as boolean, integer, number, string or choice,** each with a default that fits and a one-line description. The user's values live in `<store>/<name>/settings.json`, never in `config.yaml`. A stored value the schema no longer accepts falls back to the default with a note |
+| **PL7** | **Installed plugins live in `~/.config/venastine/plugins/`.** That is outside the install directory, so an update or reinstall of the harness never touches one, and inside the user tier, which the shell sandbox mounts read-only and the file tools refuse to write without asking |
+| **PL8** | **A changed file is a plugin that stops loading.** The registry holds the SHA-256 of every file the modal described, and every discovery checks them. A plugin whose files were edited, added or removed is left out, with a warning naming them, until it is installed again. That is D17's workspace-trust rule, applied to the second place third-party text reaches a system prompt from |
+| **PL9** | **Install, uninstall, disable and enable take effect at once:** `config_loader.refresh_plugins()` rediscovers agents and skills in place. Uninstall keeps settings and the per-project choices unless `--purge`. A skill or agent of an uninstalled plugin already active in a session stays until the user switches away, and the command says so |
+| **PL10** | **`plugins_enabled` (authority, default true) turns every plugin off without uninstalling one.** It is the way back from a plugin that breaks startup. A hosted deployment loads none and refuses `/plugin` whatever the key says, because one install there would be every visitor's. With plugins off, only bare `/plugin` and `uninstall` work |
+| **PL11** | **`plugin_marketplace` (authority, default this repository, `owner/name` only) names the marketplace.** Its default branch is resolved to one commit, and everything after reads that commit, so an install is one merged state of the repository. Only `api.github.com` and `raw.githubusercontent.com` are fetched: the commit, the root tree and the recursive `plugins` subtree, three of the 60 unauthenticated requests an hour, then the files. A listing is reused for five minutes. No redirect is followed |
+| **PL12** | **Every downloaded file is checked against the git blob hash the commit's tree lists,** and its size against the tree's. The tree is checked against PL3 before anything is downloaded, so a link, a submodule, an oversized plugin or a PL5 feature costs three requests, not three hundred |
+| **PL13** | **A folder install (`--from`) reads the same file set.** `.git/` and `__pycache__/` are skipped and named in the modal; a link or special file is refused. Its id is its name, and the modal says in capitals that nobody has reviewed it |
+| **PL14** | **`/plugin`'s downloads are not on §53's meters.** It is a command the user types, like a sign-in; the meters bound what the model's work pulls and pushes. `config.yaml`'s list of what the meters cannot count names it |
+| **PL15** | **The modal describes what will load,** not what the files claim. The plugin is staged in the store and read by the loader's own parser under its prefixed names. A definition the parser would skip refuses the install with the parser's reason. Every string a plugin author wrote passes `ansi.for_display` and `reveal_invisible_counted`. The lists, the file listing and the README are each bounded on both axes. Nothing is written before the yes; the staging folder is removed on every other outcome |
+| **PL16** | **Reinstalling replaces, after the modal,** which titles itself "Replace plugin" and names the version and source it replaces. The old files are moved aside and put back if the move in fails. Settings carry over where they still fit |
+| **PL17** | **Names are unique among installed plugins.** A plugin with an installed plugin's name and a different id is refused, naming the one to uninstall |
+| **PL18** | **`min_harness` is compared with this install's `package.json`,** by its base `X.Y.Z`, so a branch build compares as the release it came from |
+| **PL19** | **`/plugin` in the TUI offers subcommands, then installed ids, then a plugin's setting keys and values, through `/config`'s picker mechanism.** A free-form value is offered only into an empty slot, for `/config`'s reason. The panel never touches the network |
+
+### Built and measured (slice 1, batch 249, 2026-11-08)
+
+- **The modules:**
+  - `core/plugin_format.py`: the format, pure, for slice 4's scanner to import;
+  - `core/plugin_store.py`: the store;
+  - `core/plugin_source.py`: the marketplace and folder fetch;
+  - `core/plugin_commands.py`: `/plugin`, shared by both shells.
+- **The loader:** `core/config_loader.py` gains the plugin tier, `refresh_plugins()` and
+  `preview_plugin()`.
+- **Config:** the two keys.
+- **The guide:** `docs/PLUGINS.md`, with a worked example in `docs/plugin-template/example.plugin`,
+  which a test installs. `plugins/README.md` holds the marketplace's own page.
+- **Tests:** `tests/test_plugins.py` runs against a real local server that answers in GitHub's
+  three shapes. The fetch's URL building, hash check, refusals and request count run, not a mock
+  of them.
+- **The manifest rules were found by running them:**
+  - the first run of the settings tests refused the key `on:`, which YAML 1.1 reads as `true`;
+    the refusal was right, so its sentence now names the cause;
+  - a nested plugin is left out of a listing's counts, as PL1 says.
+
+### Gap register
+
+- **No live marketplace install.** `plugins/` holds no plugin yet; the fetch is tested against a
+  local server in GitHub's shapes, the choice §56 made. Slice 6 is the first real one.
+- **Settings are stored and validated, and read by nothing** until slice 2's tools.
+- **The 60-an-hour limit is GitHub's,** shared with anything else on the same address. A
+  listing costs three API requests and one raw request per plugin described, and installs reuse
+  a listing for five minutes.
+- **Two harness processes installing at once:** the last registry write wins. There is no lock;
+  the store's writes are each atomic.
+- **The link-refusal test skips on a machine that cannot make a link,** which includes this
+  Windows box; CI's Linux runs it.
+- **`plugins/` is in the GitHub installer's copy of the repository** (the whole zip), where nothing
+  reads it. npm's file list leaves it out.
+- **Once plugins hold `.py` files** (slice 2), the docs gate's production-module walk and the
+  core lint and bandit jobs must leave `plugins/` to `plugins.yml` (slice 4).
+- **A merged plugin moves `read_project_doc`'s counted bound.** Its README sits at depth 2 or 3,
+  inside the bound AGENTS.md states (68 files after this batch), so the first plugin merged would
+  turn `test_the_documented_doc_read_bound_is_not_understated` red on `main`. Slice 4 decides:
+  count `plugins/` apart, or keep the marketplace out of the tool's reach in this repository.
+
 ---
 
 ## §93. uv where pip was slow: CI, and the installers when it is there

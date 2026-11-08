@@ -15,6 +15,20 @@ other name.
 
 ---
 
+## Plugins, slice 1 (batch 249)
+
+| Change | Test | Fix |
+|---|---|---|
+| Load a manifest with `yaml.safe_load`, or let an alias, a repeated key or an unknown field through | `test_aliases_are_refused`, `test_a_repeated_key_is_refused`, `test_an_unknown_key_is_refused_not_ignored` | The manifest parser is part of the boundary (PL2); keep `plugin_format.load_yaml` |
+| Load a plugin whose files changed since install | `test_a_changed_plugin_does_not_load` | `plugin_store.loadable` checks every recorded hash (PL8) |
+| Load a plugin's skill or agent under its bare name | `test_skills_and_agents_load_under_the_plugin_name`, `test_a_plugin_cannot_shadow_a_builtin` | Everything a plugin adds is prefixed (PL4); `_plugin_definition` renames |
+| Install a plugin that ships tools, MCP servers or dependencies before slices 2-3 | `test_a_plugin_with_tools_is_refused_before_the_modal`, `test_tools_are_held_back_before_any_download` | PL5 until those slices land; then this row goes |
+| Download a file before the tree is checked, or skip the blob hash | `test_a_link_in_the_tree_is_refused_before_any_download`, `test_a_byte_that_differs_from_the_commit_is_refused` | PL12 |
+| Build the modal from the files rather than the staged parse | `test_the_modal_lists_what_will_load`, `test_a_broken_skill_refuses_the_install` | PL15: `config_loader.preview_plugin` |
+| Write anything before the yes | `test_no_writes_nothing`, `test_an_interrupted_cli_question_is_a_no` | Stage, ask, then commit (PL15) |
+| Add or rename a `/plugin` subcommand | `test_it_offers_subcommands_then_ids_then_keys_then_values`, `test_only_list_info_and_install_need_the_network` | `plugin_commands.SUBCOMMANDS` and `_NETWORK` together |
+| Add a key under the Plugins block of `config.yaml` | `test_both_are_authority_keys_with_a_sentence`, `test_the_config_command_gates_every_posture_key` | Mark it `AUTHORITY --`, add it to `HARNESS_AUTHORITY_KEYS` and `AUTHORITY_EFFECT`, and move the counts |
+
 ## The `classified` shell approval mode (batch 248)
 
 | Change | Test | Fix |

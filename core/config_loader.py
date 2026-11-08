@@ -27,7 +27,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 import yaml
@@ -699,15 +699,51 @@ def _md_files(directory: str, recursive: bool):
     return out
 
 
+def _plugin_definition(defn, plugin_name: str, plugin_id: str, category: str):
+    """ROADMAP_v3 §94 (PL4): a plugin's skill or agent, under its plugin's
+    name. `math:review`, never `review`, so no plugin can shadow a builtin,
+    a file you wrote, or another plugin -- the collision rule below never
+    has two plugins to choose between. Skills are grouped in the catalog
+    under the plugin's id, the folder they came from."""
+    renamed = replace(defn, name=f"{plugin_name}:{defn.name}")
+    if isinstance(renamed, SkillDef):
+        renamed = replace(renamed, category=plugin_id + (
+            f"/{category}" if category else ""))
+    return renamed
+
+
+def _discovery_dirs(kind: str, project_path: str, trusted: bool) -> list:
+    """(tier, directory, plugin record or None), in precedence order:
+    harness > user > PLUGIN > project.
+
+    Plugins sit between the two D29 tiers. Below the user tier, because
+    that is what you wrote; above the project tier, because a plugin went
+    through a trust modal of its own and a project only through the
+    workspace grant. With PL4's prefixes only a deliberately colon-named
+    file can ever meet one, so the order is a tie-breaker, not a policy
+    anyone should need.
+    """
+    from core import plugin_store
+
+    dirs = [(tier, directory, None)
+            for tier, directory in _tier_dirs(kind, project_path, trusted)]
+    plugins = [("plugin", os.path.join(record.root, kind), record)
+               for record in plugin_store.loadable(project_path)]
+    return dirs[:2] + plugins + dirs[2:]
+
+
 def _discover(kind: str, project_path: str, trusted: bool) -> dict:
     found = {}
-    for tier, directory in _tier_dirs(kind, project_path, trusted):
+    for tier, directory, plugin in _discovery_dirs(kind, project_path, trusted):
         if not os.path.isdir(directory):
             continue
         for path, category in _md_files(directory, recursive=(kind == "skills")):
             defn = _parse_md_file(path, kind, tier, category)
             if defn is None:
                 continue
+            if plugin is not None:
+                defn = _plugin_definition(defn, plugin.name, plugin.id,
+                                          category)
             if defn.name in found:
                 winner = found[defn.name]
                 if winner.tier == "harness":
@@ -1293,6 +1329,78 @@ def assert_spawnable_declared(agents: dict) -> None:
             "frontmatter, so nothing can tell whether spawn_subagent "
             "is able to feed them (ROADMAP_v2 §32 A3): "
             + ", ".join(undeclared))
+
+
+def refresh_plugins() -> None:
+    """Discover agents and skills again, after `/plugin` installed,
+    removed, or turned one on or off (ROADMAP_v3 §94, PL9).
+
+    Only the two definition dicts, and in place of the startup ones, so
+    every getter answers from the new set at once; the project, its trust
+    and settings.json are not re-read, because nothing `/plugin` does can
+    change them. Before initialize() there is nothing to refresh.
+    """
+    if _state is None:
+        return
+    project_path, trusted = _state["project_path"], _state["trusted"]
+    _state["agents"] = _discover("agents", project_path, trusted)
+    _state["skills"] = _discover("skills", project_path, trusted)
+
+
+class _Collect(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def preview_plugin(root: str, plugin_name: str, plugin_id: str) -> tuple:
+    """({name: SkillDef}, {name: AgentDef}, [problems]) for a plugin
+    staged at `root`, read exactly as discovery will read it once
+    installed -- the trust modal describes what will load, not what the
+    files claim (ROADMAP_v3 §94, PL15).
+
+    A definition the parser would skip is a PROBLEM here, with the
+    parser's own sentence: discovery's answer to a broken file is a
+    warning and a skip, which is right for a file already on disk and
+    wrong for one about to be installed on purpose.
+    """
+    collect = _Collect()
+    logger.addHandler(collect)
+    try:
+        found = {}
+        problems = []
+        for kind in ("skills", "agents"):
+            found[kind] = {}
+            directory = os.path.join(root, kind)
+            if not os.path.isdir(directory):
+                continue
+            for path, category in _md_files(directory,
+                                            recursive=(kind == "skills")):
+                before = len(collect.messages)
+                defn = _parse_md_file(path, kind, "plugin", category)
+                rel = os.path.relpath(path, root).replace(os.sep, "/")
+                if defn is None:
+                    # The LAST line: the skip is the parser's final word,
+                    # after any note it made on the way.
+                    reason = (collect.messages[-1]
+                              if len(collect.messages) > before
+                              else "it could not be read")
+                    problems.append(f"{rel}: {reason.replace(path, rel)}")
+                    continue
+                defn = _plugin_definition(defn, plugin_name, plugin_id,
+                                          category)
+                if defn.name in found[kind]:
+                    problems.append(
+                        f"{rel}: another file in this plugin already "
+                        f"defines the {kind[:-1]} {defn.name}")
+                    continue
+                found[kind][defn.name] = defn
+    finally:
+        logger.removeHandler(collect)
+    return found["skills"], found["agents"], problems
 
 
 def reset() -> None:

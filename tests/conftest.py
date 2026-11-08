@@ -1042,6 +1042,10 @@ PROCESS_MEMOS = (
      _clear("_headless_notices_shown", "_image_notices_shown")),
     # What register_all() recorded so unregister_all() removes exactly that.
     ("mcp_client.registration", ("_registered",), _clear("_registered")),
+    # ROADMAP_v3 §94 (PL11): the marketplace listing, reused for five
+    # minutes. A leftover would answer the next test from another server.
+    ("core.plugin_source", ("_trees",),
+     lambda module: module.clear_cache()),
     # D15's per-tool approval defaults for dynamically named tools, through
     # the module's own function: with no arguments it drops all of them.
     ("security.permissions", ("_dynamic_approval_defaults",),

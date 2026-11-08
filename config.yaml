@@ -596,6 +596,28 @@ teardown_budget_s: 10.0
 mcp_max_event_bytes: 16777216
 
 # ======================================================================
+# Plugins (ROADMAP_v3 §94)
+# ======================================================================
+
+# AUTHORITY -- whether installed plugins load at all. A plugin's skills
+# and agents become part of the model's instructions in every project
+# you have not turned it off in (/plugin disable), and each plugin is
+# installed only through /plugin install and its trust modal. false hides
+# every installed plugin without uninstalling it, which is the way back
+# from one that breaks startup. A hosted deployment loads none, whatever
+# this says. Plugin settings are each plugin's own, edited with
+# /plugin config; none of them is a key in this file.
+plugins_enabled: true
+
+# AUTHORITY -- the GitHub repository whose plugins/ folder /plugin
+# install and /plugin list read, as owner/name. Installs come from its
+# default branch, at the commit resolved when you install, and every file
+# is checked against that commit's record of it. Point a fork at its own
+# marketplace here; whatever repository this names is the one the trust
+# modal calls reviewed.
+plugin_marketplace: YahyaHammad/Venastine-Research-Harness
+
+# ======================================================================
 # Network limits
 # ======================================================================
 
@@ -619,7 +641,8 @@ mcp_max_event_bytes: 16777216
 # written at most once a minute. Entries older than the window are deleted.
 #
 # What these CANNOT count: shell commands (containers, WSL, SSH), "stdio"
-# MCP servers, sign-in and token-refresh traffic, and TLS/TCP overhead.
+# MCP servers, sign-in and token-refresh traffic, /plugin's downloads, and
+# TLS/TCP overhead.
 # web_search's figure is an estimate, measured at about 21 kB per result
 # asked for, because its client has no way to count. /network shows every
 # meter, what it has used, and when room returns.

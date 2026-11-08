@@ -1,0 +1,28 @@
+# A plugin's manifest. Every field is described in docs/PLUGINS.md;
+# anything not listed there is refused, so a typo is an error, not a
+# silently ignored line.
+format: 1
+# Must match the folder: this file sits in example.plugin/.
+name: example
+# Quote it, or YAML reads 1.0 as a number.
+version: "1.0.0"
+description: A worked example of the plugin format, with one skill, one agent and two settings.
+authors: [Venastine Research Harness contributors]
+# GitHub usernames asked to review a change to this plugin.
+maintainers: []
+license: Apache-2.0
+# The oldest harness this plugin works on, if it needs a newer one than
+# the first with plugins:
+# min_harness: "0.3.14"
+settings:
+  detail:
+    type: choice
+    choices: [brief, full]
+    default: brief
+    description: How much the example's tools would write.
+  max_items:
+    type: integer
+    default: 5
+    min: 1
+    max: 20
+    description: The longest list the example's tools would return.
