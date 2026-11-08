@@ -489,6 +489,8 @@ Because approval ORs, an override can only ever *add* a prompt. There is no way 
 | Depends on the call | `read`, `view_image`, `write`, `edit` — decided per path, and all four are denied by default anyway. `view_image` is also only offered where the image can reach the model: a provider marked `accepts_images` in `providers.json`, outside a research pass |
 | Always | `shell` and the three that start a session (`shell_background`, `shell_monitor`, `shell_interactive`), `spawn_subagent`, `remember`, `write_project_doc`, and **every MCP tool** |
 
+**"Decided per path" is three rules.** Inside the workspace (`./workspace` under the directory you launched from, unless `AGENT_WORKSPACE` or `workspace_dir` in `config.yaml` moves it), a call runs unasked. Outside it, a call asks every time, and that includes the rest of your project while the workspace is its `workspace` folder. A path through a `.venastine/` directory is refused outright, wherever it lands and whichever name reaches it, symlink or hard link. So enabling the file tools and launching with `AGENT_WORKSPACE` set to your project is what lets the model change any file there without asking.
+
 Every registered tool appears in that table, and a test asserts it (audit #125): `ToolPermissions` and `ToolApprovals` are plain dataclasses, so "did the table keep up with the registry" is a question the suite can answer instead of a reader. `write_project_doc` is the one the omission mattered for — it is what `/init` uses to write documents into a repository, and §24's I1 gives it a fixed allowlist of document *names* with no path parameter precisely because it is dangerous enough to constrain.
 
 `ask_user` is ungated for a reason worth stating, since a table of default approvals is exactly where it belongs: an approval-gated tool is not *advertised* where nothing can ask, so gating the tool whose entire job is asking would make it invisible rather than deniable.
@@ -699,8 +701,11 @@ Agent frontmatter fields:
 | `use_memory` | bool | `true` | Inject durable memories (plain chat counts as opted in) |
 | `max_steps` | int ≥ 1 | caller's ceiling | **Replaces** the caller's ceiling rather than narrowing it — a value above `MAX_ITERATIONS` raises it, making this the one frontmatter field that can widen anything; an invalid value is repaired to the default with a warning naming what it read |
 | `spawnable` | bool | `false` for your files | Whether `spawn_subagent` may feed this agent |
+| `spawn_targets` | list | any spawnable agent | Which agents this one may spawn. It only ever narrows, and narrows again for anything it spawns in turn, as described above |
 
 Skill frontmatter fields: `name` (required), `description`, and `additional_tools` — a list of tool names stating what the skill's methodology *depends on*. It grants nothing: activation proceeds and tells you what is missing under the current agent.
+
+A key that neither list names is **ignored, not refused**, in either kind of file. A field spelled the way another harness spells it, such as `tools:` for `allowed_tools`, therefore does nothing at all; a test holds both lists to the keys the loader reads, so neither can fall behind it.
 
 ### A description is text, and the prompt treats it as one line
 
@@ -1067,11 +1072,13 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 9204 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
+Run the test suite with `pytest` — 9206 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
 
 ## Documentation
 
-This file is the user-facing one. For working on the code:
+This file is the user-facing one. The [wiki](https://github.com/YahyaHammad/Venastine-Research-Harness/wiki) arranges it by task: installation, getting started, what each tool may do and when it asks, the shell and its sandbox, writing agents and skills, MCP servers, and an FAQ. It lives outside the repository, so no test checks it: each page names the release it was checked against, and where a page and this file disagree, this file is the reference.
+
+For working on the code:
 
 - **[AGENTS.md](./AGENTS.md)** — the agent-context file, and the place to start. `CLAUDE.md` and `QWEN.md` are pointers to it so a tool looking for a particular filename finds one without the guidance being duplicated.
 - **[ARCHITECTURE.md](./docs/ARCHITECTURE.md)** — file-by-file contracts, what belongs where, and the known gotchas. Read before changing anything non-trivial, especially around persistence (`database.py` / `storage.py` / `core/memory.py` are three distinct and easily confused responsibilities).

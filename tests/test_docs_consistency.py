@@ -4486,3 +4486,132 @@ def test_readme_status_names_the_open_technical_debt_items():
     assert named == marked, (
         f"README's Status names items {sorted(named)} as open; "
         f"TECHNICAL_DEBT.md's headings mark {sorted(marked)}")
+
+
+# ---------------------------------------------------------------------------
+# ---- batch 247: README's agent and skill fields ----------------------------
+# ---------------------------------------------------------------------------
+
+def _frontmatter_keys_read() -> set:
+    """Every frontmatter key `core.config_loader._parse_md_file` reads.
+
+    Taken from the function's own syntax tree rather than listed here, so a
+    field added to the loader is one this check knows about without anyone
+    telling it. `fm.get("x")` and `fm["x"]` name their key outright;
+    `fm.get(key)` inside `for key in ("a", "b")` or
+    `for key, default in (("a", 1), ...)` names the keys the loop binds.
+    Any other spelling fails here rather than going unseen."""
+    with open(os.path.join(ROOT, "core", "config_loader.py"),
+              encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    parser = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef)
+                  and node.name == "_parse_md_file")
+    bound = {}
+    for node in ast.walk(parser):
+        if not isinstance(node, ast.For):
+            continue
+        targets = (node.target.elts if isinstance(node.target, ast.Tuple)
+                   else [node.target])
+        for position, target in enumerate(targets):
+            if not isinstance(target, ast.Name):
+                continue
+            for item in getattr(node.iter, "elts", []):
+                value = (item.elts[position]
+                         if len(targets) > 1 and isinstance(item, ast.Tuple)
+                         else item)
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    bound.setdefault(target.id, set()).add(value.value)
+
+    def is_fm(node):
+        return isinstance(node, ast.Name) and node.id == "fm"
+
+    keys = set()
+    for node in ast.walk(parser):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get" and is_fm(node.func.value)):
+            arg = node.args[0]
+        elif isinstance(node, ast.Subscript) and is_fm(node.value):
+            arg = node.slice
+        else:
+            continue
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            keys.add(arg.value)
+        elif isinstance(arg, ast.Name) and arg.id in bound:
+            keys |= bound[arg.id]
+        else:
+            raise AssertionError(
+                f"_parse_md_file reads a frontmatter key this parser cannot "
+                f"name: {ast.unparse(node)}. Teach _frontmatter_keys_read the "
+                f"new spelling rather than dropping the check")
+    assert {"name", "description"} <= keys, (
+        f"found only {sorted(keys)}: the loader no longer reads the "
+        f"frontmatter through a variable named `fm`, so update this parser")
+    return keys
+
+
+def _frontmatter_keys_by_kind() -> tuple:
+    """(agent keys, skill keys): the keys read, split by the definition
+    each one becomes a field of. A key that is a field of neither would
+    fall out of both checks below, so it fails here instead."""
+    import dataclasses
+
+    from core.config_loader import AgentDef, SkillDef
+
+    keys = _frontmatter_keys_read()
+    agent = keys & {field.name for field in dataclasses.fields(AgentDef)}
+    skill = keys & {field.name for field in dataclasses.fields(SkillDef)}
+    assert keys == agent | skill, (
+        f"the loader reads {sorted(keys - agent - skill)}, which is a field "
+        f"of neither AgentDef nor SkillDef, so neither README check covers it")
+    return agent, skill
+
+
+def _readme_lines() -> list:
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as handle:
+        return handle.read().splitlines()
+
+
+def test_readme_agent_field_table_lists_every_field_the_loader_reads():
+    """README's agent-field table had no `spawn_targets` row, though the
+    paragraph above it described the field, because nothing compared the
+    table with the loader. Its rows now name exactly the agent keys
+    `_parse_md_file` reads: one added to the loader without a row fails,
+    and so does a row for a key the loader has stopped reading."""
+    agent, _ = _frontmatter_keys_by_kind()
+    lines = _readme_lines()
+    assert "Agent frontmatter fields:" in lines, (
+        "README no longer has the line 'Agent frontmatter fields:' above "
+        "its table; update this test if it moved")
+    start = lines.index("Agent frontmatter fields:")
+    rows = []
+    for line in lines[start + 1:]:
+        if line.startswith("|"):
+            rows.append(line)
+        elif rows:
+            break
+    assert len(rows) > 2, (
+        "README's agent-field table did not parse as a table under "
+        "'Agent frontmatter fields:'; update this parser if it moved")
+    named = set()
+    for row in rows[2:]:
+        named |= set(re.findall(r"`([a-z_]+)`", row.split("|")[1]))
+    assert named == agent, (
+        f"README's agent-field table is missing {sorted(agent - named)} and "
+        f"names {sorted(named - agent)}, which the loader does not read")
+
+
+def test_readme_names_every_skill_field_the_loader_reads():
+    """The skill fields are one sentence in README rather than a table, and
+    the sentence is held the same way: exactly the skill keys the loader
+    reads, no more and no fewer."""
+    _, skill = _frontmatter_keys_by_kind()
+    sentence = [line for line in _readme_lines()
+                if line.startswith("Skill frontmatter fields:")]
+    assert len(sentence) == 1, (
+        "README no longer has one 'Skill frontmatter fields:' sentence; "
+        "update this test if it moved")
+    named = set(re.findall(r"`([a-z_]+)`", sentence[0]))
+    assert named == skill, (
+        f"README's skill-field sentence is missing {sorted(skill - named)} "
+        f"and names {sorted(named - skill)}, which the loader does not read")

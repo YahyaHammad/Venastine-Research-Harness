@@ -15,6 +15,19 @@ other name.
 
 ---
 
+## README's agent and skill fields (batch 247)
+
+| Change | Test | Fix |
+|---|---|---|
+| Make `_parse_md_file` read a new agent key without a row in README's agent-field table | `test_readme_agent_field_table_lists_every_field_the_loader_reads` | Add the row: the loader is the source and the table follows it |
+| Stop reading an agent key, or add a README row for a key the loader does not read | `test_readme_agent_field_table_lists_every_field_the_loader_reads` | Remove the row, or read the key |
+| Add or drop a skill key without changing README's "Skill frontmatter fields:" sentence | `test_readme_names_every_skill_field_the_loader_reads` | Name exactly the skill keys the loader reads |
+| Read a frontmatter key a new way: through a variable other than `fm`, or a key not written as a literal or bound by a literal `for` | both | Teach `_frontmatter_keys_read` the new spelling; do not drop the check |
+| Read a key that is a field of neither `AgentDef` nor `SkillDef` | both | Make it a field of the definition it configures |
+| Move or reword the line "Agent frontmatter fields:" or "Skill frontmatter fields:" | the one that reads it | Update the anchor in the test |
+
+---
+
 ## CITATION.cff and README's Status (batch 246)
 
 | Change | Test | Fix |
