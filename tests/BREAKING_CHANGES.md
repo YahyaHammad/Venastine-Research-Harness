@@ -15,6 +15,18 @@ other name.
 
 ---
 
+## CITATION.cff and README's Status (batch 246)
+
+| Change | Test | Fix |
+|---|---|---|
+| Change README's title, package.json's description, license, repository or keywords, or pyproject's authors, and not CITATION.cff | `test_citation_cff_names_this_project_as_its_metadata_does` | Make CITATION.cff say the same: the package metadata is the source, the citation follows it |
+| Mistype a digit of the ORCID iD in CITATION.cff, write it without `https://orcid.org/`, or drop it | `test_citation_cff_orcids_carry_a_valid_check_digit` | Copy the iD from orcid.org as its full URL |
+| Add `version`, `date-released` or `commit` to CITATION.cff | `test_citation_cff_states_no_version` | Remove it (owner, batch 246), or make the release write it and change the test with the reason |
+| Build a ROADMAP_v3 section, add one, or mark one NOT BUILT in the index without updating README's Status | `test_readme_status_names_the_roadmap_v3_sections_still_to_build` | Put the section in the Status section's built ranges or in its "still to build" sentence |
+| Open or close a TECHNICAL_DEBT item without updating README's Status | `test_readme_status_names_the_open_technical_debt_items` | Name exactly the items whose headings say open |
+
+---
+
 ## yarn, bun and pnpm installs in README (batch 245)
 
 | Change | Test | Fix |

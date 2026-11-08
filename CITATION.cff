@@ -1,0 +1,44 @@
+# How to cite this project, in Citation File Format 1.2.0
+# (https://citation-file-format.github.io/). GitHub turns it into the
+# "Cite this repository" link in the sidebar; archives such as Zenodo read it.
+#
+# tests/test_docs_consistency.py holds the title to README.md, the abstract,
+# license, repository and keywords to package.json, and the authors to
+# pyproject.toml, so change those and this follows. No version and no
+# release date, on purpose (batch 246): nothing rewrites this file on a
+# release, and the release tag already carries the version.
+cff-version: 1.2.0
+message: If you use this software, please cite it using the metadata from this file.
+type: software
+title: Venastine Research Harness
+abstract: "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline."
+authors:
+  - given-names: Yahya
+    family-names: Hammad
+    orcid: "https://orcid.org/0009-0006-2494-4120"
+repository-code: "https://github.com/YahyaHammad/Venastine-Research-Harness"
+license: Apache-2.0
+keywords:
+  - agent
+  - llm
+  - research
+  - anthropic
+  - openai
+  - mcp
+  - agentic-ai
+  - ai-agent
+  - agent-harness
+  - llm-agent
+  - research-agent
+  - deep-research
+  - fact-checking
+  - tool-use
+  - model-context-protocol
+  - gemini
+  - deepseek
+  - openrouter
+  - hugging-face
+  - modelscope
+  - security
+  - cli
+  - tui

@@ -78,7 +78,7 @@ Standardized titles and bodies are not bureaucracy — they are what let a maint
 * `<area>` is one of: `security`, `correctness`, `coherence`, `test-quality`, `docs-drift`, `performance`, `ux`, `stability` — pick the closest; don't invent a new one without discussion.
   * Older issues carry an `[S0]` severity and a `complexity` area. Both predate the issue forms (2026-08-27), which are the arbiter: file those as `S1` and `coherence`. `tests/test_docs_consistency.py` holds the form's two lists to the two above.
 * Other title shapes in use (don't mix with `S`):
-  * `[tracker] Audit Pass 1 — coverage tracker (read this first)` — the single tracker (`#15`)
+  * `[tracker] <what it indexes> (read this first)` — an index over a set of findings: `#15` (Audit Pass 1) and `#262` (the review marathon's deferred findings), each closed once every finding it lists was
   * `[unit X<n>] <area> — description` — per-unit reviews (`#134`, `#142`), e.g. `[unit X5] Decision coherence`
   * `[enhancement]` / `[docs]` — non-audit polish, no severity
 
@@ -87,8 +87,8 @@ Example: `[S1][security] shell auto-approval is unbounded: inert commands run on
 **Labels — set one, at triage.** The *Audit finding* form sets none, on purpose: which of the three below fits depends on the finding, and a form cannot tell. The *Documentation* and *Enhancement* forms each set their own.
 
 * `bug` — an `S1`/`S2` finding, or any severity where behavior is outright wrong today
-* `enhancement` — `S3`/`S4` polish, coherence and performance work where nothing misbehaves yet. Most open findings sit here, including `[S3][coherence]` and `[S3][correctness]` ones — see `#12`, `#9`, `#6`
-* `documentation` — drift between code and `README`/`ARCHITECTURE`/`ROADMAP`/`AGENTS`, plus the `#15` tracker itself
+* `enhancement` — `S3`/`S4` polish, coherence and performance work where nothing misbehaves yet. Most findings have sat here, including `[S3][coherence]` and `[S3][correctness]` ones — see `#12`, `#9`, `#6`
+* `documentation` — drift between code and `README`/`ARCHITECTURE`/`ROADMAP`/`AGENTS`, plus the trackers themselves (`#15`, `#262`)
 
 **Body — four sections in this order (copy-paste this template):**
 
