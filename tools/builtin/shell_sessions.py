@@ -504,6 +504,15 @@ def _start(name: str, model, params: dict, memory, call_id) -> dict:
     refusal = shell.uncontained_refusal(parsed.command, backend, needs_root)
     if refusal is not None:
         return {"error": refusal}
+    # ROADMAP_v3 §56 (JV14): a background or monitor start the decision
+    # model refused under `reject`. Not an interactive one: its gate is
+    # `_interactive_approval_check`, which never asks the model, and
+    # `classifier_key` would judge only its first line.
+    if name != INTERACTIVE:
+        refusal = shell.classifier_refusal(
+            parsed.command, backend, parsed.requires_network, needs_root)
+        if refusal is not None:
+            return {"error": refusal}
     # See `shell.run` for why an uncontained call does not probe: the guard
     # the probe feeds is about the insecure fallback, which it cannot take.
     docker_up = (True if backend != shell.BACKEND_CONTAINER

@@ -663,6 +663,23 @@ def _cmd_memories(session: ChatSession, args: str) -> None:
     print_memories()
 
 
+def _cmd_classifier(session: ChatSession, args: str) -> None:
+    """ROADMAP_v3 §56 (JV19). The TUI's /classifier, line for line; `test`
+    runs on the chat loop's thread here, which is where a CLI command
+    runs."""
+    from core import decision_classifier
+
+    word, _, rest = args.strip().partition(" ")
+    if word == "test":
+        command = rest.strip()
+        lines = (decision_classifier.test_lines(command) if command
+                 else [decision_classifier.USAGE])
+    else:
+        lines = decision_classifier.command_lines(args)
+    for line in lines:
+        _out(line)
+
+
 def _cmd_network(session: ChatSession, args: str) -> None:
     """ROADMAP_v3 §53 (IO13). The TUI's /network, line for line: both
     print `_net_common.network_report`."""
@@ -824,6 +841,7 @@ def register_cli_commands() -> None:
         bind("agent", _cmd_agent),
         bind("call", _cmd_call),
         bind("claims", _cmd_claims),
+        bind("classifier", _cmd_classifier),
         bind("compact", _cmd_compact),
         bind("effort", _cmd_effort),
         bind("forget", _cmd_forget),

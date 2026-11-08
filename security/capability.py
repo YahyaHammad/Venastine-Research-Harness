@@ -49,11 +49,17 @@ TIERED = "tiered"
 # containment constant would read as correct and match, so the Python
 # names must differ even though the strings cannot.
 CONTAINED_MODE = "contained"
+# ROADMAP_v3 §56 (JV11). `tiered`, plus a decision model asked about the
+# calls `tiered` would ask about -- and only the single, contained ones
+# (JV12). `tiered` itself is unchanged (JV1): this is a mode beside it.
+CLASSIFIED_MODE = "classified"
 NEVER = "never"
 
 # Strictest first. The order is what validate_mode's message lists, so a
 # reader of the error sees the modes the way config.yaml describes them.
-APPROVAL_MODES = (ALWAYS, TIERED, CONTAINED_MODE, NEVER)
+# `classified` sits after `tiered` because it asks about a subset of what
+# `tiered` asks about, and before `contained`, which asks about less.
+APPROVAL_MODES = (ALWAYS, TIERED, CLASSIFIED_MODE, CONTAINED_MODE, NEVER)
 
 
 def validate_mode(value: str, setting_name: str) -> str:

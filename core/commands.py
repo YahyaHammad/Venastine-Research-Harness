@@ -80,6 +80,10 @@ _SPECS = (
                 absent={TUI: "ctrl+click a ▸ line to open its call."}),
     CommandSpec("claims", "show a research run's claims and their tiers",
                 "[run id]"),
+    # ROADMAP_v3 §56 (JV19). Both shells: a line terminal running
+    # `classified` needs to see and clear the verdicts as much as the TUI.
+    CommandSpec("classifier", "the shell's decision model",
+                "[test <command>|clear]"),
     CommandSpec("compact", "summarize this conversation's older turns now",
                 "[--strength 1-5]"),
     CommandSpec("config", "browse and set the harness configuration",

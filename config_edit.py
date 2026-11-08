@@ -88,11 +88,48 @@ TABLES = ("tool_permissions", "tool_approvals")
 #: `tests/test_config_edit.py` holds this against HARNESS_AUTHORITY_KEYS.
 AUTHORITY_EFFECT = {
     "shell_approval_mode": (
-        "how often a shell command stops to ask you. `contained` runs any "
+        "how often a shell command stops to ask you. `classified` lets a "
+        "decision model run a single contained command without asking "
+        "when it passes your thresholds, `contained` runs any "
         "code the agent writes inside the container without asking, and "
         "`never` runs every command the agent writes without asking, "
         "including in a session where untrusted content is already in the "
         "context window."),
+    # ROADMAP_v3 §56 (JV8). Each sentence says what moving the key lets
+    # through, because the confirmation exists to say that.
+    "shell_classifier_style": (
+        "which wire the shell classifier speaks. Under `classified`, its "
+        "answer decides whether a command runs without asking you."),
+    "shell_classifier_url": (
+        "which server decides, under `classified`, whether a shell command "
+        "runs without asking you. Every command it is asked about is sent "
+        "there."),
+    "shell_classifier_model": (
+        "which model decides, under `classified`, whether a shell command "
+        "runs without asking you."),
+    "shell_classifier_credential": (
+        "which providers.json key is sent to the shell classifier's URL "
+        "with every command it is asked about."),
+    "shell_classifier_timeout_s": (
+        "how long a shell command waits for the classifier. No answer in "
+        "time asks you; it never runs the command."),
+    "shell_classifier_on_fail": (
+        "what a shell command the classifier fails does: `ask` asks you, "
+        "`reject` refuses it without asking."),
+    "shell_classifier_min_containedness": (
+        "how contained a command must look to the classifier to run "
+        "without asking you. Lower lets more through."),
+    "shell_classifier_max_risk": (
+        "how risky a command may look to the classifier and still run "
+        "without asking you. Higher lets more through."),
+    "shell_classifier_max_modification": (
+        "how much a command may change your project, by the classifier's "
+        "judgement, and still run without asking you. Higher lets more "
+        "through."),
+    "shell_classifier_max_network": (
+        "how likely a command may be to use the network, by the "
+        "classifier's judgement, and still run without asking you. Higher "
+        "lets more through."),
     "allow_insecure_sandbox_fallback": (
         "whether a shell command may run WITHOUT the container when neither "
         "Docker nor Podman can run one -- on the host, with your files."),

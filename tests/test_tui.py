@@ -6116,10 +6116,11 @@ class TestThePanelOpensOnWhatIsTyped:
             await pilot.press("slash", "c")
             assert await settle(pilot, lambda: panel.shown == 4)
             names = [c.name for c in panel._matches]
-            assert names == ["claims", "compact", "config", "connect",
-                             "copy", "critic"], (
-                "six commands start with c since batch 163 added "
-                "/connect (batch 84 had added /config); four of them fit")
+            assert names == ["claims", "classifier", "compact", "config",
+                             "connect", "copy", "critic"], (
+                "seven commands start with c since batch 248 added "
+                "/classifier (batch 163 had added /connect, batch 84 "
+                "/config); four of them fit")
 
             await pilot.press("o")
             assert await settle(
@@ -6345,7 +6346,7 @@ class TestThePanelFitsTheRowsItHas:
                 f"the panel drew {panel.size.height} content rows past a "
                 f"budget of 8")
             names = [c.name for c in panel.visible]
-            assert names == ["agent", "claims", "compact", "config"], (
+            assert names == ["agent", "claims", "classifier", "compact"], (
                 f"the visible entries are {names}; an entry that did not "
                 f"fit must end the list, not be skipped over")
 
@@ -6374,8 +6375,8 @@ class TestThePanelFitsTheRowsItHas:
 
             await pilot.press("c")
             assert await settle(pilot, lambda: panel.shown == 4)
-            assert panel.border_title.startswith("1-4 of 6 "), (
-                f"the title reads {panel.border_title!r}; six commands "
+            assert panel.border_title.startswith("1-4 of 7 "), (
+                f"the title reads {panel.border_title!r}; seven commands "
                 f"start with c and four are on screen, so claiming every "
                 f"command as a candidate would be a lie about the filter")
 
@@ -6467,11 +6468,13 @@ class TestTheKeysWhileThePanelIsOpen:
             assert panel.chosen.name == "claims"
 
             await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "compact")
+            assert await settle(pilot,
+                                lambda: panel.chosen.name == "classifier")
             await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "config")
-            await pilot.press("up")
             assert await settle(pilot, lambda: panel.chosen.name == "compact")
+            await pilot.press("up")
+            assert await settle(pilot,
+                                lambda: panel.chosen.name == "classifier")
 
             assert prompt.cursor_location == where, (
                 f"the caret moved to {prompt.cursor_location} while the "
@@ -6845,17 +6848,17 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
             assert [c.name for c in panel.visible] == [
-                "agent", "claims", "compact", "config"]
+                "agent", "claims", "classifier", "compact"]
 
             for _ in range(4):
                 await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "connect")
+            assert await settle(pilot, lambda: panel.chosen.name == "config")
 
             assert [c.name for c in panel.visible] == [
-                "claims", "compact", "config", "connect"], (
+                "claims", "classifier", "compact", "config"], (
                 f"the window is {[c.name for c in panel.visible]}; a fourth "
                 f"down should have dropped /agent off the top and brought "
-                f"/connect in at the bottom, not cycled back to the start")
+                f"/config in at the bottom, not cycled back to the start")
 
     @pytest.mark.asyncio
     async def test_the_window_can_drop_one_and_gain_two(self):
@@ -6864,8 +6867,8 @@ class TestTheWindowSlidesOverTheMatches:
         `/embedder` and `/forget` are two rows between them, so the step
         that needs `/embedder` on screen drops one entry and gains TWO, and
         the panel goes from four entries to five without either cap moving.
-        Nine downs since batch 184's `/disconnect` sorted in before
-        `/effort` (measured: the window drops `/copy` there and gains both).
+        Ten downs since batch 248's `/classifier` sorted in after `/claims`
+        (nine since batch 184's `/disconnect` sorted in before `/effort`).
         """
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test(size=(80, 24)) as pilot:
@@ -6874,7 +6877,7 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
 
-            for _ in range(9):
+            for _ in range(10):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
 
@@ -6898,7 +6901,7 @@ class TestTheWindowSlidesOverTheMatches:
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
 
-            for _ in range(9):
+            for _ in range(10):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
             scrolled = [c.name for c in panel.visible]
@@ -6913,12 +6916,12 @@ class TestTheWindowSlidesOverTheMatches:
                 f"the window moved to {[c.name for c in panel.visible]} for "
                 f"a selection it was already showing")
 
-            for _ in range(8):
+            for _ in range(9):
                 await pilot.press("up")
             assert await settle(pilot, lambda: panel.chosen.name == "agent")
 
             assert [c.name for c in panel.visible] == [
-                "agent", "claims", "compact", "config"], (
+                "agent", "claims", "classifier", "compact"], (
                 f"the window came home to {[c.name for c in panel.visible]}")
 
     @pytest.mark.asyncio
@@ -6957,7 +6960,7 @@ class TestTheWindowSlidesOverTheMatches:
             panel = app.query_one("#slash-suggest")
             await pilot.press("slash")
             assert await settle(pilot, lambda: panel.display)
-            for _ in range(9):
+            for _ in range(10):
                 await pilot.press("down")
             assert await settle(pilot, lambda: panel.chosen.name == "embedder")
 
@@ -6980,7 +6983,7 @@ class TestTheWindowSlidesOverTheMatches:
 
             for _ in range(4):
                 await pilot.press("down")
-            assert await settle(pilot, lambda: panel.chosen.name == "connect")
+            assert await settle(pilot, lambda: panel.chosen.name == "config")
             assert panel.border_title.startswith(
                 f"2-5 of {len(commands.all())} "), (
                 f"the title reads {panel.border_title!r}; once the window "
@@ -8296,6 +8299,7 @@ class TestTheConfigPanelIsTheCommandPanel:
         assert [row.name for row in rows] == [
             "config shell_approval_mode always",
             "config shell_approval_mode tiered",
+            "config shell_approval_mode classified",
             "config shell_approval_mode contained",
             "config shell_approval_mode never"]
         rows = commands.matching("/config shell_approval_mode n")
@@ -8354,6 +8358,7 @@ class TestTheConfigPanelIsTheCommandPanel:
                 lambda: [c.name for c in panel._matches] == [
                     "config shell_approval_mode always",
                     "config shell_approval_mode tiered",
+                    "config shell_approval_mode classified",
                     "config shell_approval_mode contained",
                     "config shell_approval_mode never"])
 

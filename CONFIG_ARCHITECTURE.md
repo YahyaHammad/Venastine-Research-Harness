@@ -1228,6 +1228,10 @@ ROADMAP_v2 §28 (G3). WHICH shell commands need a human to say yes.
                how a command is measured against it. Since §48 (CE1) only
                a read-only INERT command runs unasked: anything that may
                run code asks, contained or not.
+  "classified" ROADMAP_v3 §56 (JV11): "tiered", plus a decision model
+               asked about a single command that would run in the
+               container and that "tiered" would ask about. A verdict
+               inside every threshold runs it unasked.
   "contained"  §48 (CE2): the rule "tiered" had before §48. A command the
                container confines runs unasked unless it gets network,
                code included; reads outside the workspace and network
@@ -1264,6 +1268,42 @@ The legal set lives with the code that ENFORCES it --
 security/capability.APPROVAL_MODES, which validate_mode() reads. A second
 copy here was read by nothing but a test asserting its literal, so the two
 could have disagreed and only the unenforced one would have been wrong.
+
+### `shell_classifier_style`, `shell_classifier_url`, `shell_classifier_model`, `shell_classifier_credential`
+
+ROADMAP_v3 §56 (JV7, JV8, JV17). Who the `classified` mode asks, and how.
+`style` is named and never probed: a probe is a network call at launch and
+a guess about a security control, and it guesses wrong exactly when a proxy
+answers 200 to everything. `url` is the base, ending at `/v1`; empty is
+"not configured" (JV20), and anything that is neither empty nor http(s)
+fails at launch, because a typo in this endpoint must not look like an
+outage. `credential` NAMES a `providers.json` entry: the endpoint lives
+here and the key there, as JV8 split them, and the key is read when a
+request is made and never held. A key is never sent over plain http to
+anything but this machine.
+
+All four are authority keys, and the reason is different for each: the URL
+decides who answers, the model decides what answers, the credential decides
+which secret is sent to that URL, and the style decides how the answer is
+read.
+
+### `shell_classifier_timeout_s`, `shell_classifier_on_fail`
+
+ROADMAP_v3 §56 (JV10, JV13, JV18). How long a command waits for a verdict,
+and what one outside a threshold does. No verdict in time ASKS, under both
+`on_fail` values -- the one property the section rests on is that making
+the endpoint unreachable never widens what runs. `ask` ships because the
+mode has to be usable as a filter before anyone trusts it as a decision.
+
+### `shell_classifier_min_containedness`, `shell_classifier_max_risk`, `shell_classifier_max_modification`, `shell_classifier_max_network`
+
+ROADMAP_v3 §56 (JV5, JV16). One threshold per metric, each on 0-1. A
+`score` answer is the weighted mean of zero-based level indices, divided by
+levels-1 here so the four share a scale; networkedness is a probability.
+Containedness passes at or ABOVE its number; the other three at or below.
+0.75 / 0.25 / 0.5 / 0.5 are starting points, not calibrated values: a
+threshold tuned against one model is a different policy against another,
+and a vendor alias (`jev-latest`) moves.
 
 ### `sandbox_docker_image`
 

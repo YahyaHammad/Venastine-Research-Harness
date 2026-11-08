@@ -1622,6 +1622,30 @@ def _feed_sudo_password(proc, secret) -> None:
 # a reason to make the guard start its life with an exception.
 _SHELL_METACHARACTERS = re.compile(r"""[;|&$`><(){}!#~'"\\]""")
 
+
+def single_command(command) -> bool:
+    """Whether *command* is ONE command a decision model may be asked
+    about (ROADMAP_v3 §56, JV12).
+
+    ROADMAP_v2 §28 recorded this limit before §56 existed -- "the model
+    never sees compound shell" -- because routing compound commands to a
+    model to save prompts "collapses the injection argument entirely". So:
+    no shell metacharacter, quoting and escaping included, exactly the set
+    `_is_inert` refuses; and no control or invisible character, because a
+    newline is a command separator to `sh -c`, which every non-inert
+    command reaches. The set above does not list one only because an INERT
+    command never reaches a shell.
+
+    Total: the gate hands this whatever the model emitted.
+    """
+    if not isinstance(command, str):
+        return False
+    stripped = command.strip()
+    if not stripped or _SHELL_METACHARACTERS.search(stripped):
+        return False
+    return all(ch == " " or (ch.isprintable() and not ch.isspace())
+               for ch in stripped)
+
 # Dangerous flags for commands that remain in INERT_COMMANDS.
 #
 # BATCH 117 MADE THIS TABLE TRUE, because it was not. The claim beside

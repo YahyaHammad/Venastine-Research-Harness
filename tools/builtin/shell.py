@@ -81,6 +81,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, StrictBool
 
 import config
+from core import decision_classifier
 from security import capability, posture
 from security.capability import (
     UNAVAILABLE,
@@ -111,6 +112,7 @@ from security.sandbox import (
     is_docker_available,
     known_runtime,
     run_sandboxed,
+    single_command,
     ssh_enabled,
     ssh_target,
     ssh_unavailable_reason,
@@ -454,6 +456,106 @@ def _command_names_root(command) -> bool:
     return False
 
 
+def classifier_key(command, backend: str, network: bool = False,
+                   needs_root: bool = False):
+    """The question the `classified` mode puts to its decision model for
+    this call, as a cache key -- or None when it puts none (ROADMAP_v3 §56).
+
+    ONE answer for the gate, the handlers and the notice, because a
+    `reject` the gate decides is enforced by `run` and the session starts
+    reading the verdict the gate stored (JV14). Three sites working out
+    "was the model asked about this" separately would be #157's shape.
+
+    None unless every one holds:
+
+      * the mode is `classified`;
+      * nothing above the opt-ins in `_shell_approval_check` answers for
+        the call -- not root, not a protected segment, not SSH or WSL
+        (JV2). Re-checked here rather than trusted, because the handlers
+        call this too and reach it by another road;
+      * it runs in the CONTAINER and was characterised (`measured`) --
+        ROADMAP_v2 §28's ceiling, "certain safe must not authorise a host
+        read", which keeps a host read, the host fallback and WSL out
+        (JV12);
+      * it is a single command (`single_command`) -- §28's other limit,
+        "the model never sees compound shell" (JV12);
+      * `tiered` would ASK about it (JV11). What `tiered` already runs
+        unasked never waits on a network call.
+
+    The key is the command, the project, the backend and the declared
+    network: everything the answer depends on.
+    """
+    if posture.current().shell_approval_mode != capability.CLASSIFIED_MODE:
+        return None
+    return classifier_question(command, backend, network, needs_root)[0]
+
+
+def classifier_question(command, backend: str, network: bool = False,
+                        needs_root: bool = False):
+    """`classifier_key` without the mode, and with the reason when there is
+    no question: `(key, "")` or `(None, why)`. `/classifier test` reads the
+    reason, under any mode, to say what `classified` would do."""
+    if not isinstance(command, str) or not command.strip():
+        return None, "there is no command"
+    if backend != BACKEND_CONTAINER:
+        return None, (f"it asks for the {backend} backend, which is never "
+                      f"sent to the decision model")
+    if needs_root or _command_names_root(command):
+        return None, "it runs as root, which always asks"
+    if _command_touches_protected(command) is not None:
+        return None, "it names a protected path, which always asks"
+    if not single_command(command):
+        return None, ("it is not a single command: it contains a shell "
+                      "metacharacter, a quote, an escape or a control "
+                      "character, and the decision model never sees one")
+    network = bool(network)
+    profile, containment = _profile_and_containment(command, network, backend)
+    if containment != capability.CONTAINED:
+        return None, ("it would not run in a container (no container "
+                      "runtime answered), and only a contained command is "
+                      "sent to the decision model")
+    if not profile.measured:
+        return None, "the harness could not characterise it"
+    if auto_approved(profile, containment):
+        return None, ("tiered already runs it without asking, so the "
+                      "decision model is not consulted")
+    return (command, config.WORKSPACE_DIR, backend, network), ""
+
+
+def classifier_refusal(command, backend: str, network: bool = False,
+                       needs_root: bool = False) -> str | None:
+    """Why the decision model's verdict stops this call, or None
+    (ROADMAP_v3 §56, JV14, JV18).
+
+    The handler half of `reject`: the gate answered "nothing to ask" and
+    this is what keeps the call from running. A verdict that is no longer
+    held -- `/classifier clear` between the gate and the run -- refuses
+    rather than runs, `fallback_changed_refusal`'s shape, because a call
+    nobody judged must not run on the strength of having been judged.
+
+    It names no number and no threshold (JV15): the model reads this, and
+    the numbers are a gradient a hijacked agent could climb.
+    """
+    key = classifier_key(command, backend, network, needs_root)
+    if key is None:
+        return None
+    settings = posture.current().shell_classifier
+    if settings.on_fail != decision_classifier.ON_FAIL_REJECT:
+        return None
+    verdict = decision_classifier.CACHE.get(key)
+    if verdict is None:
+        return ("This command was judged by the decision model and that "
+                "verdict has since been cleared, so it was not run. Retry, "
+                "and it will be judged again.")
+    if verdict.refuses(settings):
+        return ("Refused without asking: the decision model judged this "
+                "command outside what may run unprompted, and the harness "
+                "is set to refuse such commands rather than ask "
+                "(shell_classifier_on_fail: reject). Do the work another "
+                "way, or ask the user to run it.")
+    return None
+
+
 def _shell_approval_check(tool_name: str, params: dict) -> bool:
     """Whether this shell call needs a human to say yes (ROADMAP_v2 §28).
 
@@ -497,6 +599,15 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
          under `tiered` and `contained` alike (§48, CE5): it is written on
          purpose and already flagged. Under `always` it is never reached,
          because step 1 returned (CE6).
+      4a. The `classified` mode (ROADMAP_v3 §56, JV11-JV14) asks its
+         decision model about the calls `classifier_key` admits: single,
+         contained, and ones `tiered` would ask about. A PASS runs
+         unasked; a FAIL asks, or under `on_fail: reject` answers "nothing
+         to ask" and `run` refuses it; no verdict asks (JV10, JV13).
+         Below every refusal and always-ask above, which is JV2 -- the
+         reason a steered verdict cannot reach `.venastine/`, root or
+         another machine. Every call `classifier_key` refuses falls
+         through to step 5, which is `tiered`.
       4. The `contained` mode (§48, CE2) is the second visible opt-in, and
          applied here for the same reason: a command the container
          confines and that gets no network runs unasked. Below the
@@ -608,6 +719,19 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
             and active.auto_approve_fallback):
         return False
 
+    # Step 4a, ROADMAP_v3 §56. The only step in this function that can turn
+    # an "ask" into "run unasked" on a model's word -- the first layer in
+    # the harness that widens rather than tightens, which breaks D14's
+    # one-way ratchet as a NAMED decision (ROADMAP_v2 §28 required one).
+    if mode == capability.CLASSIFIED_MODE:
+        key = classifier_key(command, backend, declared_network(params),
+                             declared_root(params))
+        if key is not None:
+            settings = active.shell_classifier
+            verdict = decision_classifier.verdict_for(
+                key, command, config.WORKSPACE_DIR, settings)
+            return verdict.asks(settings)
+
     # Step 4, §48 (CE2): the rule `tiered` had before §48, under the name
     # that says what it trusts. `measured` first, for G5's reason -- the
     # container must not argue an uncharacterised call through.
@@ -693,6 +817,16 @@ def _shell_approval_notice(params: dict, _context=None) -> str:
         # look like a false positive to the person answering.
         notice += (f" It names {segment}/, a protected path that always "
                    "requires approval.")
+    # ROADMAP_v3 §56 (JV15). The verdict is for the person answering, and
+    # this prompt is the one place they read it -- the model's result never
+    # carries it. Read from the cache the gate filled, never fetched here.
+    key = classifier_key(command, backend, declared_network(params),
+                         declared_root(params))
+    if key is not None:
+        verdict = decision_classifier.CACHE.get(key)
+        if verdict is not None:
+            notice += " " + decision_classifier.describe(
+                verdict, posture.current().shell_classifier)
     return notice
 
 
@@ -941,6 +1075,11 @@ def run(params: dict) -> dict:
     # served by a backend it did not ask for.
     refusal = uncontained_refusal(parsed.command, parsed.backend,
                                   parsed.needs_root)
+    if refusal is not None:
+        return {"error": refusal}
+    # ROADMAP_v3 §56 (JV14): a `reject` the gate decided is refused here.
+    refusal = classifier_refusal(parsed.command, parsed.backend,
+                                 parsed.requires_network, parsed.needs_root)
     if refusal is not None:
         return {"error": refusal}
 

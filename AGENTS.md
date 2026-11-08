@@ -36,6 +36,8 @@ python main.py --tui --provider OPENAI --model gpt-4o   # or switch in-session w
 #   run on, REMEMBERED in core/pipeline_models.py's store (no config.yaml key); an agent that
 #   pins either half of its own pair keeps it, and the compactor, reviewer and initializer
 #   keep the session model
+# ROADMAP_v3 §56, both shells: /classifier [test <command>|clear] -- the shell's decision model
+#   under `shell_approval_mode: classified`; `test` asks it under any mode and runs nothing
 # §79 in the TUI: /connect [name [--key]|custom <NAME> <url>|cancel] -- connect a provider
 #   without editing providers.json: HF and OpenRouter sign in (HD5), and each ModelScope
 #   site (modelscope, modelscope-cn) where a hosted bridge holds its app (HD13); the rest take a key
@@ -64,7 +66,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 9206 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 9310 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -387,7 +389,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§55, §58, §59, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84, §85, §86, §87, §88, §89, §90, §91, §92 and §93 built; §56 and §60 recorded from the owner's requests in batches 122 and 123, specified and not yet designed; §53 recorded in batch 122 and designed with the owner and built in batch 239; §92 asked for and built in batch 240; §93 asked for and built in batch 241; §59 recorded in batch 122 and designed with the owner and built in batch 238; §57 recorded in batch 122 and designed with the owner and built in batch 235; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A90 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85, A81 in §86, A82 in §87, A83 in §88, A84 in §89, A85 in §90, A86, A87, A88, A89 and A90 in §91), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO15 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV10 from §56, SM1–SM11 from §57, PR1–PR6 from §58 UI1–UI8 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82, CG1–CG24 from §83, PT1–PT10 from §92 and UV1–UV7 from §93). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§55, §58, §59, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84, §85, §86, §87, §88, §89, §90, §91, §92 and §93 built; §60 recorded from the owner's request in batch 123, specified and not yet designed; §56 recorded in batch 122 and designed with the owner and built in batch 248; §53 recorded in batch 122 and designed with the owner and built in batch 239; §92 asked for and built in batch 240; §93 asked for and built in batch 241; §59 recorded in batch 122 and designed with the owner and built in batch 238; §57 recorded in batch 122 and designed with the owner and built in batch 235; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A90 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85, A81 in §86, A82 in §87, A83 in §88, A84 in §89, A85 in §90, A86, A87, A88, A89 and A90 in §91), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO15 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV20 from §56, SM1–SM11 from §57, PR1–PR6 from §58 UI1–UI8 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82, CG1–CG24 from §83, PT1–PT10 from §92 and UV1–UV7 from §93). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -2390,6 +2392,28 @@ And from §50 (batch 99) -- the agent declares that a command needs the network 
   through `tiered` passes without the flag doing anything.
 - **The three tools share ONE description string** for the field (NW4, NW5): `shell.ShellParams`' is the
   copy `shell_background` and `shell_monitor` read.
+
+And from §56 (batch 248) -- a decision model as a second opinion, the `classified` mode
+(JV11-JV20). The four things most likely to be re-derived wrongly:
+
+- **It is the one layer that WIDENS, and only for a single contained command `tiered` would ask
+  about** (JV11, JV12). ROADMAP_v2 §28 recorded both limits before §56 existed -- the model never
+  sees compound shell, and "certain safe" never authorises a host read -- and the owner kept them.
+  **Do not route a compound command, a host read, the fallback, WSL or SSH to it "to save
+  prompts"**: that is the injection argument §28 says it collapses. `shell.classifier_key` is the
+  ONE answer to "is the model asked", read by the gate, the handlers and the notice.
+- **A `reject` is enforced by the HANDLER, because a `refusal_check` does not deny.** The gate
+  answers "nothing to ask" and `shell.run` and `shell_sessions._start` refuse through
+  `classifier_refusal`, reading the verdict the gate stored. A verdict that is no longer held
+  refuses rather than runs.
+- **Every verdict is held for the process, an error included** (JV14). The loop calls
+  `approval_needed` twice for one call -- before the prompt and inside `dispatch()` after the
+  answer -- so an expiring error would be re-asked after the person said yes, and a FAIL then
+  would refuse a call they approved. **Do not add a TTL** without solving that first.
+- **The model gets the command and the project path; the person gets the numbers; the model gets
+  neither the rationale nor a number** (JV4, JV15). `core/decision_classifier.build_state` is the
+  one place the state is made. The client lives in `core/`, not `security/`, because it calls the
+  network through `tools/builtin/_net_common`; its settings are frozen in the posture.
 
 And slice 2 (batch 100) -- an interactive shell the agent types into (SS25-SS34):
 

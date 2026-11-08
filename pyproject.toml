@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "venastine-research-harness"
-version = "0.3.12"
+version = "0.3.12b1+decision.classifier.r221ab7fae163"
 description = "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline."
 readme = "README.md"
 # The same words as package.json's `keywords`, in the same order: what a
