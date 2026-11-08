@@ -31115,3 +31115,90 @@ ROADMAP_v2's mentions of `#15` are dated records and stay as written.
 
 - **Version:** `0.3.12`, unchanged; label the pull request `release:skip`.
   Its body carries `Closes #15` and `Closes #262`.
+
+## Batch 247 -- README links the wiki, and its agent and skill fields are held to the loader (2026-11-08)
+
+**Asked.** The owner enabled the repository's wiki, and nine user guides
+were written for it from README: Home, a sidebar, Installation, Getting
+Started, Tool Permissions, Shell and Sandbox, Writing Agents and Skills,
+MCP Servers and FAQ. They were pushed as wiki commit `6300108` once the
+owner had reviewed them. Checking them against the code turned up three
+things README did not say, and the owner asked for those in README with a
+link to the wiki.
+
+**Measured first.**
+
+- **`spawn_targets` had no row** in README's agent-field table. The
+  paragraph above the table describes the field, and `_parse_md_file`
+  reads it, but nothing compared the table with the loader.
+- **"Decided per path" was never spelled out.** The approval table says
+  `read`, `view_image`, `write` and `edit` are decided per path. The rule
+  itself (inside the workspace a call runs unasked, outside it asks, and a
+  `.venastine` segment is refused) was only in `tools/builtin/file_ops.py`.
+  The default workspace is `./workspace` under the launch directory, which
+  the environment-variable table does say, so with the file tools on, the
+  rest of a project still asks.
+- **Unknown frontmatter keys are ignored silently.** `_parse_md_file`
+  reads the keys it knows and checks for no others, so `tools:`, another
+  harness's spelling of `allowed_tools`, does nothing.
+
+**The owner's decisions.**
+
+- **A test**, as batch 246 added for the Status section: README's
+  agent-field table and skill-field sentence name exactly the keys the
+  loader reads.
+- **This branch** keeps `main`'s `0.3.12` and merges with `release:skip`,
+  as batches 244-246 did. AGENTS.md's batch-202 rule is unchanged.
+
+**Built.**
+
+- **README.** Documentation links the wiki and says what it is: arranged by
+  task, outside the repository so no test checks it, each page naming the
+  release it was checked against, and README the reference where they
+  disagree. The agent-field table gains its `spawn_targets` row. A
+  paragraph under the approval table gives the per-path rule and what
+  `AGENT_WORKSPACE` changes about it, and one after the skill fields says a
+  key neither list names is ignored, not refused.
+- **Two tests (9204 to 9206).** `_frontmatter_keys_read` takes the keys
+  from `_parse_md_file`'s own syntax tree: `fm.get("x")`, `fm["x"]`, and
+  `fm.get(key)` under a `for` over literals. Any other spelling fails, so a
+  new key cannot hide behind one. The keys are split by whether each is a
+  field of `AgentDef` or `SkillDef`, and a key of neither fails too. The
+  agent table's rows and the skill sentence's names must then equal those
+  two sets.
+
+**Not changed.**
+
+- **The wiki** is not in the repository, and no test reads it. Each of its
+  pages ends with the release and commit it was checked against
+  (`0.3.12`, `f33ef8a`) instead.
+- **Unknown keys stay ignored.** This batch documents the behaviour; it does
+  not change it.
+
+**Verification.**
+
+- **Full suite:** on Windows, in a venv built from `main`'s requirements,
+  with `AGENT_WORKSPACE` unset: 9118 passed, 88 skipped, none failed. That
+  is 9206, the stated count. The worktree first had `providers.json` copied
+  from its template and `config.yaml` given LF endings, as tests.yml's
+  checkout has them; without that, 46 tests fail on a fresh Windows
+  worktree, and none of them is about this batch.
+- **Other gates:** the docs file alone is green (104 passed, and the count
+  check skips outside a full session). ruff is clean, bandit has 0 new
+  findings against the rewritten baseline and its count check is green,
+  and gitleaks is clean on an export of the tracked files with CI's config.
+- **Breakages:** 10 of 10 deliberate breakages turned the intended test red
+  for the reason its message states, and left the other as it should be:
+  the `spawn_targets` row dropped, a row for an unread key added, the
+  `model`, `provider` row cut to `model`, `additional_tools` dropped from
+  the skill sentence or `category` added to it, and the README heading
+  moved; and in the loader, a key read that is no field, a flag added to
+  the boolean loop that is no field, a key read through a variable the
+  parser cannot resolve, and `provider` no longer read. That last one
+  first scored a miss, which was the breakage's fault: the loader reads
+  `provider` twice, so removing one read left it read.
+- **README rendering:** checked through `gh api markdown`. The wiki link,
+  the `spawn_targets` row and both new paragraphs render, with the same 23
+  tables as `main`.
+
+- **Version:** `0.3.12`, unchanged; label the pull request `release:skip`.
