@@ -4354,3 +4354,135 @@ def test_readme_has_bun_and_pnpm_copy_the_package_rather_than_link_it():
                 f"out of {manager}'s cache, outside what the harness protects.")
     assert seen == {"bun", "pnpm", "yarn"}, (
         f"expected README to install with yarn, bun and pnpm; found {seen}")
+
+
+# ---------------------------------------------------------------------------
+# ---- batch 246: CITATION.cff, and README's Status held to the records ------
+# ---------------------------------------------------------------------------
+
+def _citation() -> dict:
+    import yaml
+
+    with open(os.path.join(ROOT, "CITATION.cff"), encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def test_citation_cff_names_this_project_as_its_metadata_does():
+    """CITATION.cff is what GitHub's "Cite this repository" link and
+    archives such as Zenodo read. Every field it shares with the package
+    metadata says what that metadata says: README's title, package.json's
+    summary, license, repository and keywords, and pyproject's authors."""
+    cff = _citation()
+    pkg = _package_json()
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as handle:
+        title = next(line for line in handle if line.startswith("# "))
+    assert cff["cff-version"] == "1.2.0", cff["cff-version"]
+    assert cff["type"] == "software", cff["type"]
+    assert cff["message"].strip(), "CITATION.cff has no message"
+    assert cff["title"] == title[2:].strip(), (cff["title"], title)
+    assert cff["abstract"] == pkg["description"], (
+        "CITATION.cff's abstract is not package.json's description: change "
+        "the description, and this follows it")
+    assert cff["license"] == pkg["license"], (cff["license"], pkg["license"])
+    assert cff["repository-code"] == f"https://github.com/{_repository_slug()}", (
+        cff["repository-code"])
+    assert cff["keywords"] == pkg["keywords"], (
+        "CITATION.cff's keywords are package.json's list, in its order")
+    cited = [f"{a['given-names']} {a['family-names']}" for a in cff["authors"]]
+    declared = [a["name"] for a in _pyproject()["project"]["authors"]]
+    assert cited == declared, (cited, declared)
+
+
+def test_citation_cff_orcids_carry_a_valid_check_digit():
+    """An ORCID iD ends in a check digit (ISO 7064 MOD 11-2), so a typo in
+    one is visible offline, and a citation that links the wrong researcher
+    is worse than one that links none. Batch 246 added the author's."""
+    orcids = [a["orcid"] for a in _citation()["authors"] if "orcid" in a]
+    assert orcids, "CITATION.cff names no ORCID iD; batch 246 added the author's"
+    for orcid in orcids:
+        match = re.fullmatch(
+            r"https://orcid\.org/(\d{4})-(\d{4})-(\d{4})-(\d{3})([\dX])", orcid)
+        assert match, f"{orcid!r} is not an ORCID iD written as its URL"
+        total = 0
+        for digit in "".join(match.groups()[:4]):
+            total = (total + int(digit)) * 2
+        check = (12 - total % 11) % 11
+        assert match.group(5) == ("X" if check == 10 else str(check)), (
+            f"{orcid} fails its check digit: a digit is mistyped")
+
+
+def test_citation_cff_states_no_version():
+    """No `version`, `date-released` or `commit`, by the owner's choice in
+    batch 246: each is a field every release would have to rewrite, and
+    neither release_after_merge.py nor version.py writes this file. The
+    release tag carries the version, and an archive reads it there."""
+    stated = [key for key in ("version", "date-released", "commit")
+              if key in _citation()]
+    assert not stated, (
+        f"CITATION.cff states {stated}. Nothing updates it on a release, so "
+        f"it would be wrong after the next merge; remove it, or teach the "
+        f"release to write it and change this test with the reason")
+
+
+def _readme_status() -> str:
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as handle:
+        text = handle.read()
+    start = text.index("\n## Status\n")
+    return text[start:text.index("\n## ", start + 1)]
+
+
+def _section_numbers(spec: str) -> set:
+    """`§49–§55, §57–§59 and §61–§93` as the set of numbers it names."""
+    numbers = set()
+    for part in re.split(r",|\band\b", spec):
+        bounds = [int(n) for n in re.findall(r"§(\d+)", part)]
+        assert len(bounds) <= 2, part
+        if bounds:
+            numbers.update(range(bounds[0], bounds[-1] + 1))
+    return numbers
+
+
+def test_readme_status_names_the_roadmap_v3_sections_still_to_build():
+    """README's Status still listed §53, §57 and §59 as remaining after
+    each was merged (batches 239, 235 and 238), because nothing compared it
+    with ROADMAP_v3's index. Now the sections it calls built and the ones it
+    calls still to build are exactly the index's, and between them every
+    section in the file."""
+    status = _readme_status()
+    with open(os.path.join(DOCS, "ROADMAP_v3.md"), encoding="utf-8") as handle:
+        roadmap = handle.read()
+    sections = {int(n) for n in re.findall(r"(?m)^## §(\d+)\.", roadmap)}
+    not_built = {int(n) for n in re.findall(
+        r"(?m)^- \*\*§(\d+)\..*\(NOT BUILT", roadmap)}
+    built = re.search(r"`ROADMAP_v3\.md` ([^.]*?) are built\.", status)
+    remaining = re.search(
+        r"The sections? still to build (?:are|is) ([^.]*)\.", status)
+    assert built and remaining, (
+        "README's Status no longer says which ROADMAP_v3 sections are built "
+        "and which are still to build in the form this parses")
+    built = _section_numbers(built.group(1))
+    remaining = _section_numbers(remaining.group(1))
+    assert remaining == not_built, (
+        f"README's Status says {sorted(remaining)} are still to build; "
+        f"ROADMAP_v3's index marks {sorted(not_built)} NOT BUILT")
+    assert not built & remaining, sorted(built & remaining)
+    assert built | remaining == sections, (
+        f"README's Status calls these neither built nor still to build: "
+        f"{sorted(sections - built - remaining)}; and names these the roadmap "
+        f"does not have: {sorted((built | remaining) - sections)}")
+
+
+def test_readme_status_names_the_open_technical_debt_items():
+    """README's Status said TECHNICAL_DEBT items 9 and 10 were open long
+    after batches 27 and 28 closed them. The items it names are now exactly
+    the ones whose headings say open, a half-open one included."""
+    said = re.search(r"`TECHNICAL_DEBT\.md` items ([^.]*)\.", _readme_status())
+    assert said, ("README's Status no longer names the open TECHNICAL_DEBT "
+                  "items in the form this parses")
+    with open(os.path.join(DOCS, "TECHNICAL_DEBT.md"), encoding="utf-8") as handle:
+        headings = re.findall(r"(?m)^## (\d+)\. (.*)$", handle.read())
+    marked = {int(n) for n, text in headings if re.search(r"\bopen\b", text)}
+    named = {int(n) for n in re.findall(r"\d+", said.group(1))}
+    assert named == marked, (
+        f"README's Status names items {sorted(named)} as open; "
+        f"TECHNICAL_DEBT.md's headings mark {sorted(marked)}")

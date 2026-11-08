@@ -18,6 +18,7 @@ Install with Python 3.11 or newer, from GitHub (`install.sh` or `install.ps1`), 
 - [Security policy](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/docs/SECURITY.md): how to report a vulnerability, and what is in scope
 - [Privacy](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/docs/PRIVACY.md): what is stored locally, what leaves the machine, and the hosted demo
 - [Contributing](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/docs/CONTRIBUTING.md): license, setup, the test loop, and the issue and pull request format
+- [Citation](https://raw.githubusercontent.com/YahyaHammad/Venastine-Research-Harness/main/CITATION.cff): how to cite the project, in Citation File Format 1.2.0: title, author with ORCID iD, license, repository and keywords
 
 ## Try it
 

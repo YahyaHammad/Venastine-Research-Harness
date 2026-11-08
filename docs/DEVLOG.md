@@ -31030,3 +31030,88 @@ the three commands as separate code blocks and the three points.
 
 - **Version:** `0.3.11`, unchanged, as in batch 244; label the pull request
   `release:skip`.
+
+## Batch 246 -- a citation file, and a Status section held to the records it summarises (2026-11-08)
+
+**Asked.** A survey of what could still improve the project on GitHub came
+back with a short list, and the owner picked two items from it: a
+`CITATION.cff`, and the two tracker issues. `#15` (Audit Pass 1) and `#262`
+(the review marathon's deferred findings) were the only open issues, and
+every issue either one lists was closed. Counted from GitHub on 2026-11-08:
+189 issues carry a severity in their title, none open, the last closed on
+2026-11-04.
+
+**Measured first: README's Status section had drifted in three places.**
+
+- **The audit.** It said Audit Pass 1 stood at "149 of 154 closed, 5 open",
+  in "32 so far" fix batches. The 154 issues numbered up to `#200` are 130
+  findings (8 `S1` and 4 filed as `S0` before the issue forms, 30 `S2`, 79
+  `S3`, 9 `S4`), 22 unit reviews, one enhancement and `#15` itself, and `#15`
+  is the only one open. The marathon's 59 (`#203`-`#261`, 17 `S3` and 42
+  `S4`) are all closed.
+- **The roadmap.** It listed §53, §57 and §59 as remaining. ROADMAP_v3's
+  index marks all three BUILT (batches 239, 235 and 238, merged as `#279`,
+  `#275` and `#278`). It also left §84-§93 out of its built list, though
+  batches 225-241 built them. The index marks exactly §56 and §60 NOT BUILT.
+- **The debt.** It said TECHNICAL_DEBT items 9 and 10 are open; their
+  headings say batches 27 and 28 closed them. The headings that say open
+  are items 14, 17, 18, 21, 102 and 116, and the secrets half of 97.
+
+**The owner's decisions.**
+
+- **Author:** "Yahya Hammad", as package.json and pyproject.toml say, with
+  the author's ORCID iD.
+- **Version:** none in the file. A `version` there would be one more field
+  every release has to rewrite, and the release tag carries the version
+  anyway.
+- **This branch:** it keeps `main`'s `0.3.12` and merges with
+  `release:skip`, as batches 244 and 245 did. AGENTS.md's batch-202 rule is
+  unchanged.
+
+**Built.**
+
+- **`CITATION.cff`** (Citation File Format 1.2.0): the title, the abstract
+  (package.json's description), the author and ORCID iD, the repository,
+  the license and package.json's keywords. It is valid against the
+  format's own 1.2.0 schema: jsonschema 4.26.0 with format checks found 0
+  errors. The schema was downloaded with the owner's yes and stays in the
+  scratchpad, so the suite stays offline.
+- **README:** a "Citing" section before "License", pointing at the file and
+  at GitHub's "Cite this repository" link. The Status section is rewritten
+  from the counts above.
+- **CONTRIBUTING:** the tracker title form now names both trackers and says
+  each closes once every finding it lists has. "Most open findings sit
+  here" is now in the past tense. **llms.txt** links the citation file.
+- **Five tests (9199 to 9204).** Three hold CITATION.cff to README,
+  package.json and pyproject.toml, check its ORCID iD's check digit
+  (ISO 7064 MOD 11-2), and keep a version out. Two hold the Status section
+  to ROADMAP_v3's index and to TECHNICAL_DEBT's headings, so the drift this
+  batch fixed by hand now fails a test instead of waiting for a reader.
+- **The trackers** close through the pull request's `Closes #15` and
+  `Closes #262` lines when it merges.
+
+**Not changed.** REVIEW_MARATHON.md's "issue #15, still open" and
+ROADMAP_v2's mentions of `#15` are dated records and stay as written.
+
+**Verification.**
+
+- **Full suite:** on Windows, in a fresh venv built from `main`'s
+  requirements after `#274` (openai 3.45.0, anthropic 2.5.0), with
+  `AGENT_WORKSPACE` unset: 9116 passed, 88 skipped, none failed. That is
+  9204, the stated count.
+- **Other gates:** the docs gate is green on its own. ruff is clean, bandit
+  has 0 new findings against the rewritten baseline and its count check is
+  green, and gitleaks is clean on an export with CI's config.
+- **Breakages:** 19 of 19 deliberate breakages turned the one intended test
+  red and left the other four green. They were a changed title, abstract,
+  license, repository or author; reordered keywords; an ORCID iD with a
+  wrong digit, without its URL, or removed; a `version` or `date-released`
+  added; §57 named as still to build; §93 or §56 counted wrongly;
+  §56 marked built in the index; a debt item dropped or added; and two
+  debt headings flipped.
+- **README rendering:** checked through `gh api markdown`. The Status
+  section renders, and "Citing" is a section of its own with the link to
+  `./CITATION.cff`.
+
+- **Version:** `0.3.12`, unchanged; label the pull request `release:skip`.
+  Its body carries `Closes #15` and `Closes #262`.

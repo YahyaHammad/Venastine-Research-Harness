@@ -1048,15 +1048,18 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 
 **Built:** ROADMAP.md §1–§12 (§10's ensemble mode rebuilt by its revisit — diversity now comes from a roster of different models) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete), §24 (`/init`), §23 (interactive tools: the response channel, per-tool subagent sign-off, `ask_user`, and the todo list), §28 (the shell capability classifier).
 
-**Remaining:** nothing in `ROADMAP.md` or `ROADMAP_v2.md`, and §10's revisit is now closed. `ROADMAP_v3.md` §49–§52, §54, §55, §58 and §61–§83 are built. The remaining sections are §53 (rolling network-I/O budgets), §56 (a decision-model shell classifier), §57 (`/submodel`), §59 (memory selection and agent cycling), and §60 (Unified Harness Protocol compliance), each specified and awaiting detailed design. §54 completes project file/folder mentions without loading contents; §58 supplies a short harness identity that follows the current model; §83's final live checks are confirmed, and the ChatGPT header distinguishes a selected provider from an active sign-in. TECHNICAL_DEBT.md items 9 and 10 are open. The two checks recorded against §10 are answered from the providers' documentation in `ROADMAP_v3.md` §87: the default `temperature` on OpenAI and Google is 1.0, and OpenAI's reasoning models refuse one whenever reasoning effort is not `none`, which the guard now follows.
+**Remaining:** nothing in `ROADMAP.md` or `ROADMAP_v2.md`, and §10's revisit is now closed. `ROADMAP_v3.md` §49–§55, §57–§59 and §61–§93 are built. The sections still to build are §56 (a decision-model shell classifier) and §60 (Unified Harness Protocol compliance), each specified and awaiting detailed design. §54 completes project file/folder mentions without loading contents; §58 supplies a short harness identity that follows the current model; §83's final live checks are confirmed, and the ChatGPT header distinguishes a selected provider from an active sign-in. `TECHNICAL_DEBT.md` items 14, 17, 18, 21, 102 and 116 are open, and so is the secrets half of item 97. The two checks recorded against §10 are answered from the providers' documentation in `ROADMAP_v3.md` §87: the default `temperature` on OpenAI and Google is 1.0, and OpenAI's reasoning models refuse one whenever reasoning effort is not `none`, which the guard now follows.
 
-**Not finished, though: an audit is open.** Both roadmaps being built is not the same as the
-code being clean, and saying only the first would be the "built and runs are different claims"
-mistake this project keeps recording against itself. Audit Pass 1 is tracked in GitHub issues —
-**149 of 154 closed, 5 open**, those five being four `S3`s plus the `#15` tracker itself. Every
-`S1` (8 of them), `S2` (30) and `S4` (9) finding is closed, and 75 of 79 `S3`s are. It has been
-worked in numbered fix batches — 32 so far, each recorded in `DEVLOG.md` and
-`tests/BREAKING_CHANGES.md` with what was measured and what would break the fix.
+**And both audits are closed.** Both roadmaps being built is not the same as the code
+being clean, and saying only the first would be the "built and runs are different claims"
+mistake this project keeps recording against itself, so the audits get their own line.
+**Audit Pass 1** (tracker `#15`) is **154 issues, all closed**: 130 findings (8 `S1`, plus 4
+filed as `S0` before the issue forms; 30 `S2`, 79 `S3` and 9 `S4`), 22 unit reviews, one
+enhancement and the tracker. **The review marathon** (`docs/REVIEW_MARATHON.md`) filed the
+findings it deferred as 59 more issues, `#203`–`#261` under tracker `#262`: 17 `S3` and
+42 `S4`, **all closed**. The last finding of either closed on 2026-11-04. Both were worked in
+numbered fix batches, each recorded in `DEVLOG.md` and `tests/BREAKING_CHANGES.md` with what
+was measured and what would break the fix.
 
 **#157 — `shell`'s unbounded auto-approval — is closed** by batch 8 and ROADMAP_v2 §28; the
 classifier is described under *Security model* above. If you have a fork or a local config,
@@ -1064,7 +1067,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 9199 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
+Run the test suite with `pytest` — 9204 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
 
 ## Documentation
 
@@ -1082,6 +1085,12 @@ This file is the user-facing one. For working on the code:
 - **[PRIVACY.md](./docs/PRIVACY.md)** — what is stored locally, what leaves your machine, and how to delete it. No telemetry.
 - **[CODE_OF_CONDUCT.md](./docs/CODE_OF_CONDUCT.md)** — Contributor Covenant 2.1, and the private channel for reporting a violation.
 - **[THIRD_PARTY_NOTICES.md](./docs/THIRD_PARTY_NOTICES.md)** — the dependency license assessment: every declared direct dependency, its license, and its Apache-2.0 compatibility.
+
+## Citing
+
+If you use Venastine Research Harness in your research, please cite it with the metadata in
+[CITATION.cff](./CITATION.cff). GitHub turns that file into the **Cite this repository** link in
+the repository's sidebar, which gives the citation in APA and BibTeX to copy.
 
 ## License
 
