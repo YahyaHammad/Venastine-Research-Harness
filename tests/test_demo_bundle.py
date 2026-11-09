@@ -21,6 +21,8 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from tests.conftest import linux_docker
+
 ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
     "build_demo_bundle", ROOT / "scripts" / "build_demo_bundle.py")
@@ -519,23 +521,6 @@ class TestTheBuild:
         assert "nope" in capsys.readouterr().err
 
 
-def _docker() -> str:
-    """The docker CLI, when a daemon running LINUX containers answers it;
-    "" otherwise. A Windows runner's daemon answers `docker info` too, and
-    builds Windows images only, so the bundle's image would fail there
-    instead of skipping (batch 226, which runs this test in CI)."""
-    docker = shutil.which("docker")
-    if docker is None:
-        return ""
-    try:
-        info = subprocess.run([docker, "info", "--format", "{{.OSType}}"],  # nosec B603 - fixed arguments, no shell
-                              capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
-    return docker if (info.returncode == 0
-                      and info.stdout.strip() == "linux") else ""
-
-
 @pytest.mark.parametrize("os_type, expected", [
     ("linux", "/usr/bin/docker"), ("windows", ""), ("", "")])
 def test_only_a_linux_daemon_builds_the_bundles_image(monkeypatch, os_type,
@@ -548,7 +533,7 @@ def test_only_a_linux_daemon_builds_the_bundles_image(monkeypatch, os_type,
 
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Info())
-    assert _docker() == expected
+    assert linux_docker() == expected
 
 
 @pytest.mark.integration
@@ -567,7 +552,7 @@ def test_the_image_holds_exactly_the_bundles_files(tmp_path, monkeypatch):
     goes to `tmp_path`, as `test_installers.py`'s real-uv tests already
     send it; uv runs on an empty cache, where rustup and Docker need their
     real homes."""
-    docker = _docker()
+    docker = linux_docker()
     if not docker:
         pytest.skip("no Docker daemon running Linux containers answers")
     if shutil.which("git") is None:

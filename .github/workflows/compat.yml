@@ -133,8 +133,9 @@ jobs:
       # tests take the platform's own process tree, and the three uv tests
       # (ROADMAP_v3 §93) meet NTFS hardlinks and the npm launcher's spawn of
       # uv.exe, which no fake can stand in for. tests.yml's
-      # `integration` job runs the Linux half. The one skip allowed is the
-      # bundle image test: this runner's Docker builds Windows images only.
+      # `integration` job runs the Linux half. The bundle and plugin
+      # container tests may skip here because this runner's Docker builds
+      # Windows images only.
       - name: Run the integration tests
         shell: bash
         run: |

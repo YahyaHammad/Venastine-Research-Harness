@@ -31801,3 +31801,13 @@ repository authentication was not exercised.
 
 The pinned Windows environment ran the full offline suite: 10058 passed and 98 skipped.
 Ruff, Bandit and Gitleaks passed.
+
+## Batch 254 — Plugin integration before the first marketplace entry (2026-11-09)
+
+The owner deferred the first marketplace plugin while slices 1–5 are prepared to merge.
+The three plugin container tests now check Docker's mode on Windows, using the same probe as
+the demo bundle test. A Windows Docker daemon can answer successfully while serving only
+Windows images. The hosted Windows job accepts these Linux container skips; the Linux
+job still requires the tests to run. All three passed on Docker Desktop in Linux mode.
+With the daemon probe returning Windows mode, all three skipped with the expected reason.
+The full offline suite passed again: 10058 passed, 98 skipped.

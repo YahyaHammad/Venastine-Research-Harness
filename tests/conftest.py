@@ -14,6 +14,7 @@ import itertools
 import os
 import shutil
 import socket
+import subprocess  # nosec B404 - probe the Docker daemon in integration tests
 import time
 import types
 from datetime import UTC
@@ -22,6 +23,32 @@ from uuid import uuid4
 import pytest
 
 from core.client import ModelResponse, StreamToken, ToolCallRequest
+
+
+def linux_docker() -> str:
+    """The Docker CLI if its daemon runs Linux containers."""
+    docker = shutil.which("docker")
+    if docker is None:
+        return ""
+    try:
+        info = subprocess.run([docker, "info", "--format", "{{.OSType}}"],  # nosec B603 - fixed arguments, no shell
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return docker if info.returncode == 0 and info.stdout.strip() == "linux" else ""
+
+
+@pytest.fixture
+def linux_plugin_runtime() -> str:
+    """Use the harness's runtime; Windows-container Docker cannot run the plugin image."""
+    from security import sandbox
+
+    runtime = sandbox.container_runtime()
+    if runtime is None:
+        pytest.skip("needs Docker or Podman")
+    if runtime == sandbox.DOCKER and os.name == "nt" and not linux_docker():
+        pytest.skip("needs a Docker daemon running Linux containers")
+    return runtime
 
 # ---------------------------------------------------------------------------
 # ---- Generator draining (ROADMAP_v2 §22) ---------------------------------

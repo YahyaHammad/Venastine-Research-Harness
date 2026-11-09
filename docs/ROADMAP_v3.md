@@ -3146,7 +3146,7 @@ processes. The owner's rule was separate containers if the difference is minimal
    - This slice edits `.github/workflows/`, so the owner pushes it.
 5. **Install from a Git URL.** BUILT in batch 253. A private repository is cloned with the
    user's own Git credentials. Install a plugin at the repository root or select its subfolder.
-6. **A first plugin in the marketplace.**
+6. **A first plugin in the marketplace.** Deferred by the owner while slices 1–5 land.
 
 ### Settled for the later slices (batch 249)
 

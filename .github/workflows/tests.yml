@@ -183,9 +183,9 @@ jobs:
   # each needs a real process: three spawn a stdio MCP server and prove its
   # child is reaped (§17 AC8), one builds the hosted bundle's Docker
   # image to prove its .dockerignore, and three run the installers' uv path
-  # against the uv the install step pins (ROADMAP_v3 §93). The eighth is
-  # Windows-only and runs in compat.yml's Windows job, which is the one
-  # skip allowed here.
+  # against the uv the install step pins (ROADMAP_v3 §93), and three run
+  # plugins in Linux containers (ROADMAP_v3 §94). The Windows-only shell
+  # test runs in compat.yml's Windows job and is the one skip allowed here.
   integration:
     needs: changes
     if: needs.changes.outputs.core == 'true'
@@ -211,8 +211,7 @@ jobs:
       - name: Provide providers.json
         run: cp providers.json.example providers.json
 
-      # `-n0`: eight tests, one of them an image build, so a worker per core
-      # would idle.
+      # `-n0`: a small set that includes an image build and shares Docker.
       - name: Run the integration tests
         shell: bash
         run: |

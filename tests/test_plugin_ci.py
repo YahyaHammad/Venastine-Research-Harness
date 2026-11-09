@@ -1172,15 +1172,12 @@ def test_there_is_no_workspace_and_no_token():
 
 @pytest.mark.integration
 def test_a_plugins_checks_and_tests_run_in_the_sandbox_image(ci_home, tmp_path,
-                                                             monkeypatch):
+                                                             monkeypatch,
+                                                             linux_plugin_runtime):
     """PL35 end to end, as plugins.yml runs it: the tool modules checked by
     the runner in a container, the server started in one and compared with
     its listing, then the author's tests in the image with pytest from
     scripts/plugin-ci-requirements.txt, no network, no workspace, no token."""
-    from security import sandbox
-
-    if not sandbox.is_docker_available():
-        pytest.skip("needs Docker or Podman")
     monkeypatch.setattr(config, "PLUGIN_TOOL_ISOLATION", "container")
     monkeypatch.setenv("GITHUB_TOKEN", "not-for-the-plugin")
     folder = checked_plugin(tmp_path, listed=("echo", "read"), tests={
@@ -1193,7 +1190,7 @@ def test_a_plugins_checks_and_tests_run_in_the_sandbox_image(ci_home, tmp_path,
     assert any(n.startswith("its own tests passed") for n in notes), lines
     assert any("3 passed" in line for line in lines)
     listed = subprocess.run(  # nosec B603 - `ps` filtered on this test's own label, list form
-        [sandbox.known_runtime(), "ps", "-q", "--filter",
+        [linux_plugin_runtime, "ps", "-q", "--filter",
          "label=venastine.plugin=probe"], capture_output=True, text=True,
         timeout=30)
     assert listed.stdout.strip() == ""

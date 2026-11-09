@@ -1262,14 +1262,13 @@ class TestTheWallsHold:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.integration
-def test_a_plugin_tool_runs_in_its_own_container(home, tmp_path, monkeypatch):
+def test_a_plugin_tool_runs_in_its_own_container(home, tmp_path, monkeypatch,
+                                               linux_plugin_runtime):
     """PL22 and PL24 end to end: the lock built by pip in the sandbox
     image, the tool in a container of its own with the workspace read-only
     and no network, the grant widened, and nothing left running after."""
     from core import config_loader
 
-    if not sandbox.is_docker_available():
-        pytest.skip("needs Docker or Podman")
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     config_loader.initialize(str(project_dir))
@@ -1305,7 +1304,7 @@ def test_a_plugin_tool_runs_in_its_own_container(home, tmp_path, monkeypatch):
         plugin_tools.reset()
         config_loader.reset()
     listed = subprocess.run(  # nosec B603 - `ps` filtered on this test's own label, list form
-        [sandbox.known_runtime(), "ps", "-q", "--filter",
+        [linux_plugin_runtime, "ps", "-q", "--filter",
          "label=venastine.plugin=words"], capture_output=True, text=True,
         timeout=30)
     assert listed.stdout.strip() == ""
