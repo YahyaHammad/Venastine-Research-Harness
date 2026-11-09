@@ -46,6 +46,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ROADMAP_v3 §94 (PL32): a change whose every file is under plugins/
+  # runs none of this workflow's other jobs -- they show as skipped, which
+  # GitHub counts as passing -- and plugins.yml tests it instead. A job
+  # that decides, never a path filter on the trigger: deploy_gate.py
+  # refuses one, since a push could then leave this workflow unrun and the
+  # demo's gate would wait for it forever. Standard library and git only.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      core: ${{ steps.changes.outputs.core }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          # A pull request's merge commit and its base, or a push's tip.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Which side the change touches
+        id: changes
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: python3 scripts/plugin_ci.py changes
+
   # Fast gate (~10s): doc drift fails here instead of after the full
   # 15-minute suite below. Same fresh-clone steps, same `python -m pytest`
   # rule (see the comment on the full job).
@@ -56,6 +81,8 @@ jobs:
   # two tests at 09:53. test_docs_consistency.py collects the suite in a
   # subprocess for this shape alone; ~4.6s of the runtime below is that.
   docs-consistency:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -94,6 +121,8 @@ jobs:
         run: python -m pytest tests/test_docs_consistency.py -q -n0
 
   pytest:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     # Measured at ~15 min on ~4200 tests (DEVLOG Batch 75); 15 left no
     # headroom and a loaded runner read as a hang.
@@ -158,6 +187,8 @@ jobs:
   # Windows-only and runs in compat.yml's Windows job, which is the one
   # skip allowed here.
   integration:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     # The image build pulls python:3.12-slim and installs the bridge lock.
     timeout-minutes: 30
@@ -198,6 +229,8 @@ jobs:
   # 127.0.0.1, the second requiring `publickey,password`. Its secrets are
   # random per run and masked in the log.
   live-ssh:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

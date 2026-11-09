@@ -7,8 +7,9 @@ from a folder on your own computer. `docs/ROADMAP_v3.md` §94 records why each r
 below is what it is.
 
 **What this version runs:** skills, agents, settings, tools with their Python dependencies,
-and MCP servers written in Python, each plugin's code in a sandbox of its own. Servers started
-by `npx` or `uvx`, and remote servers, are deferred to a later version.
+and MCP servers written in Python, each plugin's code in a sandbox of its own, and every
+install scanned first. Servers started by `npx` or `uvx`, and remote servers, are deferred
+to a later version.
 
 ## Using plugins
 
@@ -35,6 +36,19 @@ nobody has reviewed), every skill and agent it adds under the name it will have,
 settings, its files and the start of its README. Nothing is written until you say yes.
 Its skills and agents then load at once, in every project, until `/plugin disable` turns
 the plugin off in one.
+
+**The scanner.** Before the modal, the harness reads every file of the plugin, running none,
+and the modal lists what it found. A HIGH finding is where a reviewer would stop: characters
+that display differently from what the model reads; code that runs code it builds, or loads
+pickled data; a path or environment variable that holds credentials; a network module in a
+plugin that said `network: false`; text telling the model to ignore its rules, turn approval
+off or send secrets somewhere; a download piped into a shell. A folder's lock is also looked up
+on PyPI and OSV, for a known vulnerability, a release under 14 days old, a package with no
+wheel, or a name one letter from a popular package's. A note (another program started, native
+code, a module imported by a name made at run time, the whole environment read, an HTML
+comment, a long encoded string) is listed for you to weigh. Nothing is refused for a finding:
+the choice is yours. `python -m core.plugin_scan <folder> [--online]` runs the same scan from a
+shell.
 
 **Names.** Everything a plugin adds carries its name: the `example` plugin's skill is
 `example:checklist`, its agent `example:planner`. A plugin can never replace one of the
@@ -429,6 +443,11 @@ module directly: `run(params, context)` is a plain function, and anything with t
 attributes will do for a test in your `tests/` folder. A server is tested the way its SDK
 tests one, or by running it and calling it with the client above.
 
+Before you open a pull request, `python -m core.plugin_scan path/to/your.plugin --online`
+shows what the review will find, and `python scripts/plugin_ci.py test path/to/your.plugin`
+runs the checks `plugins.yml` runs. It needs Docker or Podman; `--isolation process` checks
+the code on this computer instead, without your own tests.
+
 ## Contributing to the marketplace
 
 1. Put your plugin in `plugins/`, in the category that fits its subject. Make a new category
@@ -439,8 +458,29 @@ tests one, or by running it and calling it with the client above.
 3. Raise `version` in the manifest whenever you change a plugin.
 4. A plugin-only pull request never releases a new version of the harness.
 
-Every plugin is reviewed before it is merged. Automated checks for the format and for
-suspicious content are coming. Until they land, review is by hand.
+**What the pull request runs.**
+
+- `plugin-review` reads your plugin's files from GitHub, without running any of them, and keeps
+  one comment on the pull request up to date.
+  - Its `plugin-boundary` check fails a pull request that changes `plugins/` and anything else.
+  - Its `plugin-scan` check fails a plugin the format refuses, one whose `version` did not go
+    up, one whose name another plugin has, a file under `plugins/` that is in no plugin, and
+    any HIGH scanner finding.
+  - A finding that is a false positive is cleared by someone with write access adding the
+    `plugin:scan-reviewed` label. A new commit removes the label, since the review covered
+    other code.
+  - The plugin's maintainers, from the manifest already merged, are mentioned, and those with
+    write access are asked to review. A pull request cannot add names to be pinged.
+- `plugins` runs the checks the harness owns on each changed plugin, in the image a user's
+  install builds in: its lock installs, each tool's module imports and defines `run`, each MCP
+  server starts and serves exactly the tools its `mcp.json` lists, and pip-audit finds nothing
+  in the lock. Your own tests in `tests/` run too if you have any, with pytest, in a container
+  with no workspace, no token and the network only if your manifest asks for it. They are
+  optional, and passing them is not the review: they are your code.
+- The harness's own workflows skip a pull request that changes only `plugins/`, and merging one
+  releases nothing and leaves the demo alone.
+
+Every plugin is also read by a person before it is merged.
 
 Plugins that cannot live in a public repository, such as some biology and security research,
 are installed from a folder with `--from`. Installing from a git URL is coming in a later

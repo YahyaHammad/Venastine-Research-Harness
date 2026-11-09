@@ -122,6 +122,15 @@ _DENIED_SEGMENTS = (protected_paths.PROTECTED_SEGMENTS
 _DENIED_FOLDED = protected_paths.folded_segments(_DENIED_SEGMENTS)
 _DENIED_FILENAMES = frozenset({"providers.json"})
 
+#: ROADMAP_v3 §94 (PL37). A folder with this suffix is a plugin, and a
+#: plugin's files are its author's text: they reach a prompt only through
+#: the plugin's own trust modal and its prefixed loader, never because a
+#: project happens to hold a copy. So this tool reads none of them -- the
+#: marketplace's in this repository included, which would otherwise grow
+#: the bound AGENTS.md states with every plugin merged. Spelled here, not
+#: imported from core/plugin_format, so this module keeps its imports.
+PLUGIN_FOLDER_SUFFIX = ".plugin"
+
 #: Re-exported so callers name one constant. The name lives in
 #: core/workspace_trust because the load-bearing fact about it is that a
 #: grant covers it (§44).
@@ -174,6 +183,9 @@ def _is_readable_doc(root: str, resolved: str) -> bool:
     rel = os.path.relpath(resolved, root)
     parts = rel.split(os.sep)
     if any(segment.casefold() in _DENIED_FOLDED for segment in parts):
+        return False
+    if any(segment.casefold().endswith(PLUGIN_FOLDER_SUFFIX)
+           for segment in parts[:-1]):
         return False
     name = os.path.basename(resolved).lower()
     if name in _DENIED_FILENAMES or name.startswith(".env"):

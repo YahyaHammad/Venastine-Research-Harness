@@ -211,31 +211,39 @@ class Server:
             self.stop()
             raise
 
+    def drift(self) -> tuple:
+        """(listed but not served, served but not listed, listed with a
+        different inputSchema), each sorted. The marketplace's CI fails a
+        plugin on the first and the third (PL35)."""
+        listed = {t.name: t for t in self.server.tools}
+        missing = sorted(set(listed) - set(self.offered))
+        extra = sorted(set(self.offered) - set(listed))
+        changed = sorted(
+            name for name, tool in listed.items()
+            if name in self.offered and getattr(
+                self.offered[name], "input_schema", None) != tool.input_schema)
+        return missing, extra, changed
+
     def _compare(self) -> None:
         """What the server serves against what its mcp.json lists. The
         listing is what the model reads either way; this tells the author
         where the two parted."""
-        listed = {t.name: t for t in self.server.tools}
-        missing = sorted(set(listed) - set(self.offered))
+        missing, extra, changed = self.drift()
         if missing:
             logger.warning(
                 "Plugin %s's MCP server %s does not serve %s, which its "
                 "mcp.json lists; a call to one fails with that reason.",
                 self.record.id, self.server.name, ", ".join(missing))
-        extra = sorted(set(self.offered) - set(listed))
         if extra:
             logger.info(
                 "Plugin %s's MCP server %s also serves %s, which its "
                 "mcp.json does not list, so the model is not offered them.",
                 self.record.id, self.server.name, ", ".join(extra))
-        for name, tool in listed.items():
-            served = self.offered.get(name)
-            if served is not None and getattr(served, "input_schema",
-                                              None) != tool.input_schema:
-                logger.warning(
-                    "Plugin %s's MCP tool %s takes a different inputSchema "
-                    "from the one its mcp.json lists; the model is given "
-                    "the listed one.", self.record.id, name)
+        for name in changed:
+            logger.warning(
+                "Plugin %s's MCP tool %s takes a different inputSchema "
+                "from the one its mcp.json lists; the model is given "
+                "the listed one.", self.record.id, name)
 
     def alive(self) -> bool:
         """Started and not stopped. A server that broke is stopped by the

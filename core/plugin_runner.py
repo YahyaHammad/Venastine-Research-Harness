@@ -29,9 +29,13 @@ THE PROTOCOL, one JSON object per line:
                          "result": {...}}
                         or {"type": "result", "id": 7, "ok": false,
                          "error": "...", "trace": [...]}
+    harness -> runner   {"type": "check"}
+    runner -> harness   {"type": "checked", "tools": {name: "" | "why"}}
 
 Settings travel with every call, so `/plugin config` takes effect on the
-next one without a restart.
+next one without a restart. A `check` imports every tool's module and asks
+whether it defines `run`, calling nothing: the marketplace's CI (slice 4,
+PL35) sends it, behind the same walls a call has.
 
 THE PLUGIN'S OUTPUT IS NOT THE PROTOCOL. The protocol is written to a copy
 of the original stdout, and descriptor 1 is then pointed at stderr, so a
@@ -174,6 +178,25 @@ def _call(request, modules, init):
             % (json.dumps(call_id), text))
 
 
+def _check(init, modules) -> dict:
+    """Whether each tool's module imports and defines a callable `run`.
+    Importing runs the module's top level, as a first call would."""
+    found = {}
+    for tool, module_name in sorted(init["tools"].items()):
+        try:
+            module = modules.get(module_name)
+            if module is None:
+                module = importlib.import_module(f"tools.{module_name}")
+                modules[module_name] = module
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 -- the import's error is the answer
+            found[tool] = f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
+            continue
+        found[tool] = ("" if callable(getattr(module, "run", None)) else
+                       f"tools/{module_name}.py defines no run(params, "
+                       f"context)")
+    return {"type": "checked", "tools": found}
+
+
 def main() -> int:
     # Both ends of the protocol on private copies, which a child process
     # does not inherit (PEP 446), and descriptors 0 and 1 pointed
@@ -232,6 +255,9 @@ def main() -> int:
         try:
             request = json.loads(raw)
         except ValueError:
+            continue
+        if request.get("type") == "check":
+            _write(out, _check(init, modules))
             continue
         if request.get("type") != "call":
             continue

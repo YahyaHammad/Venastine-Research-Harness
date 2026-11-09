@@ -15,6 +15,27 @@ other name.
 
 ---
 
+## Plugins, slice 4: the marketplace's CI (batch 252)
+
+| Change | Test | Fix |
+|---|---|---|
+| Filter a core workflow's trigger by path | `test_no_trigger_filters_by_path`, `test_every_other_job_needs_the_decision` | PL32: a `changes` job decides; deploy_gate.py refuses a path-filtered push trigger |
+| Check out, import or run the pull request's code in plugin-review.yml | `test_nothing_refers_to_the_head`, `test_every_checkout_is_the_base_without_credentials`, `test_code_that_would_leave_a_mark_leaves_none` | PL34: files fetched as data, read with `ast` |
+| Put an event value inside a `run:` line of plugin-review.yml | `test_event_values_reach_the_script_through_env_only` | PL34: through `env:` |
+| Import `plugin_source`, or anything that reaches `config`, from the review | `test_the_review_needs_only_the_format_and_the_scanner` | `plugin_ci.blob_sha`; the workflow installs PyYAML alone |
+| Let `plugin:scan-reviewed` survive a new commit, count from someone without write access, or trust a record anyone else wrote | `test_a_new_commit_removes_it`, `test_one_without_write_access_is_removed`, `test_a_record_anyone_else_wrote_counts_for_nothing` | PL34 |
+| Mention or ask maintainers from the pull request's own manifest | `test_those_of_record_are_mentioned_and_writers_asked`, `test_a_new_plugin_has_none_of_record` | PL34: the base branch's manifest |
+| Put author-written text in the comment outside a code fence | `test_author_text_is_fenced_where_mentions_and_markdown_do_nothing` | PL34 |
+| Read a plugin's own tests as its review, or require them | `test_its_own_tests_wait_for_a_container`, `test_none_are_required` | PL35: the harness's checks count; the author's tests are optional |
+| Drop the runner's `check` message or the listing comparison | `test_each_tool_module_imports_and_defines_run`, `test_each_server_serves_what_its_listing_says`, `test_a_schema_the_listing_changed_fails` | PL35 |
+| Install into the store of whoever runs `plugin_ci.py test` | `test_the_command_installs_into_a_home_of_its_own` | PL35: a throwaway HOME |
+| Pass a lookup that did not answer | `test_a_lookup_that_fails_is_unchecked_not_passed`, `test_a_lookup_that_did_not_answer_fails`, `test_an_unanswered_lookup_is_said_to_say_nothing` | PL33, PL36 |
+| Let `/plugin install --from` reach PyPI or OSV from the suite | `test_a_folders_lock_is_looked_up_and_said_to_be`, and the offline guard on any `--from` test with a lock | Keep conftest's autouse `plugin_scan_lookups`; a test of the lookups passes its own `fetcher` |
+| Let `read_project_doc` read inside a `.plugin` folder | `test_a_plugins_files_are_not_readable`, `test_the_documented_doc_read_bound_is_not_understated` | PL37 |
+| Release or redeploy for a plugin-only merge | `test_no_label_is_skip`, `test_a_part_label_still_asks_for_one`, `test_against_the_live_build`, `test_nothing_is_sent` | PL38 |
+| Hold plugins/ to the harness's lint, bandit, CodeQL or docs gates | `test_ruff_bandit_and_codeql_leave_it_alone`, `test_the_docs_gates_walk_skips_plugins_but_not_the_template` | PL40 |
+| Give release.yml more than the file list | `test_the_key_lives_in_the_release_environment` | Its permissions are `contents: write` and `pull-requests: read` since batch 252 |
+
 ## Plugins, slice 3: MCP servers (batch 251)
 
 | Change | Test | Fix |

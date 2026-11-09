@@ -654,7 +654,7 @@ plugin_tool_isolation: container
 # written at most once a minute. Entries older than the window are deleted.
 #
 # What these CANNOT count: shell commands (containers, WSL, SSH), "stdio"
-# MCP servers, sign-in and token-refresh traffic, /plugin's downloads, and
+# MCP servers, sign-in and token-refresh traffic, /plugin's downloads and lookups, and
 # TLS/TCP overhead.
 # web_search's figure is an estimate, measured at about 21 kB per result
 # asked for, because its client has no way to count. /network shows every

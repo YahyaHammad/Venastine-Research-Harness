@@ -31670,3 +31670,114 @@ tool: an SDK server needs a 28-package lock the offline suite cannot build.
   - no Linux Docker run, which CI's `integration` job does;
   - no Podman run of a server;
   - no TUI screenshot of the modal's server lines, which are the same `ConfirmScreen` text.
+
+## Batch 252 -- Plugins, slice 4: the marketplace's CI and the scanner (2026-11-09)
+
+**Asked.** The owner asked to start the next slice of the plugin system: slice 4, the
+marketplace's CI.
+
+**Answers first.** Eight questions through the question tool, in three rounds, before anything
+was built. Four facts measured beforehand shaped them:
+
+- `deploy_gate.py` refuses a workflow whose push trigger filters by path;
+- npm's `files` ships no `scripts/`, so the scanner the harness runs cannot live there;
+- GitHub refuses (422) a review request for anyone who is not a collaborator;
+- every merged plugin's README would move `read_project_doc`'s gated bound.
+
+The owner took the recommendation on seven: a first job that decides, in each core workflow;
+plugin tests in the sandbox image; the scanner in a trusted workflow on files read as data; every
+check, online too, for a `--from` install, shown in the modal; the high/note split; no reading
+inside a `.plugin` folder; and mention every maintainer while asking only those who can review.
+On the eighth, whether a plugin with code must have tests, the owner asked whether a plugin's
+own tests could be malicious. They can: they are its author's code, and a pass proves only what
+the author chose to check. So the checks that count are the harness's own, and the author's
+tests became optional.
+
+**Built.** Decisions PL32-PL40 in §94.
+
+- **The scanner** (PL33), `core/plugin_scan.py`, new. It reads and never runs: Python through
+  `ast` with names resolved through the file's own imports, text line by line, the lock on PyPI
+  and OSV when asked. High and note findings as the owner split them, and a lookup that does
+  not answer is unchecked, never a pass.
+- **The modal** (PL36): every install is scanned before it, offline from the marketplace and
+  with the lookups for `--from`, and the findings are listed with the high ones said in capitals.
+- **Which side a change touches** (PL32): `scripts/plugin_ci.py changes`, the first job of
+  tests, compat, lint, bandit and codeql, whose other jobs now `needs` it.
+- **The review** (PL34): `plugin-review.yml` on `pull_request_target` and `plugin_ci.py review`
+  -- the `plugin-boundary` and `plugin-scan` checks, the version and name checks (PL39), the
+  `plugin:scan-reviewed` label's rules, maintainers of record, `release:skip` on a plugin-only
+  pull request's first review, and one comment with the author's text fenced.
+- **The checks a plugin's code gets** (PL35): `plugins.yml` and `plugin_ci.py test`. The lock
+  builds in the image, a new runner `check` message asks each tool's module whether it defines
+  `run`, each server is started and compared with its listing (`Server.drift`), pip-audit reads
+  the lock, and the author's tests run with a hashed pytest
+  (`scripts/plugin-ci-requirements.txt`) under the plugin's own walls.
+- **Releases and the demo** (PL38): `release.yml` reads the pull request's files and a
+  plugin-only merge releases nothing without a part label; `deploy_demo.py` compares the live
+  build with the commit and sends nothing when only `plugins/` moved.
+- **What the core leaves alone** (PL37, PL40): `read_project_doc` reads nothing inside a
+  `.plugin` folder, so the worked example's README left AGENTS.md's bound, and the new lock,
+  a tracked `.txt`, joined it: 68 files still; ruff, bandit, CodeQL and the docs gates'
+  walk leave `plugins/` out.
+
+**Found while building.**
+
+- The first run of the plugin tests after the scan was wired in looked up pypi.org and
+  api.osv.dev through the real resolver, and the suite's offline guard failed it by name. An
+  autouse stand-in in conftest answers for both now, clean, and records what was asked.
+- The review's first version imported `plugin_source` for its blob hash. That module pulls in
+  `config` and then pydantic, which `plugin-review.yml` does not install, so the workflow would
+  have failed on its first run. The review hashes blobs itself, and a test holds its imports.
+- The doc-read bound's gate passed the first full run at 67 and failed the last at 68. The
+  difference was `git add -N` on the new files before bandit: the gate counts tracked files,
+  and `scripts/plugin-ci-requirements.txt` is a `.txt` that `read_project_doc` reads. The
+  first green was green for a reason that would not ship. It was read, and is counted.
+- pytest 9.2.0, the newest, was 13 days old, under this repository's two-week rule; the lock
+  takes 9.1.1, and the scanner would have flagged the newer one the same way.
+
+**Verification.**
+
+- **Full suite:**
+  - Run on Windows in the pinned venv with `AGENT_WORKSPACE` unset, after tests.yml's checkout
+    setup.
+  - Result: 10046 passed, 98 skipped, none failed. That is 10144, the stated count.
+  - The run before it failed one test, the doc-read bound's gate, at 68 against the 67 then
+    stated, for the reason under "Found while building"; the first run had passed it at 67.
+- **The new tests:** 129 in `tests/test_plugin_scan.py`, 141 in `tests/test_plugin_ci.py`, and one
+  more marked `integration`.
+  - On WSL the plugin files passed whole, the Landlock and seccomp walls included, with the
+    harness's checks run behind them under `process`. The whole suite there failed 22 and
+    errored 1, none of them this batch's. 20 fail the same way on slice 3's tree: WSL's
+    system Python has older SDKs than the pins and lacks a package one audit test walks to,
+    and git under WSL reads no files from a worktree made on Windows, which the bundle and
+    push-channel tests ask it for.
+    The error is `tests/test_page_text.py` failing to collect without `pypdf`. The last two
+    are the docs gate's count checks, which then collect 87 fewer tests than the 10144 stated.
+  - The `integration` test passed against Docker Desktop 29.7.2: the tool modules checked by the
+    runner in a container, the server in one, and the author's three tests in the sandbox image
+    with pytest from the new lock, the network closed, no workspace and no token, in 40 s.
+- **Breakages:** 81 of 81 deliberate breakages each turned a named test red. Two rows were
+  rewritten before the run, because reading them showed they could not be caught: the
+  not-a-merge test ran in a one-commit repository, where `HEAD^1` fails anyway, and the
+  hash-mismatch test changed the file's length, which an earlier check catches. Both tests now
+  isolate the property. Two more were dropped as equivalent: a zero `before` already fails the
+  fetch, and a file named `x.plugin` is no document.
+- **Other gates:**
+  - ruff is clean on the whole tree.
+  - bandit has 0 new findings against the rewritten baseline, with the new files scanned and
+    `plugins/` left out as the workflow now leaves it. Its count check first found one B311 in
+    the new scanner tests, a seeded `random` making an encoded blob; the blob is now made from
+    hashes.
+  - gitleaks is clean on an export of the tracked and new files, with CI's config.
+  - pip-audit was not run on the harness's locks, since none moved; the new
+    `scripts/plugin-ci-requirements.txt` is audited by `plugins.yml`.
+- **Measured against the real services:** PyPI's JSON API and OSV's batch API, through the
+  scanner, for four pins: 1.2 s, two packages with advisories, one name not on PyPI and one
+  typosquat, as expected.
+- **Not done here:**
+  - the workflows have not run on GitHub; the owner pushes this branch, since the agent's token
+    cannot push `.github/workflows/`. The first real pull request is the first test of
+    `plugin-review.yml`'s token reading a collaborator's permission, and of `plugins.yml` on a
+    runner's rootful Docker;
+  - no Podman run of `plugin_ci.py test`;
+  - no TUI screenshot of the modal's scanner lines, which are the same `ConfirmScreen` text.

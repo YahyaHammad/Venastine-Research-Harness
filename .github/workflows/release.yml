@@ -15,6 +15,13 @@
 # An unknown release:* label, or two parts at once, fails the run and pushes
 # nothing.
 #
+# A PLUGIN-ONLY MERGE RELEASES NOTHING (ROADMAP_v3 §94, PL38): when every
+# file the pull request changed is under plugins/, the harness did not
+# change, so no label is the same as release:skip. The file list is
+# GitHub's, read in the step below, so this does not rest on the
+# release:skip label plugin-review.yml adds; a release:patch, minor or major
+# label still asks for a release.
+#
 # WHY A DEPLOY KEY (A88). A push made with GITHUB_TOKEN starts no workflow.
 # The release commit would get no CI, so deploy-demo.yml's gate -- every check
 # on main's tip passed -- would wait on it forever, and the tag would never
@@ -55,7 +62,8 @@ jobs:
     timeout-minutes: 15
     environment: release
     permissions:
-      contents: write   # the GitHub release; the pushes use the deploy key
+      contents: write       # the GitHub release; the pushes use the deploy key
+      pull-requests: read   # the pull request's file list (PL38)
 
     steps:
       - name: Is the release armed?
@@ -86,10 +94,23 @@ jobs:
         with:
           node-version: "24"
 
+      # Both names of a renamed file, so one moved into plugins/ from the
+      # core is not a plugin-only change.
+      - name: Which files the pull request changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: >-
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files"
+          --jq '.[] | .filename, (.previous_filename // empty)'
+          > "$RUNNER_TEMP/pr-files.txt"
+
       - name: Plan the release
         id: plan
         env:
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_FILES: ${{ runner.temp }}/pr-files.txt
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
         run: python scripts/release_after_merge.py plan
 
       - name: Commit and tag it

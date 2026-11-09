@@ -41,6 +41,7 @@ from core import (
     ansi,
     config_loader,
     plugin_format,
+    plugin_scan,
     plugin_source,
     plugin_store,
     plugin_tools,
@@ -80,6 +81,7 @@ MAX_LISTED_FILES = 40
 MAX_README_LINES = 40
 MAX_README_CHARS = 4000
 MAX_TOOL_DESCRIPTION_SHOWN = 400
+MAX_LISTED_FINDINGS = 40
 
 
 @dataclass
@@ -231,6 +233,7 @@ class Prepared:
     staging: str
     skills: dict
     agents: dict
+    report: object = None   # plugin_scan.Report
 
 
 def _prepare(candidate, shell: Shell) -> Optional[Prepared]:
@@ -248,7 +251,19 @@ def _prepare(candidate, shell: Shell) -> Optional[Prepared]:
         plugin_store.discard(staging)
         _format_problems(candidate.id, PluginFormatError(problems), shell)
         return None
-    return Prepared(candidate, manifest, staging, skills, agents)
+    # PL36. Every install is scanned here, offline; a folder's lock is also
+    # looked up on PyPI and OSV, since no marketplace review has seen it.
+    online = candidate.source.get("kind") == "folder"
+    if online and manifest.requirements:
+        shell.out(f"Looking up its "
+                  f"{_count(len(manifest.requirements), 'locked package')} "
+                  f"on PyPI and OSV...")
+    try:
+        report = plugin_scan.scan(candidate.files, manifest, online=online)
+    except BaseException:
+        plugin_store.discard(staging)
+        raise
+    return Prepared(candidate, manifest, staging, skills, agents, report)
 
 
 def harness_version() -> Optional[str]:
@@ -309,6 +324,7 @@ def describe(prepared: Prepared, replacing=None) -> list:
         lines.append(f"This REPLACES the installed {replacing.version} "
                      f"({_source_phrase(replacing)}). Your settings carry "
                      f"over where they still fit.")
+    lines += scan_lines(prepared.report, manifest, source)
     lines += ["", "What it adds, in every project until /plugin disable "
                   "turns it off there:"]
     if not prepared.skills and not prepared.agents and not manifest.has_code:
@@ -348,6 +364,40 @@ def describe(prepared: Prepared, replacing=None) -> list:
         "utf-8", "replace")
     lines += ["", f"{plugin_format.README}:"]
     lines += ["  " + _clean(line) for line in _readme(readme)]
+    return lines
+
+
+def scan_lines(report, manifest, source: dict) -> list:
+    """The modal's account of the scanner's findings (PL36)."""
+    if report is None:
+        return []
+    folder = source.get("kind") == "folder"
+    if not report.findings:
+        lines = ["", "The scanner read every file and found nothing to "
+                     "point out."]
+    else:
+        lines = ["", f"What the scanner found ({report.summary()}):"]
+        lines += _bounded(
+            [f"  {'HIGH' if f.severity == plugin_scan.HIGH else 'note'}  "
+             f"{_one_line(f.where)}  {_one_line(f.message)}"
+             for f in report.findings], MAX_LISTED_FINDINGS, "findings")
+    if report.high:
+        lines.append("A HIGH FINDING IS WHERE A REVIEWER WOULD STOP. Read "
+                     "each one, and the file it names, before you say yes."
+                     if folder else
+                     "The marketplace's review let these through after "
+                     "reading them.")
+    if manifest.requirements:
+        if not folder:
+            lines.append("Its locked packages were looked up on PyPI and "
+                         "OSV by the marketplace's review, not here.")
+        elif report.unchecked:
+            lines.append("NOT CHECKED, so these say nothing either way:")
+            lines += [f"  {_one_line(reason)}" for reason in
+                      report.unchecked[:10]]
+        else:
+            lines.append("Its locked packages were looked up on PyPI and "
+                         "OSV just now.")
     return lines
 
 

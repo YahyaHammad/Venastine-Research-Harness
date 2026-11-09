@@ -258,7 +258,10 @@ class TestTheReleaseWorkflow:
         job = doc["jobs"]["release"]
         assert job["environment"] == "release"
         assert doc["permissions"] == {}
-        assert job["permissions"] == {"contents": "write"}
+        # pull-requests: read is the file list a plugin-only merge is
+        # judged by (ROADMAP_v3 §94, PL38), and nothing more.
+        assert job["permissions"] == {"contents": "write",
+                                      "pull-requests": "read"}
 
     def test_nothing_is_pushed_or_published_unless_armed(self):
         """Without the deploy key the push would be GITHUB_TOKEN's, which

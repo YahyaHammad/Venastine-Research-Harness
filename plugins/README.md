@@ -24,5 +24,8 @@ from your own folder first.
 [`docs/plugin-template/example.plugin`](../docs/plugin-template/example.plugin/) is a
 worked example to copy.
 
-A pull request that adds or changes a plugin changes nothing outside `plugins/`. A pull
-request that touches both is split before review.
+A pull request that adds or changes a plugin changes nothing outside `plugins/`; one that
+touches both fails its `plugin-boundary` check until it is split. Every pull request here is
+scanned and its changed plugins tested;
+[the guide's last section](../docs/PLUGINS.md#contributing-to-the-marketplace) says what
+each check looks at.

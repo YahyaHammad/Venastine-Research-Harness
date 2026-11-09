@@ -858,12 +858,22 @@ def _project_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+#: The marketplace, at the root only. ROADMAP_v3 §94 (PL40): a plugin's code
+#: is its author's -- scanned by plugin-review.yml and tested by plugins.yml
+#: -- and never the harness's own, so no gate here reads it, the way ruff,
+#: bandit and CodeQL leave it alone. The guide's worked example lives in
+#: docs/ and stays in.
+_MARKETPLACE_DIR = "plugins"
+
+
 def _walk_project():
     """Live source only -- checkpoint directories are excluded here and
     checked separately, so a stale copy cannot answer a question about
-    what the project defines."""
-    for dirpath, dirnames, filenames in os.walk(_project_root()):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+    what the project defines -- and not the marketplace's plugins."""
+    root = _project_root()
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS
+                       and not (dirpath == root and d == _MARKETPLACE_DIR)]
         yield dirpath, dirnames, filenames
 
 

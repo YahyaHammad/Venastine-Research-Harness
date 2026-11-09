@@ -540,6 +540,17 @@ class Runner:
                 if reply.get("type") == "result" and reply.get("id") == call_id:
                     return reply
 
+    def check(self) -> dict:
+        """{tool: "" | why} -- whether each tool's module imports and
+        defines `run`, asked of the running runner (PL35)."""
+        with self._call_lock:
+            self._send({"type": "check"})
+            while True:
+                reply = self._wait(config.SANDBOX_TIMEOUT_SECONDS, None)
+                if reply.get("type") == "checked":
+                    return {str(k): str(v) for k, v in
+                            (reply.get("tools") or {}).items()}
+
 
 _runners: dict = {}       # plugin name -> Runner
 

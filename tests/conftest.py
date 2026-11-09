@@ -661,6 +661,36 @@ def isolate_model_windows(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def plugin_scan_lookups(monkeypatch):
+    """Stand in for PyPI and OSV, which `/plugin install --from` asks
+    about a plugin's lock (ROADMAP_v3 §94, PL36), and keep what was asked.
+
+    Batch 252. The scanner's online half runs on every folder install with
+    a requirements.txt, and the first run of the plugin tests after it was
+    wired in looked up pypi.org and api.osv.dev through the real resolver,
+    which the offline guard caught. AUTOUSE for `browser_opens`' reason: the
+    request leaves the suite. The answer is a clean one -- an old release
+    with a wheel, no known vulnerability -- so a modal reads as it would for
+    a healthy lock. A test of the lookups passes its own `fetcher`.
+    """
+    asked = []
+
+    def answer(url, body=None, **_kwargs):
+        import json
+
+        asked.append(url)
+        if body is not None:
+            queries = json.loads(body).get("queries") or []
+            return 200, json.dumps({"results": [{} for _ in queries]}).encode()
+        return 200, json.dumps({"info": {"yanked": False}, "urls": [{
+            "packagetype": "bdist_wheel",
+            "upload_time_iso_8601": "2020-01-01T00:00:00Z"}]}).encode()
+
+    monkeypatch.setattr("core.plugin_scan.fetch", answer)
+    return asked
+
+
+@pytest.fixture(autouse=True)
 def browser_opens(monkeypatch):
     """Stand in for the platform's browser, and keep what a test opened.
 
