@@ -6172,6 +6172,55 @@ def _cmd_classifier(app: VenastineApp, args: str) -> None:
                    name="classifier-test")
 
 
+def _cmd_plugin(app: VenastineApp, args: str) -> None:
+    """ROADMAP_v3 §94: install and manage plugins. `core.plugin_commands`
+    owns the logic and every word, which the CLI prints too; this lends it
+    the transcript and ConfirmScreen. `list`, `info` and `install` can
+    reach GitHub, so they run in a worker, and the trust modal is asked
+    from there with `ask_confirm_blocking` -- whose timeout and shutdown
+    release both answer no, so nothing is written without a yes."""
+    from core import plugin_commands
+
+    if not plugin_commands.needs_network(args):
+        plugin_commands.run(args, plugin_commands.Shell(
+            out=app._transcript.write_system,
+            error=app._transcript.write_error,
+            confirm=lambda title, body: False))
+        return
+
+    def confirm(title: str, body: str) -> bool:
+        label = "Replace" if title.startswith("Replace") else "Install"
+        return app.ask_confirm_blocking(title, body, label)
+
+    def work() -> None:
+        shell = plugin_commands.Shell(
+            out=lambda line: app.call_from_thread(
+                app._transcript.write_system, line),
+            error=lambda line: app.call_from_thread(
+                app._transcript.write_error, line),
+            confirm=confirm)
+        try:
+            plugin_commands.run(args, shell)
+        except Exception:  # noqa: BLE001 - reported, the session survives
+            logger.exception("/plugin failed")
+            app.call_from_thread(
+                app._transcript.write_error,
+                "/plugin failed. The error is in logs/app.log; the session "
+                "is intact, and nothing half-installed was kept.")
+
+    app.run_worker(work, thread=True, exit_on_error=False, name="plugin")
+
+
+def _plugin_rows(argument: str) -> list:
+    """The panel's offers after `/plugin ` (ROADMAP_v3 §94, PL19): the
+    subcommands, then installed plugins, then a plugin's own settings and
+    their values -- `/config`'s picker over what a plugin declares."""
+    from core import plugin_commands
+
+    return [SlashCommand(line, note, _cmd_plugin)
+            for line, note in plugin_commands.completions(argument)]
+
+
 def _cmd_network(app: VenastineApp, args: str) -> None:
     """ROADMAP_v3 §53 (IO13): every network meter, its use and its room.
 
@@ -8361,6 +8410,7 @@ def register_builtin_commands() -> None:
         bind("trigger", _cmd_trigger),
         bind("network", _cmd_network),
         bind("classifier", _cmd_classifier),
+        bind("plugin", _cmd_plugin, complete=_plugin_rows),
         bind("config", _cmd_config, complete=_config_rows),
         bind("secrets", _cmd_secrets),
         bind("claims", _cmd_claims),

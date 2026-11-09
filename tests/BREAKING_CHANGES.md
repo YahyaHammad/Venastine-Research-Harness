@@ -15,6 +15,73 @@ other name.
 
 ---
 
+## Plugins, slice 4: the marketplace's CI (batch 252)
+
+| Change | Test | Fix |
+|---|---|---|
+| Filter a core workflow's trigger by path | `test_no_trigger_filters_by_path`, `test_every_other_job_needs_the_decision` | PL32: a `changes` job decides; deploy_gate.py refuses a path-filtered push trigger |
+| Check out, import or run the pull request's code in plugin-review.yml | `test_nothing_refers_to_the_head`, `test_every_checkout_is_the_base_without_credentials`, `test_code_that_would_leave_a_mark_leaves_none` | PL34: files fetched as data, read with `ast` |
+| Put an event value inside a `run:` line of plugin-review.yml | `test_event_values_reach_the_script_through_env_only` | PL34: through `env:` |
+| Import `plugin_source`, or anything that reaches `config`, from the review | `test_the_review_needs_only_the_format_and_the_scanner` | `plugin_ci.blob_sha`; the workflow installs PyYAML alone |
+| Let `plugin:scan-reviewed` survive a new commit, count from someone without write access, or trust a record anyone else wrote | `test_a_new_commit_removes_it`, `test_one_without_write_access_is_removed`, `test_a_record_anyone_else_wrote_counts_for_nothing` | PL34 |
+| Mention or ask maintainers from the pull request's own manifest | `test_those_of_record_are_mentioned_and_writers_asked`, `test_a_new_plugin_has_none_of_record` | PL34: the base branch's manifest |
+| Put author-written text in the comment outside a code fence | `test_author_text_is_fenced_where_mentions_and_markdown_do_nothing` | PL34 |
+| Read a plugin's own tests as its review, or require them | `test_its_own_tests_wait_for_a_container`, `test_none_are_required` | PL35: the harness's checks count; the author's tests are optional |
+| Drop the runner's `check` message or the listing comparison | `test_each_tool_module_imports_and_defines_run`, `test_each_server_serves_what_its_listing_says`, `test_a_schema_the_listing_changed_fails` | PL35 |
+| Install into the store of whoever runs `plugin_ci.py test` | `test_the_command_installs_into_a_home_of_its_own` | PL35: a throwaway HOME |
+| Pass a lookup that did not answer | `test_a_lookup_that_fails_is_unchecked_not_passed`, `test_a_lookup_that_did_not_answer_fails`, `test_an_unanswered_lookup_is_said_to_say_nothing` | PL33, PL36 |
+| Let `/plugin install --from` reach PyPI or OSV from the suite | `test_a_folders_lock_is_looked_up_and_said_to_be`, and the offline guard on any `--from` test with a lock | Keep conftest's autouse `plugin_scan_lookups`; a test of the lookups passes its own `fetcher` |
+| Let `read_project_doc` read inside a `.plugin` folder | `test_a_plugins_files_are_not_readable`, `test_the_documented_doc_read_bound_is_not_understated` | PL37 |
+| Release or redeploy for a plugin-only merge | `test_no_label_is_skip`, `test_a_part_label_still_asks_for_one`, `test_against_the_live_build`, `test_nothing_is_sent` | PL38 |
+| Hold plugins/ to the harness's lint, bandit, CodeQL or docs gates | `test_ruff_bandit_and_codeql_leave_it_alone`, `test_the_docs_gates_walk_skips_plugins_but_not_the_template` | PL40 |
+| Give release.yml more than the file list | `test_the_key_lives_in_the_release_environment` | Its permissions are `contents: write` and `pull-requests: read` since batch 252 |
+
+## Plugins, slice 3: MCP servers (batch 251)
+
+| Change | Test | Fix |
+|---|---|---|
+| Read a plugin's mcp.json with `mcp_client.config` or a plain `json.loads` | `test_the_reader_is_strict`, `test_every_problem_is_reported` | PL27: `plugin_format.parse_mcp_json` |
+| Accept `url`, `headers`, another `type`, or a command but `python` | `test_a_remote_server_is_deferred_not_refused_for_good`, `test_a_server_is_python_and_other_commands_are_deferred` | PL29. Deferred by the owner, so the slice that adds them replaces the refusal; until then keep the sentence that says deferred |
+| Advertise what a server says about its tools, or a tool its listing leaves out | `test_tools_register_from_the_listing_and_nothing_starts` | PL28: the model reads the listing |
+| Let a server tool take a name another tool of the plugin has, case aside | `test_tool_names_are_one_namespace` | PL28 |
+| Leave a server running once its grant is taken back or its plugin turned off | `test_an_access_change_starts_it_again_with_the_new_grant`, `test_turning_the_plugin_off_unregisters_and_stops_its_servers` | PL30: `plugin_tools.stop` and `stop_all` stop servers too |
+| Stop the MCP loop while another client is connected | `test_one_client_leaving_keeps_the_loop_for_another` | PL30: `_hold` and `_release` around `_shutdown_loop` |
+| Restart a server over an error it sent | `test_broken_means_below_the_servers_own_answer`, `test_the_servers_own_errors_leave_it_running` | PL30: only `_BROKEN_CODES` and the transport mark it |
+| Let a server's descriptor 0 or 1 be the pipe | `test_descriptor_1_and_a_child_are_not_the_wire` | PL29: the launcher swaps both, as the tool runner does |
+| Read `1e6` in plugin.yaml as text, or keep half of a surrogate pair | `test_a_number_reads_as_json_reads_it`, `test_a_half_pair_in_any_field_is_refused` | PL31 |
+| Add a module-level table to `core/plugin_mcp.py` | `tests/test_process_memos.py` | Reset it in `plugin_mcp.reset()`, which `PROCESS_MEMOS` calls |
+
+## Plugins, slice 2: tools (batch 250)
+
+| Change | Test | Fix |
+|---|---|---|
+| Run a plugin's code to learn its tools | `test_a_tool_is_read_without_running_its_code` | PL20: the manifest declares every tool |
+| Name a plugin tool anything but `plugin__<plugin>__<tool>`, or past 64 characters | `test_the_whole_name_is_held_to_the_providers_64`, `test_the_prefix_comes_apart_one_way` | PL20 |
+| Accept a requirements line that is not an exact pin with a hash | `test_anything_but_a_hashed_pin_is_refused` | PL22: a full lock, installed with `--require-hashes --only-binary=:all:` |
+| Build dependencies before the yes, or commit after pip refused | `test_the_build_comes_after_the_yes`, `test_a_failed_build_installs_nothing` | PL22 |
+| Mount the workspace or open the network past the project's grant, or the grant past the manifest | `test_a_read_grant_mounts_it_read_only`, `test_a_stored_grant_is_capped_by_a_narrower_reinstall`, `test_access_cannot_pass_the_declaration` | PL21 |
+| Let a plugin tool run unasked without `/plugin approval auto` | `test_a_plugin_tool_is_allowed_and_asks_by_default`, `test_auto_approval_is_per_plugin_and_at_once` | PL23 |
+| Change the shell's container argv while adding a plugin path | `test_the_shells_argv_is_unchanged_by_default`, and the argv tests in `tests/test_shell.py` | PL24: each new `_docker_argv` keyword defaults to what the shell sent |
+| Let a child of the runner inherit the protocol's pipe | `test_a_tool_may_start_a_process` | PL24: the runner reads a private copy and points descriptor 0 at the null device; on Windows a child inheriting the pipe hangs |
+| Run `process` isolation on Linux without its walls, or let a UNIX socket through | `TestTheWallsHold`, `test_never_a_unix_netlink_or_packet_socket` | PL25: enforce, else refuse |
+| Keep a runner across a reinstall, an access change or an uninstall | `test_reinstalling_replaces_the_runner`, `test_access_changes_the_grant_and_restarts_the_runner`, `test_uninstall_and_disable_remove_the_tool` | PL26 |
+| Add a module-level table to `core/plugin_tools.py` | `tests/test_process_memos.py` | Reset it in `plugin_tools.reset()`, which `PROCESS_MEMOS` calls |
+| Add a key under the Plugins block of `config.yaml` | `test_the_key_is_an_authority_key_with_a_sentence`, `test_the_config_command_gates_every_posture_key` | As slice 1's row below; the counts are 24 authority keys and 171 settable scalars |
+
+## Plugins, slice 1 (batch 249)
+
+| Change | Test | Fix |
+|---|---|---|
+| Load a manifest with `yaml.safe_load`, or let an alias, a repeated key or an unknown field through | `test_aliases_are_refused`, `test_a_repeated_key_is_refused`, `test_an_unknown_key_is_refused_not_ignored` | The manifest parser is part of the boundary (PL2); keep `plugin_format.load_yaml` |
+| Load a plugin whose files changed since install | `test_a_changed_plugin_does_not_load` | `plugin_store.loadable` checks every recorded hash (PL8) |
+| Load a plugin's skill or agent under its bare name | `test_skills_and_agents_load_under_the_plugin_name`, `test_a_plugin_cannot_shadow_a_builtin` | Everything a plugin adds is prefixed (PL4); `_plugin_definition` renames |
+| ~~Install a plugin that ships MCP servers before slice 3~~ | ~~`test_a_plugin_with_mcp_servers_is_refused_before_the_modal`~~, ~~`test_mcp_servers_are_held_back_before_any_download`~~ | Gone with PL5's list in slice 3 (batch 251); `test_an_invalid_mcp_json_is_refused_before_the_modal` and `test_a_server_outside_the_format_is_refused_before_any_download` took their places. Slice 2 (batch 250) took tools and dependencies off the list |
+| Download a file before the tree is checked, or skip the blob hash | `test_a_link_in_the_tree_is_refused_before_any_download`, `test_a_byte_that_differs_from_the_commit_is_refused` | PL12 |
+| Build the modal from the files rather than the staged parse | `test_the_modal_lists_what_will_load`, `test_a_broken_skill_refuses_the_install` | PL15: `config_loader.preview_plugin` |
+| Write anything before the yes | `test_no_writes_nothing`, `test_an_interrupted_cli_question_is_a_no` | Stage, ask, then commit (PL15) |
+| Add or rename a `/plugin` subcommand | `test_it_offers_subcommands_then_ids_then_keys_then_values`, `test_only_list_info_and_install_need_the_network` | `plugin_commands.SUBCOMMANDS` and `_NETWORK` together |
+| Add a key under the Plugins block of `config.yaml` | `test_both_are_authority_keys_with_a_sentence`, `test_the_config_command_gates_every_posture_key` | Mark it `AUTHORITY --`, add it to `HARNESS_AUTHORITY_KEYS` and `AUTHORITY_EFFECT`, and move the counts |
+
 ## The `classified` shell approval mode (batch 248)
 
 | Change | Test | Fix |

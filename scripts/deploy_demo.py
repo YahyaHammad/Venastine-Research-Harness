@@ -403,12 +403,49 @@ class HfSpace:
             return resp.read().decode("utf-8", "replace")
 
 
+def only_plugins_since(live, commit: str, compare) -> bool:
+    """Whether every file changed from the live build `live` to `commit` is
+    under plugins/, which the bundle never ships (ROADMAP_v3 §94, PL38), so
+    a plugin-only merge does not rebuild the demo. Against the LIVE build,
+    not the commit's parent, so a core merge that was superseded before it
+    deployed is still deployed by the plugin-only merge after it.
+    `compare(base, head)` is GitHub's compare answer. Anything it cannot
+    show for certain -- no live build, a live build that is not an ancestor,
+    a list GitHub cut at 300 files -- is a deploy."""
+    if not live or live == commit:
+        return False
+    try:
+        answer = compare(live, commit)
+    except Exception as exc:  # noqa: BLE001 -- not knowing is a deploy
+        say(f"could not compare {live[:12]} with {commit[:12]} "
+            f"({type(exc).__name__}); deploying")
+        return False
+    files = answer.get("files") or []
+    if answer.get("status") != "ahead" or not files or len(files) >= 300:
+        return False
+    return all(str(f.get("filename", "")).startswith("plugins/")
+               and str(f.get("previous_filename") or "plugins/").startswith(
+                   "plugins/") for f in files)
+
+
+def github_compare(repo: str, token: str):
+    def compare(base: str, head: str) -> dict:
+        return gate._get(f"{gate.API}/repos/{repo}/compare/{base}...{head}",
+                         token)
+    return compare
+
+
 def deploy_hf(space, bundle_dir: Path, info: dict, *, sleep=time.sleep,
-              clock=time.monotonic) -> str:
+              clock=time.monotonic, compare=None) -> str:
     commit, sha12 = info["commit"], info["commit"][:12]
-    if retry("read the live build", space.live_commit, sleep=sleep) == commit:
+    live = retry("read the live build", space.live_commit, sleep=sleep)
+    if live == commit:
         say(f"{space.repo} already runs {sha12}; nothing sent")
         return "already live"
+    if compare is not None and only_plugins_since(live, commit, compare):
+        say(f"{space.repo} runs {live[:12]}, and every file changed since is "
+            f"under plugins/, which the demo does not ship; nothing sent")
+        return "unchanged (plugins only)"
     variables = retry("read the variables", space.variables, sleep=sleep)
     if variables.get("GRADIO_SSR_MODE") != "false":
         retry("set GRADIO_SSR_MODE",
@@ -659,7 +696,10 @@ def main(argv=None) -> int:
             else:
                 check_ci(github_repo(), commit, github_token())
             if args.platform == "hf":
-                outcome = deploy_hf(HfSpace(target, token), out, info)
+                outcome = deploy_hf(
+                    HfSpace(target, token), out, info,
+                    compare=None if args.unverified else github_compare(
+                        github_repo(), github_token()))
             else:
                 outcome = deploy_ms(ModelScopeStudio(target, token), out,
                                     info, scratch)

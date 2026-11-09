@@ -14,6 +14,7 @@ import itertools
 import os
 import shutil
 import socket
+import subprocess  # nosec B404 - probe the Docker daemon in integration tests
 import time
 import types
 from datetime import UTC
@@ -22,6 +23,32 @@ from uuid import uuid4
 import pytest
 
 from core.client import ModelResponse, StreamToken, ToolCallRequest
+
+
+def linux_docker() -> str:
+    """The Docker CLI if its daemon runs Linux containers."""
+    docker = shutil.which("docker")
+    if docker is None:
+        return ""
+    try:
+        info = subprocess.run([docker, "info", "--format", "{{.OSType}}"],  # nosec B603 - fixed arguments, no shell
+                              capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return docker if info.returncode == 0 and info.stdout.strip() == "linux" else ""
+
+
+@pytest.fixture
+def linux_plugin_runtime() -> str:
+    """Use the harness's runtime; Windows-container Docker cannot run the plugin image."""
+    from security import sandbox
+
+    runtime = sandbox.container_runtime()
+    if runtime is None:
+        pytest.skip("needs Docker or Podman")
+    if runtime == sandbox.DOCKER and os.name == "nt" and not linux_docker():
+        pytest.skip("needs a Docker daemon running Linux containers")
+    return runtime
 
 # ---------------------------------------------------------------------------
 # ---- Generator draining (ROADMAP_v2 §22) ---------------------------------
@@ -661,6 +688,36 @@ def isolate_model_windows(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def plugin_scan_lookups(monkeypatch):
+    """Stand in for PyPI and OSV, which `/plugin install --from` asks
+    about a plugin's lock (ROADMAP_v3 §94, PL36), and keep what was asked.
+
+    Batch 252. The scanner's online half runs on every folder install with
+    a requirements.txt, and the first run of the plugin tests after it was
+    wired in looked up pypi.org and api.osv.dev through the real resolver,
+    which the offline guard caught. AUTOUSE for `browser_opens`' reason: the
+    request leaves the suite. The answer is a clean one -- an old release
+    with a wheel, no known vulnerability -- so a modal reads as it would for
+    a healthy lock. A test of the lookups passes its own `fetcher`.
+    """
+    asked = []
+
+    def answer(url, body=None, **_kwargs):
+        import json
+
+        asked.append(url)
+        if body is not None:
+            queries = json.loads(body).get("queries") or []
+            return 200, json.dumps({"results": [{} for _ in queries]}).encode()
+        return 200, json.dumps({"info": {"yanked": False}, "urls": [{
+            "packagetype": "bdist_wheel",
+            "upload_time_iso_8601": "2020-01-01T00:00:00Z"}]}).encode()
+
+    monkeypatch.setattr("core.plugin_scan.fetch", answer)
+    return asked
+
+
+@pytest.fixture(autouse=True)
 def browser_opens(monkeypatch):
     """Stand in for the platform's browser, and keep what a test opened.
 
@@ -1042,6 +1099,19 @@ PROCESS_MEMOS = (
      _clear("_headless_notices_shown", "_image_notices_shown")),
     # What register_all() recorded so unregister_all() removes exactly that.
     ("mcp_client.registration", ("_registered",), _clear("_registered")),
+    # ROADMAP_v3 §94 (PL11): the marketplace listing, reused for five
+    # minutes. A leftover would answer the next test from another server.
+    ("core.plugin_source", ("_trees",),
+     lambda module: module.clear_cache()),
+    # §94 slice 2 (PL20, PL24): the tools a plugin registered, and the
+    # runner processes this one started. A leftover would be a live
+    # process another test calls into, and a tool in the global registry
+    # that no installed plugin backs.
+    ("core.plugin_tools", ("_registered", "_runners"),
+     lambda module: module.reset()),
+    # §94 slice 3 (PL30): the MCP servers this process started for
+    # plugins. A leftover is a live server another test calls into.
+    ("core.plugin_mcp", ("_servers",), lambda module: module.reset()),
     # D15's per-tool approval defaults for dynamically named tools, through
     # the module's own function: with no arguments it drops all of them.
     ("security.permissions", ("_dynamic_approval_defaults",),

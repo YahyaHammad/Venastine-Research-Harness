@@ -616,8 +616,8 @@ class TestTheRun:
                             seen.append(("gate", repo, commit)))
         monkeypatch.setattr(deploy, "HfSpace", lambda repo, token:
                             seen.append(("space", repo)) or "space")
-        monkeypatch.setattr(deploy, "deploy_hf", lambda space, out, info:
-                            seen.append(("send",)) or "live")
+        monkeypatch.setattr(deploy, "deploy_hf", lambda space, out, info,
+                            compare=None: seen.append(("send",)) or "live")
         monkeypatch.setattr(deploy, "ModelScopeStudio", lambda repo, token:
                             seen.append(("studio", repo)) or "studio")
         monkeypatch.setattr(deploy, "deploy_ms", lambda studio, out, info,
@@ -686,7 +686,7 @@ class TestTheRun:
             self, steps, monkeypatch, capsys):
         monkeypatch.setenv("HF_TOKEN", TOKEN)
 
-        def refuse(*a):
+        def refuse(*a, **kw):
             raise deploy.DeployError(f"upload with {TOKEN} failed")
 
         monkeypatch.setattr(deploy, "deploy_hf", refuse)

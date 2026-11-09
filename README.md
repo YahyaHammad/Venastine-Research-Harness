@@ -235,7 +235,7 @@ Every launch flag is tabulated in the [CLI flag reference](#cli-flag-reference) 
 
 A turn prints as it runs, one step at a time: the model's reasoning, what it said, and a line for each tool call as it starts. During a turn, Ctrl+C twice within two seconds stops it at the next safe point; the first press only says so, so a stray one costs nothing. At the prompt, Ctrl+C or Ctrl+D exits. The thread id is printed after the first response so you can resume later — and resuming **replays the conversation**, so you can see what you are picking up. Tool calls replay as one line each; their results do not, since a single research turn can carry hundreds of kilobytes of fetched pages.
 
-A line that starts with `/` is a command, as in the TUI, and never reaches the model; an unknown one is an error rather than a chat turn. The CLI has twenty: `/help`, `/quit`, `/threads`, `/resume`, `/new`, `/goal`, `/agent`, `/skill`, `/grill-me`, `/effort`, `/model`, `/compact`, `/summary`, `/ref`, `/memories`, `/forget`, `/claims`, `/call`, `/network` and `/classifier`. They mean what the TUI's do: both shells read one catalog of commands, so a name, its arguments and its description cannot differ between them. `/threads` and `/ref` print a numbered list and ask for a number, or a thread id for one the list does not show. `/call` lists this conversation's tool calls, numbered, and `/call 3` shows the third in full: the whole command and what it returned, or a background session's output, or the run a subagent made. It is the CLI's version of ctrl+clicking a tool line in the TUI. `/model` here lasts for the session, since the CLI starts from `--model` or settings.json.
+A line that starts with `/` is a command, as in the TUI, and never reaches the model; an unknown one is an error rather than a chat turn. The CLI has twenty-one: `/help`, `/quit`, `/threads`, `/resume`, `/new`, `/goal`, `/agent`, `/skill`, `/grill-me`, `/effort`, `/model`, `/compact`, `/summary`, `/ref`, `/memories`, `/forget`, `/claims`, `/call`, `/network`, `/classifier` and `/plugin`. They mean what the TUI's do: both shells read one catalog of commands, so a name, its arguments and its description cannot differ between them. `/threads` and `/ref` print a numbered list and ask for a number, or a thread id for one the list does not show. `/call` lists this conversation's tool calls, numbered, and `/call 3` shows the third in full: the whole command and what it returned, or a background session's output, or the run a subagent made. It is the CLI's version of ctrl+clicking a tool line in the TUI. `/model` here lasts for the session, since the CLI starts from `--model` or settings.json.
 
 ---
 
@@ -738,6 +738,32 @@ Per-server entry fields:
 
 The first connection to a **user-level** server asks once, showing the resolved command line or URL, whether it auto-approves, and the *names* of its env vars and headers — never their values. The acknowledgement is keyed to the entry's contents, so editing a server later re-asks; project-level servers ride the workspace trust prompt instead. Set `VENASTINE_MCP_ACK_FULL=1` to append the raw JSON entry to that prompt, for audits.
 
+### Plugins
+
+A plugin adds skills, agents, tools and settings of its own without touching a file of the harness.
+`/plugin list` browses the marketplace in this repository's [`plugins/`](./plugins/) folder, where
+every plugin is reviewed before it is merged; `/plugin install <id>` installs one after a trust
+modal that shows everything it adds, and `/plugin install --from <folder>` installs one from your
+own computer. `/plugin install --from <git-url> [--path <name.plugin>]` reads one from a Git
+repository's default branch. Both external sources are marked as unreviewed. Everything a plugin
+adds is named after it (`example:checklist`),
+so it can never replace a skill or agent of the harness or one you wrote. Plugins live in
+`~/.config/venastine/plugins/`, load in every project until `/plugin disable` turns one off there,
+and stop loading if a file of theirs changes after install. A plugin's tools run in a container of
+their own (or, with `plugin_tool_isolation: process`, as a process that only Linux can confine),
+with no workspace and no network until a project grants them on first use, and every call asks
+first unless `/plugin approval <id> auto`. Their dependencies are a hashed lock, installed after
+the trust modal. A plugin can also run MCP servers written in Python, listed with every tool
+the model will see in its `mcp.json`, each started on its first call where its tools run;
+servers started by `npx` or `uvx`, and remote ones, are deferred to a later version.
+Every install is scanned first, and the modal lists what the scanner found: code that runs
+what it builds, reaches for credentials or opens a network its plugin said it would not use,
+text that hides itself or tells the model to drop its rules, and, for an external install,
+locked packages with known vulnerabilities or too new to trust. The marketplace's CI runs
+the same scanner on every pull request, then runs each changed plugin where the harness
+would.
+[docs/PLUGINS.md](./docs/PLUGINS.md) is the guide, to using them and to writing one.
+
 ### The TUI
 
 Type `@` in a chat message to complete a file or folder from the project directory. Match by
@@ -768,6 +794,7 @@ paths are cached and 200 matches offered; narrow the query when a limit is shown
 | `/window [tokens\|off]` | Set this model's **context window** and remember it, per `(provider, model)` and across launches. It outranks both the provider's own answer and the built-in table, and it moves everything derived from the window: the chat compaction trigger, the research-pass backstop and the summarizer's input budget. Above what the provider reports it warns rather than refusing, because raising it is the point — a gateway or a self-hosted endpoint can report its own default rather than your deployment's |
 | `/network` | What each network meter has used against its ceiling over the rolling window, which part is an estimate, and when room returns. Every ceiling is off until you set one in `config.yaml`; see [Budgets and stop conditions](#budgets-and-stop-conditions) |
 | `/classifier [test <command>\|clear]` | The shell's decision model under `shell_approval_mode: classified`: its settings, which `providers.json` entry its key comes from, its thresholds and the verdicts held this session. `test` asks it about a command without running anything, under any mode; `clear` drops the held verdicts so it is asked again |
+| `/plugin [list\|info\|install\|uninstall\|disable\|enable\|config\|access\|approval] ...` | Plugins: browse the marketplace, see what one holds, install one behind a trust modal (from the marketplace or `--from` a folder), remove it, turn it off or on in this project, set its own settings, decide what its tools may touch here, and whether its tool calls ask first. In the TUI, typing `/plugin ` offers the subcommands, then your plugins, then their settings. [docs/PLUGINS.md](./docs/PLUGINS.md) |
 | `/config [key] [value]` | Browse and set the harness's own settings without leaving the session. Typing `/config ` lists all 133 of them in the same panel the slash commands use, with the values each one takes and the value in the file; completing a key then offers that key's values. A value you have already changed reads `pending restart` until you relaunch, and bare `/config` lists every one of them, old to new — so several settings can be changed in a row and applied together. Bare `/config <key>` explains one, including what outranks it — an environment variable, a `settings.json` key — and containers are listed but edited in the file. A write goes through the whole document's validation first, keeps every comment in `config.yaml`, and offers to relaunch, because values are read once at startup. The nine AUTHORITY keys ask first, naming what the key permits |
 | `/claims [run id]` | Open the claims view — tier, grounding status, assumption flags, score breakdown per claim — during a run or afterwards (**ctrl+l**) |
 | `/copy [last\|report\|claims\|conversation\|all] [--file <path>]` | Copy out of the session. Defaults to the last response; `conversation` is the exchange alone — your turns, the answers, the reasoning, the tool calls and the diffs; `all` is everything on screen (the harness's own lines included) plus report plus claims. Clipboard delivery cannot be confirmed, so `--file <path>` is the route that provably worked |
@@ -979,6 +1006,8 @@ Five keys are rejected **by name** — well-formed shapes that will never load, 
 | `ensemble_models` | A roster chooses which providers N research passes call, so a cloned repository could point them at endpoints you never configured and multiply the run's cost by the length of its list; set `ensemble_models` in `config.yaml` instead |
 | `critic_model` | Names a provider every claim is sent to; use `/critic`, which writes a user-tier store, or set `critic_model` in `config.yaml` |
 | `embedder_model` | Names a provider sent claim text and the text of every page a run fetched; use `/embedder`, or set `embedder_model` in `config.yaml` |
+| `plugins_enabled` / `plugin_marketplace` | Decide whether third-party skills and agents load into the model's instructions at all, and whose repository `/plugin install` calls reviewed |
+| `plugin_tool_isolation` | Decides whether a plugin's code runs in a container of its own or as a process on this computer, which only Linux can hold to its grant |
 | `research.granted_tools` | A persisted grant list could only ever *remove* prompts — standing authorisation carried by any repo you clone. Grants are per-run flags precisely so they cannot be |
 
 #### `config.yaml`-only settings
@@ -1021,6 +1050,8 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `max_catalog_text_chars` | 300 | Cap on an agent/skill `name` + `description` entering system prompts |
 | `init_read_chars` / `init_max_steps` | 20,000 / 12 | `/init` per-read volume; step-ceiling fallback (the initializer agent's own frontmatter sets 12, which wins) |
 | `init_max_hub_chars` / `init_diff_shown_lines` | 1,000,000 / 2,000 | Largest existing `AGENTS.md` `/init` revises (above it, it stops before any model call); most diff lines it prints before asking |
+| `plugins_enabled` / `plugin_marketplace` | `true` / `YahyaHammad/Venastine-Research-Harness` | Whether installed plugins load (a hosted deployment loads none), and the GitHub repository whose `plugins/` folder `/plugin` reads. Each plugin's own settings are not here: `/plugin config` |
+| `plugin_tool_isolation` | `container` | Where plugins' tools and MCP servers run: `container` (one per plugin, the shell's image and limits; needs Docker or Podman) or `process` (Landlock and seccomp on Linux, nothing elsewhere) |
 | `teardown_budget_s` | 10 | Shared wall clock for MCP shutdown; stragglers are named in a WARNING |
 
 #### Environment variables
@@ -1058,7 +1089,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 
 **Built:** ROADMAP.md §1–§12 (§10's ensemble mode rebuilt by its revisit — diversity now comes from a roster of different models) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete), §24 (`/init`), §23 (interactive tools: the response channel, per-tool subagent sign-off, `ask_user`, and the todo list), §28 (the shell capability classifier).
 
-**Remaining:** nothing in `ROADMAP.md` or `ROADMAP_v2.md`, and §10's revisit is now closed. `ROADMAP_v3.md` §49–§59 and §61–§93 are built. The section still to build is §60 (Unified Harness Protocol compliance), specified and awaiting detailed design. §56 lets a decision model approve a single contained shell command under the opt-in `classified` mode; §54 completes project file/folder mentions without loading contents; §58 supplies a short harness identity that follows the current model; §83's final live checks are confirmed, and the ChatGPT header distinguishes a selected provider from an active sign-in. `TECHNICAL_DEBT.md` items 14, 17, 18, 21, 102 and 116 are open, and so is the secrets half of item 97. The two checks recorded against §10 are answered from the providers' documentation in `ROADMAP_v3.md` §87: the default `temperature` on OpenAI and Google is 1.0, and OpenAI's reasoning models refuse one whenever reasoning effort is not `none`, which the guard now follows.
+**Remaining:** nothing in `ROADMAP.md` or `ROADMAP_v2.md`, and §10's revisit is now closed. `ROADMAP_v3.md` §49–§59 and §61–§93 are built. The sections still to build are §60 (Unified Harness Protocol compliance), specified and awaiting detailed design, and §94's sixth slice: a first plugin in the marketplace. §56 lets a decision model approve a single contained shell command under the opt-in `classified` mode; §54 completes project file/folder mentions without loading contents; §58 supplies a short harness identity that follows the current model; §83's final live checks are confirmed, and the ChatGPT header distinguishes a selected provider from an active sign-in. `TECHNICAL_DEBT.md` items 14, 17, 18, 21, 102 and 116 are open, and so is the secrets half of item 97. The two checks recorded against §10 are answered from the providers' documentation in `ROADMAP_v3.md` §87: the default `temperature` on OpenAI and Google is 1.0, and OpenAI's reasoning models refuse one whenever reasoning effort is not `none`, which the guard now follows.
 
 **And both audits are closed.** Both roadmaps being built is not the same as the code
 being clean, and saying only the first would be the "built and runs are different claims"
@@ -1077,7 +1108,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 9310 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
+Run the test suite with `pytest` — 10156 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eleven further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, three run the installers' uv path against a real uv, and three run a plugin's tool, a plugin's MCP server and the marketplace's checks of a plugin in a real container (`pytest -m integration`).
 
 ## Documentation
 
@@ -1087,6 +1118,7 @@ For working on the code:
 
 - **[AGENTS.md](./AGENTS.md)** — the agent-context file, and the place to start. `CLAUDE.md` and `QWEN.md` are pointers to it so a tool looking for a particular filename finds one without the guidance being duplicated.
 - **[ARCHITECTURE.md](./docs/ARCHITECTURE.md)** — file-by-file contracts, what belongs where, and the known gotchas. Read before changing anything non-trivial, especially around persistence (`database.py` / `storage.py` / `core/memory.py` are three distinct and easily confused responsibilities).
+- **[PLUGINS.md](./docs/PLUGINS.md)** — using plugins, and the format and guide for writing one.
 - **[ROADMAP.md](./docs/ROADMAP.md)**, **[ROADMAP_v2.md](./docs/ROADMAP_v2.md)** and **[ROADMAP_v3.md](./docs/ROADMAP_v3.md)** — implementation specs plus the locked Design Decisions Record that most of the reasoning above traces back to. Section numbers run on across the three: v3 opens at §49.
 - **[DEVLOG.md](./docs/DEVLOG.md)** — what was followed, what was deviated from, and why.
 

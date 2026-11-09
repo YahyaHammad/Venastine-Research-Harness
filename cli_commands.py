@@ -680,6 +680,27 @@ def _cmd_classifier(session: ChatSession, args: str) -> None:
         _out(line)
 
 
+def _cmd_plugin(session: ChatSession, args: str) -> None:
+    """ROADMAP_v3 §94. The TUI's /plugin, line for line: both run
+    `core.plugin_commands`. The trust modal is its text printed whole and
+    a yes/no at the prompt, where anything but yes is no."""
+    from core import plugin_commands
+
+    def confirm(title: str, body: str) -> bool:
+        _out(title)
+        for line in body.splitlines():
+            _out(line)
+        verb = "Replace" if title.startswith("Replace") else "Install"
+        try:
+            answer = session.ask(f"{verb} it? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        return answer in ("y", "yes")
+
+    plugin_commands.run(args, plugin_commands.Shell(
+        out=_out, error=_out, confirm=confirm))
+
+
 def _cmd_network(session: ChatSession, args: str) -> None:
     """ROADMAP_v3 §53 (IO13). The TUI's /network, line for line: both
     print `_net_common.network_report`."""
@@ -852,6 +873,7 @@ def register_cli_commands() -> None:
         bind("model", _cmd_model),
         bind("network", _cmd_network),
         bind("new", _cmd_new),
+        bind("plugin", _cmd_plugin),
         bind("quit", _cmd_quit),
         bind("ref", _cmd_ref),
         bind("resume", _cmd_resume),

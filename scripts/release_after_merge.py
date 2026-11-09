@@ -14,6 +14,10 @@ writes `action`, `version` and `allocate` to GITHUB_OUTPUT when that is set:
   * skip    -- the pull request is labelled release:skip, or main's tip
                already carries a release tag: a re-run after the release,
                or a run that found an earlier merge's release already there.
+               Or every file it changed is under plugins/ and no
+               release:* label asks for a part (ROADMAP_v3 §94, PL38): the
+               harness did not change. PR_FILES names the list, one path a
+               line, and PR_CHANGED_FILES GitHub's count of them.
   * refuse  -- an unknown release:* label, two parts asked for at once, or
                a version this cannot read. It exits 1 and nothing is pushed.
   * release -- one part above the newer of main's base version and the
@@ -49,6 +53,9 @@ ROOT = versions.ROOT
 PREFIX = "release:"
 PARTS = ("patch", "minor", "major")
 SKIP = "skip"
+MARKETPLACE = "plugins/"
+#: The most files GitHub's pull request file list returns.
+MAX_LISTED_FILES = 3000
 VERSION_FILES = ("package.json", "pyproject.toml")
 BOT = ("github-actions[bot]",
        "41898282+github-actions[bot]@users.noreply.github.com")
@@ -95,6 +102,15 @@ def requested_part(labels) -> str:
     return parts[0] if parts else "patch"
 
 
+def plugin_only(paths, changed_files: int = 0) -> bool:
+    """Whether every path is under plugins/ (PL38). An empty list, or one
+    GitHub cut short, is not: what it left out could be anything."""
+    paths = [p for p in paths if p]
+    if not paths or changed_files >= MAX_LISTED_FILES:
+        return False
+    return all(p.startswith(MARKETPLACE) for p in paths)
+
+
 def bumped(base: str, part: str) -> str:
     major, minor, patch = _triple(base)
     if part == "major":
@@ -104,9 +120,11 @@ def bumped(base: str, part: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
-def decide(labels, current: str, tags, tip_tags) -> Plan:
+def decide(labels, current: str, tags, tip_tags,
+           plugins_only: bool = False) -> Plan:
     """What a merge into main gets. `current` is main's package.json version,
-    `tags` every tag in the repository, `tip_tags` the tags on main's tip."""
+    `tags` every tag in the repository, `tip_tags` the tags on main's tip,
+    `plugins_only` whether every file changed is under plugins/."""
     try:
         part = requested_part(labels)
     except ValueError as error:
@@ -114,6 +132,12 @@ def decide(labels, current: str, tags, tip_tags) -> Plan:
     if part == SKIP:
         return Plan("skip", f"labelled {PREFIX}{SKIP}: the version is yours "
                             f"to set")
+    asked = any(label.strip().lower().startswith(PREFIX) for label in labels)
+    if plugins_only and not asked:
+        return Plan("skip", f"every file it changed is under {MARKETPLACE}, "
+                            f"so the harness did not change; a "
+                            f"{PREFIX}patch, minor or major label asks for a "
+                            f"release anyway")
     on_tip = sorted(_released(tip_tags), key=_triple)
     if on_tip:
         return Plan("skip", f"main's tip is already released as v{on_tip[-1]}")
@@ -197,10 +221,15 @@ def main(argv=None, root: Path = ROOT) -> int:
             labels = json.loads(os.environ.get("PR_LABELS") or "[]")
             if not isinstance(labels, list):
                 raise ValueError("PR_LABELS is not a JSON list of names")
+            files_path = os.environ.get("PR_FILES") or ""
+            paths = (Path(files_path).read_text(encoding="utf-8").splitlines()
+                     if files_path else [])
+            changed = int(os.environ.get("PR_CHANGED_FILES") or 0)
             plan = decide([str(label) for label in labels],
                           versions.read_versions(root)[0],
                           _git(root, "tag", "--list").splitlines(),
-                          _git(root, "tag", "--points-at", "HEAD").splitlines())
+                          _git(root, "tag", "--points-at", "HEAD").splitlines(),
+                          plugins_only=plugin_only(paths, changed))
             _write_outputs(plan)
             print(f"{plan.action}: {plan.reason}"
                   + (f" -> {plan.version}" if plan.version else ""))

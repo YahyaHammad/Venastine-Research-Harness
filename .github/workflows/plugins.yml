@@ -1,0 +1,132 @@
+# ROADMAP_v3 §94 slice 4 (PL35): the plugins a change touches, run where
+# the harness runs them.
+#
+# WHICH PLUGINS. A pull request's changed plugins; EVERY plugin -- and the
+# guide's worked example, docs/plugin-template/example.plugin -- when the
+# change touches the plugin runtime (scripts/plugin_ci.py's RUNTIME list),
+# and every Monday, since a lock that was clean can gain a CVE. A change
+# that touches no plugin and not the runtime tests nothing.
+#
+# WHAT EACH GETS (scripts/plugin_ci.py test), the checks the HARNESS owns,
+# whoever wrote the plugin: its lock built in the sandbox image, each
+# tool's module imported by the real runner and asked whether it defines
+# `run`, each MCP server started by the real client with its live
+# tools/list compared to mcp.json, then pip-audit on the lock. The
+# author's own tests run too when there are any, in the same image with no
+# token, no secret, no workspace and the network only if the manifest
+# asks. They are the author's code, as untrusted as the tools, so a pass
+# is not a review (the owner, batch 252); plugin-review.yml's scanner and
+# a person are that.
+#
+# UNTRUSTED CODE, SO NOTHING TO STEAL. On a fork's pull request this runs
+# the pull request's own code with a read-only token and no secrets, as
+# every pull_request workflow does. The checkout keeps no credentials, the
+# plugin's code runs in a container that is given none, and nothing here
+# names a secret, so the Monday run on main hands a plugin nothing either.
+#
+# NO PUSH TRIGGER: a plugin reaches main by a pull request, which ran
+# this. So deploy_gate.py does not wait for this workflow; a Monday run
+# that fails still counts against that commit's deploy, as any check does.
+
+name: plugins
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugins-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: select-plugins-to-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      plugins: ${{ steps.changes.outputs.plugins }}
+      any: ${{ steps.changes.outputs.any_plugins }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Which plugins to test
+        id: changes
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: python3 scripts/plugin_ci.py changes
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    # A lock's build in the image, a server's first container and the
+    # author's tests; the build alone was 53 s for a 28-package lock.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.changes.outputs.plugins) }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+
+      # The harness's own dependencies: the runner's host side and the MCP
+      # client that starts a plugin's servers. pip-audit at pip-audit.yml's
+      # pin.
+      - name: Install the harness
+        run: |
+          python -m pip install "uv==0.13.4"
+          python -m uv pip install --system -r requirements.txt "pip-audit==2.10.1"
+
+      - name: Provide providers.json
+        run: cp providers.json.example providers.json
+
+      - name: The harness's checks, and the plugin's own tests
+        env:
+          PLUGIN: ${{ matrix.plugin }}
+        run: python scripts/plugin_ci.py test "$PLUGIN"
+
+      - name: Audit its lock
+        env:
+          PLUGIN: ${{ matrix.plugin }}
+        run: |
+          if [ -f "$PLUGIN/requirements.txt" ]; then
+            pip-audit -r "$PLUGIN/requirements.txt" --require-hashes --disable-pip --progress-spinner off --desc
+          else
+            echo "No requirements.txt: nothing to audit."
+          fi
+
+  # What test installs to run a plugin's own tests.
+  audit-tools:
+    needs: changes
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Audit scripts/plugin-ci-requirements.txt
+        run: |
+          python -m pip install "pip-audit==2.10.1"
+          pip-audit -r scripts/plugin-ci-requirements.txt --require-hashes --disable-pip --progress-spinner off --desc

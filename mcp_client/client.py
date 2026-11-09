@@ -54,6 +54,7 @@ from mcp.client.streamable_http import (
     streamable_http_client,
 )
 from mcp.shared.exceptions import MCPError
+from mcp.types import CONNECTION_CLOSED, REQUEST_TIMEOUT
 
 import config as _harness_config
 from safety.policy_enforcement import TOKEN_CHARS, fragment_end
@@ -142,6 +143,22 @@ class _TrackClose:
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _thread: Optional[threading.Thread] = None
 _loop_lock = threading.Lock()
+#: The clients whose manager runs on the loop (ROADMAP_v3 §94, PL30). Your
+#: mcp.json's servers share it with each plugin server's own client, and a
+#: plugin server stops when its plugin is removed or turned off; the loop
+#: stops when the last of them lets go, never under a client still
+#: connected.
+_holders: set = set()
+
+
+def _hold(client) -> None:
+    with _loop_lock:
+        _holders.add(client)
+
+
+def _release(client) -> None:
+    with _loop_lock:
+        _holders.discard(client)
 
 
 def _metered_mcp_client(headers=None, timeout=None, auth=None):
@@ -174,7 +191,7 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
 def _shutdown_loop(join_timeout: float = SHUTDOWN_TIMEOUT_S) -> None:
     global _loop, _thread
     with _loop_lock:
-        if _loop is None:
+        if _loop is None or _holders:
             return
         _loop.call_soon_threadsafe(_loop.stop)
         if _thread is not None:
@@ -396,6 +413,35 @@ def _normalize(result, tool_name: str = "") -> dict:
     return out
 
 
+class _Cancelled(Exception):
+    """The caller's cancel token fired while a call was in flight."""
+
+
+#: The SDK's codes for a connection that is gone or a request nobody
+#: answered: after either, a plugin's server is started again (PL30). A
+#: JSON-RPC error a server sends about the call itself is not one.
+_BROKEN_CODES = frozenset({CONNECTION_CLOSED, REQUEST_TIMEOUT})
+
+
+def _result(future, timeout: float, cancel):
+    """`future.result(timeout)`, checking `cancel` (anything with a
+    `cancelled()` method) every 0.2 s when there is one."""
+    if cancel is None:
+        return future.result(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError
+        try:
+            return future.result(timeout=min(left, 0.2))
+        except TimeoutError:
+            if future.done():
+                raise
+            if cancel.cancelled():
+                raise _Cancelled from None
+
+
 class MCPClient:
     """Connects to configured MCP servers and exposes a synchronous
     call_tool() that looks completely ordinary to registry.dispatch()."""
@@ -418,6 +464,11 @@ class MCPClient:
         self._shutdown: Optional[asyncio.Event] = None
         self._done: Optional[asyncio.Event] = None
         self._task = None
+        # Servers whose last call failed below MCP's own error reporting --
+        # the protocol, the clock or the transport -- rather than with an
+        # error the server sent. A plugin's server is restarted after one
+        # (PL30); your own servers' calls do not read it.
+        self.broken: set = set()
 
     # -- connection ------------------------------------------------------
 
@@ -584,6 +635,7 @@ class MCPClient:
                 "connect_all() on an MCP client that is already connected; "
                 "call disconnect_all() first")
         loop = _ensure_loop()
+        _hold(self)
 
         async def _start():
             self._ready = asyncio.Event()
@@ -620,6 +672,7 @@ class MCPClient:
             self.clients.clear()
             self._catalogs.clear()
             self._task = None
+            _release(self)
             _shutdown_loop()
             raise
 
@@ -638,7 +691,8 @@ class MCPClient:
         return fut.result(timeout=timeout).tools
 
     def call_tool(self, server_name: str, tool_name: str, params: dict,
-                  timeout: float = DEFAULT_CALL_TIMEOUT_S) -> dict:
+                  timeout: float = DEFAULT_CALL_TIMEOUT_S,
+                  cancel=None) -> dict:
         """The synchronous entry point every ToolSpec.handler calls.
 
         Looks ordinary to registry.dispatch() regardless of whether the
@@ -669,21 +723,32 @@ class MCPClient:
         coro = client.call_tool(tool_name, params,
                                read_timeout_seconds=protocol_timeout)
         future = asyncio.run_coroutine_threadsafe(coro, loop)
+        self.broken.discard(server_name)
         try:
-            return _normalize(future.result(timeout=timeout), tool_name)
+            return _normalize(_result(future, timeout, cancel), tool_name)
+        except _Cancelled:
+            # ROADMAP_v3 §94 (PL30): a plugin tool's call is cancellable, as
+            # its own tools' calls are. Cancelling the future cancels the
+            # SDK's request task, which tells the server.
+            future.cancel()
+            return {"error": f"MCP tool {tool_name!r} was cancelled"}
         except MCPError as e:
             # v2 raises for protocol-level failures -- including timeout,
             # which is code -32001 -- where v1 reported everything in
             # band. Map onto the same {"error": ...} convention so the
             # loop keeps exactly one error shape to understand.
+            if e.code in _BROKEN_CODES:
+                self.broken.add(server_name)
             return {"error": f"MCP call failed: {e}"}
         except TimeoutError:
             # The protocol timeout should have fired first. Reaching here
             # means the loop itself is wedged; cancel so the coroutine
             # can't outlive the call.
+            self.broken.add(server_name)
             future.cancel()
             return {"error": f"MCP tool {tool_name!r} timed out after {timeout}s"}
         except Exception as e:
+            self.broken.add(server_name)
             # LAST, so the two specific branches above keep their handling
             # (notably future.cancel()). MCPError is not the only thing v2
             # raises: an outputSchema violation surfaces as a bare
@@ -738,6 +803,7 @@ class MCPClient:
         """
         budget = TEARDOWN_BUDGET_S if timeout is None else timeout
         if self._task is None or _loop is None:
+            _release(self)
             _shutdown_loop()
             return
 
@@ -777,4 +843,5 @@ class MCPClient:
         # generation would answer for the next one's straggler check.
         self._closed.clear()
         self._task = None
+        _release(self)
         _shutdown_loop(join_timeout=max(0.5, remaining()))

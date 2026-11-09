@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "venastine-research-harness"
-version = "0.3.13"
+version = "0.3.13b1+codex.plugin.integration.r4d2e7293799a"
 description = "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline."
 readme = "README.md"
 # The same words as package.json's `keywords`, in the same order: what a
@@ -131,6 +131,10 @@ dependencies = { file = ["requirements.txt"] }
 # developers may run 3.12/3.13 locally -- UP modernisations must be valid
 # where CI runs, not just where they were written.
 target-version = "py311"
+# ROADMAP_v3 §94 (PL40): a plugin's code is its author's, reviewed by
+# plugin-review.yml's scanner and tested by plugins.yml, never held to the
+# harness's own lint.
+extend-exclude = ["plugins"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]

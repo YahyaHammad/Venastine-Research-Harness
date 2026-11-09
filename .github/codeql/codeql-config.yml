@@ -25,7 +25,14 @@
 # dismissed in GitHub with a reason and recorded in DEVLOG (batch 158 has
 # the first eight), not ignored here.
 
+# `plugins/` is skipped for the same reason -- npm ships none of it -- and
+# because a plugin's code is its author's (ROADMAP_v3 §94, PL40): reviewed
+# by plugin-review.yml's scanner and tested by plugins.yml, never part of
+# the harness this scan describes. An alert in one would also hold the
+# hosted demo's deploy, which runs no plugin.
+
 name: venastine-codeql
 
 paths-ignore:
   - tests
+  - plugins

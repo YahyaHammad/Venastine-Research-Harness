@@ -106,7 +106,7 @@ def python_files() -> list:
     # reason: bandit does not respect .gitignore, so a bare `-r .`
     # scans output/ and __pycache__ as well.
     out = subprocess.run(  # nosec B603 B607 - fixed argv built here; no input of any kind reaches it, and `git` resolves on PATH exactly as the workflow step's own `git ls-files` does
-        ["git", "ls-files", "*.py"], cwd=ROOT,
+        ["git", "ls-files", "*.py", ":!:plugins/**"], cwd=ROOT,
         capture_output=True, text=True, check=True).stdout
     return [line for line in out.splitlines() if line.strip()]
 

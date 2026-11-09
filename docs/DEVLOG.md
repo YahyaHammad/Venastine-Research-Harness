@@ -31319,3 +31319,495 @@ in `core/replay.py`.
 
 - **Version:** the branch's beta identity, `0.3.12-b.1.decision-classifier.r221ab7fae163`, so the
   merge releases the next patch.
+
+## Batch 249 -- Plugins, slice 1: the format, the store, `/plugin` and its trust modal (2026-11-08)
+
+**Asked.** The owner asked for a plugin system and described it before any design. A plugin adds
+tools (with their own dependencies), skills, agents, MCP servers and settings of its own. It never
+touches a core file and cannot alter the core runtime. It is pulled from GitHub, since there is no
+serving infrastructure, and the marketplace is this repository's `plugins/` folder, nested to any
+depth. `/plugin install` and `/plugin uninstall` sit behind a trust modal. CI tests only changed
+plugins. A bot flags a pull request that touches `plugins/` and anything else. A plugin-only merge
+is `release:skip`. A scan flags suspicious plugins. External plugins can be installed. There is a
+standard format and a guide. The owner then asked for slice 1 of the six-slice plan they approved.
+ROADMAP_v3 §94 records the whole design.
+
+**Measured first.**
+
+- **Separate containers against one shared container, for plugin tools.** Measured under rootless
+  Podman 5.7 in WSL, then, at the owner's request, under Docker Desktop 29.7.2 once its daemon was
+  up. Each plugin was one idle Python process, which is what a tool runner is between calls.
+  - Podman, separate vs shared: 17 vs 17 MB for three plugins, 38 vs 33 MB for eight.
+  - Docker, separate vs shared: 31 vs 23 MB for three plugins, 72 vs 41 MB for eight. Each
+    container adds a `containerd-shim` of 4.6-7 MB, against Podman's 0.44 MB `conmon`.
+  - A container starts in 0.3-1.0 s; eight start in parallel in about a second.
+  - A kept-alive runner's call through `docker run -i` took 0.6 ms (median).
+  - The owner's rule was separate containers if the difference is minimal, and it is.
+- **Tools load from a static import list** in `tools/registry.py`, so a plugin's tool can only
+  join by a route the harness builds; slice 2's runner is that route.
+- **Skills and agents are discovered once,** in `config_loader.initialize`, and every consumer
+  reads the cached dicts through getters. A refresh that replaces those two dicts is therefore
+  enough for an install to take effect at once.
+- **`~/.config/venastine` is already a protected path**: the shell sandbox mounts it read-only
+  and the file tools refuse to write it unasked. So the store inherits that protection by living
+  there.
+- **GitHub's raw host and its trees API are all the installer needs.** One commit, the root tree
+  and the recursive `plugins` subtree, then each file at that commit, checked against its git
+  blob hash.
+
+**The owner's decisions.** Through the question tool, over four rounds on 2026-11-08:
+
+- tools in a container per plugin by default, from the shell's own image and argv builder, never
+  an image a plugin names, with an authority key to fall back to own process and venv (warned in
+  the modal: no Landlock off Linux);
+- workspace access declared and granted per project; tool calls ask, with a per-plugin opt-out;
+- the `.plugin` suffix, `plugin.yaml`, names prefixed by the plugin;
+- a failing boundary check with a label and a comment, never a closed pull request;
+- high-severity scanner findings fail, and a `plugin:scan-reviewed` label clears a false
+  positive;
+- all plugins tested when the runtime changes and weekly;
+- on everywhere, with `/plugin disable` per project;
+- settings through `/plugin config <id>`, never in `config.yaml`;
+- external plugins in the first version;
+- and for slice 1:
+  - refuse a plugin that ships tools, MCP servers or dependencies;
+  - `plugins_enabled` on by default;
+  - the marketplace as a key;
+  - a reinstall replaces after the modal.
+
+**Built.** Decisions PL1-PL19 in §94.
+
+- **The format module,** `core/plugin_format.py`, pure, so slice 4's scanner can import it:
+  - the id and folder rules;
+  - the manifest, read by a safe YAML loader with aliases and duplicate keys refused;
+  - the file set and its limits;
+  - the settings schema and its parser.
+- **The store,** `core/plugin_store.py`, in `~/.config/venastine/plugins/`:
+  - the registry with every file's SHA-256, so a changed plugin stops loading (PL8);
+  - staging, and a replacement that puts the old files back if the move in fails;
+  - per-project switches and settings.
+- **The fetch,** `core/plugin_source.py`:
+  - the marketplace at one resolved commit, with the tree checked before any download and each
+    file checked against its blob hash;
+  - a folder install, which skips and names `.git/` and `__pycache__/`.
+- **The command,** `core/plugin_commands.py`: `/plugin` with list, info, install, uninstall,
+  disable, enable and config, its trust modal text, and its panel offers.
+- **The loader,** `core/config_loader.py`:
+  - a plugin tier between user and project, with names prefixed;
+  - `refresh_plugins()`;
+  - `preview_plugin()`, which reports a definition the parser would skip with the parser's own
+    sentence.
+- **Two authority keys,** `plugins_enabled` and `plugin_marketplace`.
+- **`/plugin` in both shells.** In the TUI, `list`, `info` and `install` run in a worker and ask
+  through `ConfirmScreen`, with No focused. The CLI prints the modal's text and asks y/N.
+- **The guide,** `docs/PLUGINS.md`, the template `docs/plugin-template/example.plugin`, and
+  `plugins/README.md`.
+
+**Found by running it.** The first run of the settings tests refused a setting named `on`, which
+YAML 1.1 reads as `true`. The refusal was right, and its sentence now says why.
+
+**Not changed.** No tool, MCP or workflow code. Nothing reads a plugin's settings yet. The
+marketplace holds no plugin.
+
+**Verification.**
+
+- **Full suite:**
+  - Run on Windows, in a venv built from `main`'s requirements, with `AGENT_WORKSPACE` unset,
+    after the same setup as tests.yml's checkout (`providers.json` from its template,
+    `config.yaml` with LF endings).
+  - Result: 9383 passed, 89 skipped, none failed. That is 9472, the stated count.
+- **The first full run failed 8 tests,** none a behaviour break:
+  - the settable-scalar count (168 to 170) and the authority-key count (21 to 23);
+  - the decision ids PL1-PL19, before §94 was written;
+  - the ARCHITECTURE tree and the stated test counts;
+  - `plugin_source._trees`, a process-lifetime memo that no fixture reset. It is now in
+    `PROCESS_MEMOS`.
+  - Then `read_project_doc`'s counted bound: 68 documents, not 65. The three new ones (the
+    guide, the marketplace page and the template's README) were read before the number moved,
+    as that paragraph asks. A merged plugin will move the count again; that is in §94's gap
+    register for slice 4.
+- **The new tests:** 162. One skips here: the link test, since this Windows machine cannot make a
+  symbolic link. CI's Linux runs it.
+- **Breakages:** 24 of 24 deliberate breakages each turned a named test red. Two of the test's
+  first answers were wrong and were fixed before the pass:
+  - the first run of the settings tests used a setting named `on`, which the strict reader
+    rightly refused;
+  - drafting the mutation table showed the panel test could not tell a half-typed number. Its
+    input never prefixed the current value, so offering the value anyway would have passed. It
+    now asserts that typing `3` against a current `3` offers nothing.
+- **Other gates:**
+  - ruff is clean on the whole tree.
+  - bandit has 0 new findings against the rewritten baseline, with the new files scanned, and
+    its count check is green.
+  - gitleaks is clean on an export of the tracked and staged files, with CI's config.
+  - pip-audit was not run, since no dependency moved.
+- **End to end, outside the suite:** the template plugin was installed from its folder into a
+  throwaway HOME, declined, accepted, configured, disabled, enabled, replaced and uninstalled.
+  The modal text, the settings carry-over and the store left behind were read rather than
+  assumed.
+- **Not done here:**
+  - no install from the real marketplace, which holds no plugin yet (slice 6);
+  - no Linux run, which CI does;
+  - no TUI screenshot of the modal, which `ConfirmScreen` draws as for `/init` and `/forget`.
+
+## Batch 250 -- Plugins, slice 2: tools, in a container per plugin (2026-11-09)
+
+**Asked.** The owner asked to start slice 2 of the plugin system, a plugin's tools, from the
+record ROADMAP_v3 §94 kept so a later slice needs no transcript.
+
+**Four answers first.** Through the question tool, before anything was built. The owner took the
+recommendation each time:
+
+- a tool's name, description and schema live in `plugin.yaml`, not in its Python module, so
+  nothing of a plugin runs to describe it;
+- `requirements.txt` is a full lock with hashes, installed with `--require-hashes
+  --only-binary=:all:`;
+- `process` isolation on Linux enforces the grant with Landlock and seccomp, or refuses the call;
+- the opt-out from asking is `/plugin approval <id> ask|auto`, kept in the store.
+
+**Measured first.**
+
+- Killing `docker run -i`'s client ended the container within a second under Docker Desktop
+  29.7.2 and rootless Podman 5.7, and closing its stdin ended it at once. So the runner needs no
+  `timeout` wrapper; it has an idle exit as a backstop.
+- pip's `--target` install into a bind mount works under both, from Windows too, with no links in
+  what it writes, and imports back from a read-only mount under `python -I -S`.
+- WSL's 6.6 kernel has Landlock ABI 3, which has no TCP rules, so the network wall there has to
+  be seccomp's.
+
+**Built.** Decisions PL20-PL26 in §94.
+
+- **The format:** `tools:` and `access:` in the manifest, read by the same strict parser, and the
+  lock's parser (PL20-PL22). Tools and `requirements.txt` leave PL5's list; `mcp.json` stays on
+  it.
+- **The runner,** `core/plugin_runner.py`: the one program that runs a plugin's code, standard
+  library only, mounted read-only in the container (PL24).
+- **The host side,** `core/plugin_tools.py`:
+  - registration as `plugin__<plugin>__<tool>`, asking by default;
+  - the grant asked on a plugin's first call in a project;
+  - one runner per plugin per session, in a container from the shell's own `_docker_argv` or a
+    process of its own;
+  - the dependency build after the yes, and the record of what it was built for (PL21-PL26).
+- **The walls,** `security/confine.py`'s plugin profile: Landlock to the grant, and a seccomp
+  filter that admits only internet sockets, only with the network (PL25).
+- **The store:** grants per project, the approval choice, and the build's folder beside the
+  files.
+- **`/plugin`:** the modal lists tools, access and the lock; `access` and `approval` are new.
+- **One authority key,** `plugin_tool_isolation`. `plugin__` joins `mcp__` as a dynamic prefix in
+  `security/permissions.py`.
+- **The guide** covers tools, access and the lock, and the template gains a tool.
+
+**Found by running it.**
+
+- A tool that started a child process hung for a minute on Windows. The child inherited the
+  runner's stdin, the pipe its reader thread was blocked on, and Windows serialises synchronous
+  I/O on one pipe handle. The runner now reads the protocol from a private copy and points
+  descriptor 0 at the null device.
+- The first Landlock-rules test asked for no path under `/home`, and on WSL a user site-packages
+  is one. The rule that matters is that no rule covers the home directory or anything above it,
+  which is what the test now asks.
+
+**Not changed.** No workflow file. No MCP code: `mcp.json` in a plugin is still refused. The
+marketplace holds no plugin.
+
+**Verification.**
+
+- **Full suite:**
+  - Run on Windows with `AGENT_WORKSPACE` unset, after the same setup as tests.yml's checkout. The
+    venv the last batches used had lost its `python.exe`, so a fresh one was built from
+    `requirements.txt` and `requirements-test.txt`.
+  - Result: 9668 passed, 94 skipped, none failed. That is 9762, the stated count.
+- **The first full run failed 3 tests,** none a behaviour break: the stated test count, the
+  settable-scalar count (170 to 171), and the production-module tree. That last one was the
+  template's `tools/outline.py`, the first `.py` file in a plugin. Slice 1's gap register
+  predicted it; the tree names it now.
+- **The new tests:** 290 in `tests/test_plugin_tools.py`, and one more marked `integration`.
+  - On Windows, 5 skip: the walls tests, which need Landlock.
+  - On WSL the file passes whole, the walls included, and so do `tests/test_plugins.py` and
+    `tests/test_confine.py` beside it: 554 passed there before the last 16 cases were added.
+  - The `integration` test passed against Docker Desktop: a plugin tool in a real container, with
+    `six` built by pip in the image, read-only then read-write, and no container left after.
+- **Breakages:** 33 of 33 deliberate breakages each turned a named test red, 32 on Windows and
+  the one only Linux can catch (confinement switched off) on WSL. Two of the first answers were
+  wrong and were fixed before the pass:
+  - turning off `ptrace`'s denial survived, because the test read the denied calls from the list
+    it was checking. A test now spells out eight of them by number.
+  - removing the runner's `dup2` of descriptor 1 survived, because the probe tool only called
+    `print()`, which the runner's `sys.stdout` swap already redirects. The tool now writes to
+    descriptor 1 directly, as C code would.
+- **Other gates:**
+  - ruff is clean on the whole tree.
+  - bandit has 0 new findings against the rewritten baseline, with the new files scanned, and its
+    count check is green. The first run found two LOW findings in the new test file, an import
+    of `subprocess` and the integration test's `ps`, now annotated as the other tests are.
+  - gitleaks is clean on an export of the tracked and new files, with CI's config.
+  - pip-audit was not run, since no dependency of the harness moved.
+- **End to end, outside the suite:** a tool plugin was installed from a folder into a throwaway
+  HOME and called through `/plugin`'s own path three times: `process` on Windows, `process` on
+  WSL, and in a Docker container. The second showed the write and the socket refused and the
+  read granted; the third built `six` with pip in the image.
+- **Not done here:**
+  - no Linux Docker run, which CI's `integration` job does; that is where `--user` on a rootful
+    Docker is exercised;
+  - no Podman run of the whole tool path, only of the measurements;
+  - no TUI screenshot of the grant question, which is the `ConfirmScreen` the other CONFIRM
+    questions use.
+
+## Batch 251 -- Plugins, slice 3: MCP servers, written in Python (2026-11-09)
+
+**Asked.** The owner asked to start slice 3 of the plugin system, a plugin's MCP servers.
+
+**Answers first.** Four questions through the question tool before anything was built. The owner
+took the recommendation on three:
+
+- a server runs Python: a module the plugin ships, or one its hashed lock installs;
+- remote (`http` or SSE) servers are not in this version;
+- tools are named `plugin__<plugin>__<tool>`, one namespace with the plugin's own tools.
+
+On the first, where a server and its tools are declared, the owner turned down `plugin.yaml` and
+asked to discuss it. In `plugin.yaml` a server would be declared differently from everywhere
+else, and YAML might not keep JSON as written. That second worry was measured before answering.
+Of 19 JSON forms pasted into the manifest through its strict loader, 14 came back the same, and a
+tab between tokens was refused loudly. Four silent changes made the case:
+
+- `1e6`, `1E+6` and `1.5e3` became text, and only `1.5e-3` stayed a number;
+- an escaped emoji became two broken halves, which no UTF-8 encoder will write.
+
+Each passed every check the manifest had, in slice 2's tool schemas too. The owner then chose a
+strict `mcp.json` in the plugin, in the user file's own shape, with each server listing its tools
+pasted from its own `tools/list` answer. For `plugin.yaml` they chose `1e6` as a number and an
+escaped half of a pair refused. Mid-batch the owner added that npx/uvx and remote servers are
+deferred rather than scrapped, and the refusals say so.
+
+**Built.** Decisions PL27-PL31 in §94.
+
+- **The format** (PL27, PL28, PL31), `core/plugin_format.py`:
+  - `parse_mcp_json`, as strict as the manifest's parser;
+  - `McpServer` and `McpTool`;
+  - one namespace across tools and servers, compared ignoring case, at most 32 tools together;
+  - `servers/` beside `tools/`;
+  - the YAML loader's JSON-number rule, and lone surrogates refused in every field;
+  - PL5's list, emptied, gone with its code.
+- **The launcher** (PL29): `core/plugin_runner.py serve <spec>`. It runs a server's module as
+  `__main__` behind the same walls as a tool, on private copies of the pipes, with descriptors 0
+  and 1 pointed away from them.
+- **The lifecycle** (PL30), `core/plugin_mcp.py`, new:
+  - a server starts on the first call of one of its tools, in a container of its own or a
+    process behind the walls;
+  - it is spoken to by the harness's own MCP client, so A79's bound applies;
+  - it is started again on a changed grant, setting or install, and after a failure below the
+    server's own answer, and stopped at once when access is taken back.
+- **The MCP client,** `mcp_client/client.py`:
+  - the loop is shared, so it stops only when the last client lets go;
+  - a call can be cancelled;
+  - `broken` names a server whose last call failed below its own answer.
+- **Registration and the shells:**
+  - `core/plugin_tools.py` registers a server's tools from the listing and stops servers with
+    runners;
+  - `core/plugin_commands.py`'s modal and `/plugin info` show each server, its command line,
+    its environment and the tools the model will see.
+- **The prompt:** `PLUGIN_PROVENANCE`, A76's sentence for `[plugin: <id>]` descriptions. Without
+  it, moving a server from your `mcp.json` into a plugin would have dropped the sentence for the
+  same text.
+- **The guide:** MCP servers, how to take a listing, and a server written with the SDK.
+
+**Found by running it.**
+
+- Taking access back with `/plugin access` left a running server on the old grant until its next
+  call, and a server is a process that can act between calls. It now stops at once, and a test
+  holds that.
+- The first test server read stdin on its main thread, so it could not show the Windows pipe hang
+  slice 2 found, which an SDK server, reading on a thread, would. It reads on a thread now.
+- Two of the first mutation rows proved nothing: one changed a line after the refusal was already
+  recorded, and the args test had no case with a real module after something other than `-m`.
+
+**Not changed.** No workflow file. The marketplace holds no plugin. The template keeps its one
+tool: an SDK server needs a 28-package lock the offline suite cannot build.
+
+**Verification.**
+
+- **Full suite:**
+  - Run on Windows in the pinned venv with `AGENT_WORKSPACE` unset, after tests.yml's checkout
+    setup.
+  - Result: 9776 passed, 98 skipped, none failed. That is 9874, the
+    stated count.
+- **The first full run failed 3 tests,** all docs gates and none a behaviour break: the stated
+  count, the tree's entry for the new file and the catalog file's count, and AGENTS.md's PL range.
+- **One flake, not this batch's.** The second full run failed
+  `test_a_long_line_uses_the_panel_not_the_floor` with "the viewer painted nothing at all": one
+  `pilot.pause()` was not enough under the full suite's load. It passed three times alone and in
+  the runs either side, and the batch changes no TUI code. It is the pump-race kind of TUI flake,
+  recorded here because nothing recorded it before.
+- **The new tests:** 109 in `tests/test_plugin_mcp.py`, 3 in `tests/test_catalog_advertisement.py`,
+  and one more marked `integration`.
+  - On Windows, 4 skip: the walls tests, which need Landlock.
+  - On WSL the plugin, confinement and MCP-client files passed whole, the walls included, but
+    for 2 HTTP-transport tests this batch does not touch. They fail the same way on slice 2's
+    tree, because WSL's system Python has MCP SDK 2.2.0, which lacks a keyword 2.3.0's
+    streamable client takes.
+  - The `integration` test passed against Docker Desktop 29.7.2: a server in a real container,
+    the workspace read-only then read-write, no network, and no container left after.
+- **Breakages:** 46 of 46 deliberate breakages each turned a named test red, 45 on Windows and
+  one only Linux can catch (a server's walls switched off) on WSL. Three of the first 45 survived:
+  - one was a bad mutation that changed nothing observable, now replaced;
+  - one was a missing test case, now added (a module after something other than `-m`);
+  - one showed that the spec a server can read was never tested. A workspace path written into it
+    without a grant passed, because the launcher checks the grant again. A test of the spec
+    itself now holds it.
+- **Other gates:**
+  - ruff is clean on the whole tree.
+  - bandit has 0 new findings against the rewritten baseline, with the new files scanned, and
+    its count check is green. The first run found one Medium B108 in the new test file, the
+    container's own `/tmp`, now annotated as the code's is.
+  - gitleaks is clean on an export of the tracked and new files, with CI's config.
+  - pip-audit was not run, since no dependency of the harness moved.
+- **End to end, outside the suite:**
+  - a plugin with a standard-library server, installed from a folder and called through
+    `/plugin`'s path under `process` on Windows, `process` on WSL and in a Docker container;
+  - a server written with the SDK's `MCPServer`, its listing taken as the guide says and its
+    28-package lock built by pip, in a container and under the walls on WSL.
+- **Not done here:**
+  - no Linux Docker run, which CI's `integration` job does;
+  - no Podman run of a server;
+  - no TUI screenshot of the modal's server lines, which are the same `ConfirmScreen` text.
+
+## Batch 252 -- Plugins, slice 4: the marketplace's CI and the scanner (2026-11-09)
+
+**Asked.** The owner asked to start the next slice of the plugin system: slice 4, the
+marketplace's CI.
+
+**Answers first.** Eight questions through the question tool, in three rounds, before anything
+was built. Four facts measured beforehand shaped them:
+
+- `deploy_gate.py` refuses a workflow whose push trigger filters by path;
+- npm's `files` ships no `scripts/`, so the scanner the harness runs cannot live there;
+- GitHub refuses (422) a review request for anyone who is not a collaborator;
+- every merged plugin's README would move `read_project_doc`'s gated bound.
+
+The owner took the recommendation on seven: a first job that decides, in each core workflow;
+plugin tests in the sandbox image; the scanner in a trusted workflow on files read as data; every
+check, online too, for a `--from` install, shown in the modal; the high/note split; no reading
+inside a `.plugin` folder; and mention every maintainer while asking only those who can review.
+On the eighth, whether a plugin with code must have tests, the owner asked whether a plugin's
+own tests could be malicious. They can: they are its author's code, and a pass proves only what
+the author chose to check. So the checks that count are the harness's own, and the author's
+tests became optional.
+
+**Built.** Decisions PL32-PL40 in §94.
+
+- **The scanner** (PL33), `core/plugin_scan.py`, new. It reads and never runs: Python through
+  `ast` with names resolved through the file's own imports, text line by line, the lock on PyPI
+  and OSV when asked. High and note findings as the owner split them, and a lookup that does
+  not answer is unchecked, never a pass.
+- **The modal** (PL36): every install is scanned before it, offline from the marketplace and
+  with the lookups for `--from`, and the findings are listed with the high ones said in capitals.
+- **Which side a change touches** (PL32): `scripts/plugin_ci.py changes`, the first job of
+  tests, compat, lint, bandit and codeql, whose other jobs now `needs` it.
+- **The review** (PL34): `plugin-review.yml` on `pull_request_target` and `plugin_ci.py review`
+  -- the `plugin-boundary` and `plugin-scan` checks, the version and name checks (PL39), the
+  `plugin:scan-reviewed` label's rules, maintainers of record, `release:skip` on a plugin-only
+  pull request's first review, and one comment with the author's text fenced.
+- **The checks a plugin's code gets** (PL35): `plugins.yml` and `plugin_ci.py test`. The lock
+  builds in the image, a new runner `check` message asks each tool's module whether it defines
+  `run`, each server is started and compared with its listing (`Server.drift`), pip-audit reads
+  the lock, and the author's tests run with a hashed pytest
+  (`scripts/plugin-ci-requirements.txt`) under the plugin's own walls.
+- **Releases and the demo** (PL38): `release.yml` reads the pull request's files and a
+  plugin-only merge releases nothing without a part label; `deploy_demo.py` compares the live
+  build with the commit and sends nothing when only `plugins/` moved.
+- **What the core leaves alone** (PL37, PL40): `read_project_doc` reads nothing inside a
+  `.plugin` folder, so the worked example's README left AGENTS.md's bound, and the new lock,
+  a tracked `.txt`, joined it: 68 files still; ruff, bandit, CodeQL and the docs gates'
+  walk leave `plugins/` out.
+
+**Found while building.**
+
+- The first run of the plugin tests after the scan was wired in looked up pypi.org and
+  api.osv.dev through the real resolver, and the suite's offline guard failed it by name. An
+  autouse stand-in in conftest answers for both now, clean, and records what was asked.
+- The review's first version imported `plugin_source` for its blob hash. That module pulls in
+  `config` and then pydantic, which `plugin-review.yml` does not install, so the workflow would
+  have failed on its first run. The review hashes blobs itself, and a test holds its imports.
+- The doc-read bound's gate passed the first full run at 67 and failed the last at 68. The
+  difference was `git add -N` on the new files before bandit: the gate counts tracked files,
+  and `scripts/plugin-ci-requirements.txt` is a `.txt` that `read_project_doc` reads. The
+  first green was green for a reason that would not ship. It was read, and is counted.
+- pytest 9.2.0, the newest, was 13 days old, under this repository's two-week rule; the lock
+  takes 9.1.1, and the scanner would have flagged the newer one the same way.
+
+**Verification.**
+
+- **Full suite:**
+  - Run on Windows in the pinned venv with `AGENT_WORKSPACE` unset, after tests.yml's checkout
+    setup.
+  - Result: 10046 passed, 98 skipped, none failed. That is 10144, the stated count.
+  - The run before it failed one test, the doc-read bound's gate, at 68 against the 67 then
+    stated, for the reason under "Found while building"; the first run had passed it at 67.
+- **The new tests:** 129 in `tests/test_plugin_scan.py`, 141 in `tests/test_plugin_ci.py`, and one
+  more marked `integration`.
+  - On WSL the plugin files passed whole, the Landlock and seccomp walls included, with the
+    harness's checks run behind them under `process`. The whole suite there failed 22 and
+    errored 1, none of them this batch's. 20 fail the same way on slice 3's tree: WSL's
+    system Python has older SDKs than the pins and lacks a package one audit test walks to,
+    and git under WSL reads no files from a worktree made on Windows, which the bundle and
+    push-channel tests ask it for.
+    The error is `tests/test_page_text.py` failing to collect without `pypdf`. The last two
+    are the docs gate's count checks, which then collect 87 fewer tests than the 10144 stated.
+  - The `integration` test passed against Docker Desktop 29.7.2: the tool modules checked by the
+    runner in a container, the server in one, and the author's three tests in the sandbox image
+    with pytest from the new lock, the network closed, no workspace and no token, in 40 s.
+- **Breakages:** 81 of 81 deliberate breakages each turned a named test red. Two rows were
+  rewritten before the run, because reading them showed they could not be caught: the
+  not-a-merge test ran in a one-commit repository, where `HEAD^1` fails anyway, and the
+  hash-mismatch test changed the file's length, which an earlier check catches. Both tests now
+  isolate the property. Two more were dropped as equivalent: a zero `before` already fails the
+  fetch, and a file named `x.plugin` is no document.
+- **Other gates:**
+  - ruff is clean on the whole tree.
+  - bandit has 0 new findings against the rewritten baseline, with the new files scanned and
+    `plugins/` left out as the workflow now leaves it. Its count check first found one B311 in
+    the new scanner tests, a seeded `random` making an encoded blob; the blob is now made from
+    hashes.
+  - gitleaks is clean on an export of the tracked and new files, with CI's config.
+  - pip-audit was not run on the harness's locks, since none moved; the new
+    `scripts/plugin-ci-requirements.txt` is audited by `plugins.yml`.
+- **Measured against the real services:** PyPI's JSON API and OSV's batch API, through the
+  scanner, for four pins: 1.2 s, two packages with advisories, one name not on PyPI and one
+  typosquat, as expected.
+- **Not done here:**
+  - the workflows have not run on GitHub; the owner pushes this branch, since the agent's token
+    cannot push `.github/workflows/`. The first real pull request is the first test of
+    `plugin-review.yml`'s token reading a collaborator's permission, and of `plugins.yml` on a
+    runner's rootful Docker;
+  - no Podman run of `plugin_ci.py test`;
+  - no TUI screenshot of the modal's scanner lines, which are the same `ConfirmScreen` text.
+
+## Batch 253 — Plugins, slice 5: install from Git (2026-11-09)
+
+The owner chose the remote's default branch and the option to select a plugin subfolder.
+`/plugin install --from <git-url> [--path <name.plugin>]` and the corresponding `info`
+command accept HTTPS and SSH clone URLs. Git uses the user's configured authentication.
+The harness rejects inline credentials and does not display Git's diagnostics.
+
+`core/plugin_source.py` reads the selected tree from a temporary bare shallow clone and
+reads the blobs without checking out the repository. The format checks names, sizes and
+file types before the blobs reach the scanner. The existing unreviewed prompt shows the
+remote, folder and full commit ID, and the registry saves that provenance on acceptance.
+
+The offline tests use real Git repositories to check default-branch selection, root and
+subfolder installs, refusal, and the exact installed bytes. They also check that symlinks,
+submodules and a Git URL rewrite to the local file transport are refused. Live private
+repository authentication was not exercised.
+
+The pinned Windows environment ran the full offline suite: 10058 passed and 98 skipped.
+Ruff, Bandit and Gitleaks passed.
+
+## Batch 254 — Plugin integration before the first marketplace entry (2026-11-09)
+
+The owner deferred the first marketplace plugin while slices 1–5 are prepared to merge.
+The three plugin container tests now check Docker's mode on Windows, using the same probe as
+the demo bundle test. A Windows Docker daemon can answer successfully while serving only
+Windows images. The hosted Windows job accepts these Linux container skips; the Linux
+job still requires the tests to run. All three passed on Docker Desktop in Linux mode.
+With the daemon probe returning Windows mode, all three skipped with the expected reason.
+The full offline suite passed again: 10058 passed, 98 skipped.

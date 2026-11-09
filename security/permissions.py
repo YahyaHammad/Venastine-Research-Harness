@@ -52,6 +52,13 @@ APPROVAL_BY_SHELL_MODE = frozenset({"shell", "shell_background",
                                     "shell_interactive"})
 
 
+#: The names that exist only once something third-party is connected or
+#: installed: an MCP server's tools (§17) and, since ROADMAP_v3 §94 slice
+#: 2, a plugin's (PL20). Neither can ever have a declared field, and both
+#: are allowed but asked about by default, for the same reasons.
+DYNAMIC_PREFIXES = ("mcp__", "plugin__")
+
+
 def _default_for_unknown_tool(tool_name: str) -> bool:
     """Explicit, named default for tools with no declared field, rather
     than letting getattr's fallback decide by omission.
@@ -65,8 +72,12 @@ def _default_for_unknown_tool(tool_name: str) -> bool:
     and for statically registered tools, omission is caught outright by
     assert_permissions_declared() at import time (D24), so this branch
     should be unreachable for them.
+
+    A plugin's `plugin__<plugin>__<tool>` is allowed for the MCP reason:
+    its control point is the plugin's own trust modal (§94 PL15), and
+    `plugins_enabled` and `/plugin disable` are the switches over it.
     """
-    return tool_name.startswith("mcp__")
+    return tool_name.startswith(DYNAMIC_PREFIXES)
 
 
 def _default_for_unknown_approval(tool_name: str) -> bool:
@@ -80,9 +91,12 @@ def _default_for_unknown_approval(tool_name: str) -> bool:
     entries that installers appended.
 
     Everything else unknown defaults to not requiring approval, matching
-    the previous getattr fallback.
+    the previous getattr fallback. A plugin's tools ask for the same
+    reason an MCP server's do, and because the owner decided they should
+    (§94 PL23); `/plugin approval <id> auto` is the per-plugin opt-out,
+    set through set_dynamic_approval_default below.
     """
-    return tool_name.startswith("mcp__")
+    return tool_name.startswith(DYNAMIC_PREFIXES)
 
 
 # Base approval defaults for tools that cannot have a declared field --
@@ -218,7 +232,7 @@ def assert_permissions_declared(tool_names: Iterable[str]) -> None:
     missing = [
         name
         for name in tool_names
-        if not name.startswith("mcp__")
+        if not name.startswith(DYNAMIC_PREFIXES)
         and not (hasattr(permissions, name)
                  and (name in APPROVAL_BY_SHELL_MODE
                       or hasattr(approvals, name)))

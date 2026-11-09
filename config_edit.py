@@ -130,6 +130,21 @@ AUTHORITY_EFFECT = {
         "how likely a command may be to use the network, by the "
         "classifier's judgement, and still run without asking you. Higher "
         "lets more through."),
+    # ROADMAP_v3 §94 (PL10, PL11).
+    "plugins_enabled": (
+        "whether the plugins you installed load. Their skills and agents "
+        "become part of the model's instructions in every project you have "
+        "not turned them off in."),
+    "plugin_marketplace": (
+        "which GitHub repository /plugin install fetches plugins from, and "
+        "calls reviewed in its trust modal. What a plugin from there says "
+        "becomes part of the model's instructions once you install it."),
+    "plugin_tool_isolation": (
+        "where a plugin's tools and MCP servers run: in a container of their "
+        "own, or as a "
+        "process on this computer. As a process, only Linux can hold them "
+        "to the access you granted; elsewhere they can read, write and send "
+        "anything you can."),
     "allow_insecure_sandbox_fallback": (
         "whether a shell command may run WITHOUT the container when neither "
         "Docker nor Podman can run one -- on the host, with your files."),

@@ -39,7 +39,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ROADMAP_v3 §94 (PL32): a change whose every file is under plugins/
+  # runs none of this workflow's other jobs -- they show as skipped, which
+  # GitHub counts as passing -- and plugins.yml tests it instead. A job
+  # that decides, never a path filter on the trigger: deploy_gate.py
+  # refuses one, since a push could then leave this workflow unrun and the
+  # demo's gate would wait for it forever. Standard library and git only.
+  changes:
+    name: gate-compat-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      core: ${{ steps.changes.outputs.core }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          # A pull request's merge commit and its base, or a push's tip.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Which side the change touches
+        id: changes
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: python3 scripts/plugin_ci.py changes
+
   py313-info:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     continue-on-error: true
@@ -76,6 +104,8 @@ jobs:
         run: python -m pytest -q
 
   windows-subset:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     runs-on: windows-latest
     timeout-minutes: 15
 
@@ -104,8 +134,9 @@ jobs:
       # tests take the platform's own process tree, and the three uv tests
       # (ROADMAP_v3 §93) meet NTFS hardlinks and the npm launcher's spawn of
       # uv.exe, which no fake can stand in for. tests.yml's
-      # `integration` job runs the Linux half. The one skip allowed is the
-      # bundle image test: this runner's Docker builds Windows images only.
+      # `integration` job runs the Linux half. The bundle and plugin
+      # container tests may skip here because this runner's Docker builds
+      # Windows images only.
       - name: Run the integration tests
         shell: bash
         run: |
