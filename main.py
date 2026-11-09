@@ -3301,6 +3301,12 @@ def main(argv=None) -> int:
             f'.venastine/mcp.json, where the trust prompt covers them.')
 
     mcp = setup_mcp(project_path)
+    # ROADMAP_v3 §94, slice 2 (PL20). A plugin's tools, beside MCP's and for
+    # the same reason as there: before any grant is asked for, so the tools
+    # a research grant can cover are already named. Registering starts no
+    # runner; each plugin's starts on its first call.
+    from core import plugin_tools
+    plugin_tools.setup(project_path)
     # Batch 84. Set only by a `/config` write the user chose to apply. The
     # relaunch happens AFTER the teardown below, never from inside the TUI:
     # the MCP servers are subprocesses of this one and the database is open,
@@ -3411,6 +3417,14 @@ def main(argv=None) -> int:
         _close_sessions()
         from tools.registry import registry
         teardown_mcp(mcp, registry)
+        # The plugins' runners (§94 PL24). Their containers carry this
+        # process's label, so _close_sessions' sweep above has already
+        # ended them; this reaps the processes and removes their temporary
+        # folders.
+        try:
+            plugin_tools.teardown()
+        except Exception:          # noqa: BLE001 -- on the way out
+            logger.exception("Could not stop the plugins' runners")
     if isinstance(restart, config_edit.RestartRequest):
         # Everything this process held is closed. `replace_process` does
         # not return on POSIX.

@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§94. Plugins: skills, agents and settings from a reviewed marketplace** - **(NOT BUILT beyond slice 1: the format, the store, `/plugin` and its trust modal BUILT in batch 249; tools, MCP servers, the CI and the scanner, git URLs and a first plugin to come)** (the owner asked for plugins that add tools, skills, agents, MCP servers and settings without touching a core file, pulled from this repository's nested `plugins/` folder behind a trust modal, tested only when they change, and kept out of any pull request that touches anything else. A `.plugin` folder is a plugin; its manifest is read by the strictest parser in the tree; everything it adds is prefixed with its name; installs come from one resolved commit with every file checked against git's hash, live outside the install, and stop loading if a file changes; PL1-PL19)
+- **§94. Plugins: skills, agents and settings from a reviewed marketplace** - **(NOT BUILT beyond slice 2: the format, the store, `/plugin` and its trust modal BUILT in batch 249, and tools in a container per plugin, with locked dependencies, BUILT in batch 250; MCP servers, the CI and the scanner, git URLs and a first plugin to come)** (the owner asked for plugins that add tools, skills, agents, MCP servers and settings without touching a core file, pulled from this repository's nested `plugins/` folder behind a trust modal, tested only when they change, and kept out of any pull request that touches anything else. A `.plugin` folder is a plugin; its manifest is read by the strictest parser in the tree; everything it adds is prefixed with its name; installs come from one resolved commit with every file checked against git's hash, live outside the install, and stop loading if a file changes; PL1-PL19)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
 - **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
@@ -3066,8 +3066,8 @@ leaked PID.
 
 ## §94. Plugins: skills, agents and settings from a reviewed marketplace
 
-**Added in batch 249, from the owner's request; slice 1 BUILT in batch 249, slices 2-6 NOT
-BUILT.** A plugin adds tools (with their own dependencies), skills, agents, MCP servers and
+**Added in batch 249, from the owner's request; slice 1 BUILT in batch 249, slice 2 BUILT in
+batch 250, slices 3-6 NOT BUILT.** A plugin adds tools (with their own dependencies), skills, agents, MCP servers and
 settings of its own. It never touches a core file, and it cannot alter the core harness
 runtime; the harness may call into it, and nothing else. Plugins are pulled from GitHub, as the
 installers are, because the owner has no serving infrastructure. The marketplace is this
@@ -3130,7 +3130,7 @@ processes. The owner's rule was separate containers if the difference is minimal
    below.
 2. **Tools,** in a container per plugin, with their dependencies in a Linux venv built inside the
    shell's image at install. Workspace grants are per project, calls ask by default, and
-   `plugin_tool_isolation: container | process` is the fallback key.
+   `plugin_tool_isolation: container | process` is the fallback key. BUILT in batch 250, below.
 3. **MCP servers** in plugins, a local command running in the plugin's container.
 4. **CI.**
    - Core workflows skip plugin-only changes.
@@ -3218,7 +3218,24 @@ detail a slice needs. Ask before departing from any of them.
 - **Lifecycle, any slice.** `/plugin update` is manual, with no network check at startup; until it
   exists, a reinstall from the marketplace is the update (PL16).
 
-### Decisions (PL1-PL19)
+### Slice 2's answers (batch 250, 2026-11-09)
+
+Four questions the record above left open, asked before slice 2 was built; the owner took the
+recommendation each time.
+
+- **Where a tool's name, description and schema live:** in `plugin.yaml`, so the harness and the
+  trust modal learn every tool without running any of the plugin's code (PL20). Not the Python
+  module, which would have meant starting the plugin's container to list its tools, before the
+  yes.
+- **How strict the lock is:** every package, transitive ones included, pinned exactly with the
+  hash of each file it may install from, installed with `--require-hashes --only-binary=:all:`
+  (PL22), so what the modal lists is what installs.
+- **`process` isolation on Linux:** enforce the grant with Landlock and seccomp, or refuse the
+  call (PL25). Not best effort, and not unconfined.
+- **The opt-out from asking:** `/plugin approval <id> ask|auto`, kept in the store and never in
+  anything the plugin ships, with a warning at every launch while on (PL23).
+
+### Decisions (PL1-PL26)
 
 | id | decision |
 |---|---|
@@ -3226,7 +3243,7 @@ detail a slice needs. Ask before departing from any of them.
 | **PL2** | **The manifest is `plugin.yaml`, read by the strictest parser in the tree.** YAML's safe loader, with aliases refused, duplicate keys refused, every field typed, and unknown keys refused rather than ignored. The owner's reason for keeping settings out of `config.yaml` was a parser a plugin could steer, and this is the one file every plugin hands the harness to parse. No field may hold control, format (bidi, zero-width) or separator characters. A key YAML reads as a boolean (`on:`) is refused with a sentence that says so, because the file plainly says `on`. Every problem is reported, not the first |
 | **PL3** | **A plugin is `plugin.yaml`, `README.md`, an optional `LICENSE`, `skills/` (`.md`, nested), `agents/` (`.md`, flat) and `tests/`, and nothing else.** File names are portable, with no leading dot, no Windows-reserved name, no case-only collision, and no link. At most 300 files, 1 MB each and 5 MB together, sized from what skills are: the largest shipped skill is under 10 KB |
 | **PL4** | **Everything a plugin adds is prefixed with its name** (`example:checklist`). No plugin can shadow a builtin, a file the user wrote, or another plugin. Plugins are a tier between user and project (harness > user > plugin > project): below what you wrote, and above what arrived with a cloned directory, since a plugin passed its own trust modal. Skills are grouped in the catalog under the plugin's id. A silent `spawnable` reads as false, as for every non-harness tier |
-| **PL5** | **Slice 1 refuses a plugin that ships `tools/`, `mcp.json` or `requirements.txt`,** before the modal, naming what it ships. A plugin whose skills tell the model to call tools that do not exist would be half working, and the model would keep reaching for them (D24's reason) |
+| **PL5** | **Slice 1 refuses a plugin that ships `tools/`, `mcp.json` or `requirements.txt`,** before the modal, naming what it ships. A plugin whose skills tell the model to call tools that do not exist would be half working, and the model would keep reaching for them (D24's reason). Slice 2 took `tools/` and `requirements.txt` off the list (PL20, PL22); `mcp.json` waits for slice 3 |
 | **PL6** | **Settings are declared in the manifest, up to 32, as boolean, integer, number, string or choice,** each with a default that fits and a one-line description. The user's values live in `<store>/<name>/settings.json`, never in `config.yaml`. A stored value the schema no longer accepts falls back to the default with a note |
 | **PL7** | **Installed plugins live in `~/.config/venastine/plugins/`.** That is outside the install directory, so an update or reinstall of the harness never touches one, and inside the user tier, which the shell sandbox mounts read-only and the file tools refuse to write without asking |
 | **PL8** | **A changed file is a plugin that stops loading.** The registry holds the SHA-256 of every file the modal described, and every discovery checks them. A plugin whose files were edited, added or removed is left out, with a warning naming them, until it is installed again. That is D17's workspace-trust rule, applied to the second place third-party text reaches a system prompt from |
@@ -3241,6 +3258,13 @@ detail a slice needs. Ask before departing from any of them.
 | **PL17** | **Names are unique among installed plugins.** A plugin with an installed plugin's name and a different id is refused, naming the one to uninstall |
 | **PL18** | **`min_harness` is compared with this install's `package.json`,** by its base `X.Y.Z`, so a branch build compares as the release it came from |
 | **PL19** | **`/plugin` in the TUI offers subcommands, then installed ids, then a plugin's setting keys and values, through `/config`'s picker mechanism.** A free-form value is offered only into an empty slot, for `/config`'s reason. The panel never touches the network |
+| **PL20** | **A plugin's tools are declared in its manifest and named `plugin__<plugin>__<tool>`.** `tools:` lists up to 32, each a name (lowercase words joined by single `-` or `_`, starting with a letter), a description of up to 2000 characters, and an `input_schema` of type object, at most 16,384 characters as JSON and refused if YAML gives it anything JSON lacks. The whole name fits the providers' 64 characters. The code is `tools/<name>.py`, a hyphen written as an underscore, defining `run(params, context)`; every declared tool needs its file, and a `.py` file with no declared tool is refused. So the harness learns a plugin's tools without running any of its code, which was the owner's answer (batch 250), and the modal shows what the model will read. A plugin name holds no `_` and a tool name no `__`, so this prefix, unlike MCP's, splits one way only |
+| **PL21** | **What a plugin's tools may touch is declared, and granted per project on first use.** `access: {workspace: none\|read\|write, network: true\|false}` defaults to nothing and is a ceiling. The first call in a project asks: Allow grants the declaration there, and anything else grants nothing. Either answer is kept in `projects.json`. With nobody to ask, the tool runs with nothing and nothing is kept, so the question waits for a person. `/plugin access <id> none\|read\|write \| network on\|off` changes the grant, never past the declaration, and stops the runner so the next call has the new mounts or walls. Every call caps the stored grant by the manifest again, so a narrower reinstall narrows it |
+| **PL22** | **Dependencies are a full lock with hashes, built after the yes.** `requirements.txt` holds only `name==version` lines with `--hash=sha256:`, plus comments and blank lines; options, URLs, `-r`, `-e` and environment markers are refused (owner, batch 250). pip installs it with `--require-hashes --only-binary=:all:` into a fresh folder in the store, after the modal's yes and before the commit, so a lock pip refuses installs nothing. Under `container` it builds inside the sandbox image, with `--user` on a rootful Docker so the store stays removable; under `process` it builds for this Python. The registry records the isolation, the image's id or the Python's tag, and a digest of the build. A tool whose build does not match where it would run refuses and says to reinstall, rather than run on it |
+| **PL23** | **A plugin's tool calls ask, unless `/plugin approval <id> auto`.** The owner's default. It is set as each tool's base approval default, the way MCP's `autoApprove` is, so a context can still tighten it. The choice is stored in `<store>/<name>/approval.json`, never in the plugin's files or settings. It is logged as a warning at every launch while on, and an uninstall without `--purge` keeps it |
+| **PL24** | **The runner is the harness's own program, one per plugin per session, in the shell's container.** `core/plugin_runner.py`, standard library only, started with `python -I -S -B` and mounted read-only. It starts on the plugin's first call and is kept alive. It speaks JSON lines over stdin and stdout, and settings travel with every call. The protocol runs on private copies of both descriptors. Descriptor 1 points at stderr, so a `print` cannot corrupt a reply. Descriptor 0 points at the null device, because on Windows a child inheriting the pipe that the reader thread is blocked on hangs (measured). A result is at most 1 MB of JSON. A call is bounded by `sandbox_timeout_seconds`, after which the runner is killed and the next call starts another, and an idle runner exits after 30 minutes. The container is `_docker_argv`'s: the workspace mount is none, `:ro` or read-write to match the grant; the runner, the plugin and its build are mounted read-only; it adds `-i` and keeps every limit and label the shell's have. Each new keyword defaults to what the shell sent, so the shell's argv is unchanged. Killing `docker run -i`'s client ended the container within a second under Docker 29.7.2 and Podman 5.7, so no `timeout` wrapper is needed |
+| **PL25** | **`plugin_tool_isolation: container \| process`, an authority key, defaults to container.** `process` runs each plugin's runner on the host, with a scrubbed environment and a private temporary folder. On Linux the runner confines itself before it imports a line of the plugin, or refuses every call with the reason (owner, batch 250). Landlock lets it read beneath the interpreter, the plugin, its build and the system's libraries, read or write the workspace as granted, and write its temporary folder; no home directory and no `/proc` is reachable. A seccomp filter allows a socket only of AF_INET or AF_INET6, and only with the network granted. So never a UNIX socket, since Docker's is root on the host. It also refuses tracing, mounting and the kernel's control surfaces. Starting a process stays allowed, because a child inherits both walls. On WSL's 6.6 kernel, whose Landlock is ABI 3 with no TCP rules, the filter is the whole network wall. Off Linux nothing confines the runner, and the modal and `/plugin info` say so in capitals |
+| **PL26** | **Tools come and go with their plugin.** They are registered at startup after MCP, without starting a runner, and a container's tools are not advertised while neither Docker nor Podman is available. Install, reinstall, uninstall, disable and enable re-register every plugin's tools and stop every runner, so none outlives the code it ran. `plugin__` joins `mcp__` as a dynamic prefix in `security/permissions.py`: allowed, asked by default, and exempt from the declared-field check. A changed file unloads the tools with the skills, and a call to one says what changed. The containers carry the process's label, so the exit sweep ends them |
 
 ### Built and measured (slice 1, batch 249, 2026-11-08)
 
@@ -3262,11 +3286,57 @@ detail a slice needs. Ask before departing from any of them.
     the refusal was right, so its sentence now names the cause;
   - a nested plugin is left out of a listing's counts, as PL1 says.
 
+### Built and measured (slice 2, batch 250, 2026-11-09)
+
+- **Measured before building:**
+  - Killing `docker run -i`'s client ended the container within a second under Docker Desktop
+    29.7.2 and rootless Podman 5.7, and closing its stdin ended it at once.
+  - pip's `--target` install into a bind mount works on both, from Windows too, with no links in
+    what it writes, and imports back from a read-only mount under `python -I -S`.
+  - WSL's 6.6 kernel offers Landlock ABI 3, which has no TCP rules, so the network wall there is
+    the seccomp filter.
+- **The modules:**
+  - `core/plugin_tools.py`: registration, the grant, the runner's lifecycle and the
+    dependency build;
+  - `core/plugin_runner.py`: the runner;
+  - `security/confine.py`: the plugin profile, `plugin_lock_down` with `plugin_rules` and
+    `plugin_seccomp_program`, beside the math child's;
+  - `security/sandbox.py`: `_docker_argv`'s new keywords.
+- **The format, store and command:**
+  - `core/plugin_format.py` gains `tools`, `access` and the lock;
+  - `core/plugin_store.py` gains grants, the approval choice and the build's folder and record;
+  - `core/plugin_commands.py` gains the modal's tool lines, the build after the yes,
+    `/plugin access` and `/plugin approval`.
+- **The guide:** `docs/PLUGINS.md` covers tools, access and the lock. The template gains a tool,
+  `outline`, which a test installs and calls.
+- **Found by running it.** A tool that started a child process hung for 60 seconds on Windows.
+  The child inherited the runner's stdin, the protocol pipe its reader thread was blocked on,
+  and synchronous I/O on one pipe handle is serialised there. The runner now reads the protocol
+  from a private copy and points descriptor 0 at the null device (PL24).
+- **Run end to end.** The same plugin was installed from a folder and called three ways:
+  - `process` on Windows (unconfined, as the modal warns);
+  - `process` on WSL, where the write and the socket were refused and the read granted;
+  - a Docker container, with a locked `six` built by pip in the image, the workspace read-only,
+    and no network.
+
 ### Gap register
 
 - **No live marketplace install.** `plugins/` holds no plugin yet; the fetch is tested against a
   local server in GitHub's shapes, the choice §56 made. Slice 6 is the first real one.
-- **Settings are stored and validated, and read by nothing** until slice 2's tools.
+- ~~**Settings are stored and validated, and read by nothing** until slice 2's tools.~~ A
+  plugin's tools read them on every call since batch 250.
+- **A lock resolved for Linux may not install under `process` elsewhere.** Markers are refused
+  (PL22), so a lock is one platform's; a package that needs another dependency on Windows or
+  macOS fails there at install, by pip's sentence. The guide says to note it in the README.
+- **A container's first start holds the plugin table's lock,** so a second plugin's first call
+  waits for it: a second at most, measured, and longer while an image is pulled.
+- **`process` isolation refuses every call on Linux off x86_64,** since the seccomp filter's
+  numbers are that architecture's, the all-or-nothing rule the math child has.
+- **A write grant on a rootful Docker writes files as root,** as the shell's commands do.
+- **A build's digest is checked when its runner starts,** not on every call; a running runner
+  has already read what was checked.
+- **The `integration` job runs the container test on Docker only.** Podman was run by hand for
+  the measurements above, not for the whole tool path.
 - **The 60-an-hour limit is GitHub's,** shared with anything else on the same address. A
   listing costs three API requests and one raw request per plugin described, and installs reuse
   a listing for five minutes.
@@ -3276,8 +3346,8 @@ detail a slice needs. Ask before departing from any of them.
   Windows box; CI's Linux runs it.
 - **`plugins/` is in the GitHub installer's copy of the repository** (the whole zip), where nothing
   reads it. npm's file list leaves it out.
-- **Once plugins hold `.py` files** (slice 2), the docs gate's production-module walk and the
-  core lint and bandit jobs must leave `plugins/` to `plugins.yml` (slice 4).
+- **Once plugins hold `.py` files** (possible since slice 2), the docs gate's production-module
+  walk and the core lint and bandit jobs must leave `plugins/` to `plugins.yml` (slice 4).
 - **A merged plugin moves `read_project_doc`'s counted bound.** Its README sits at depth 2 or 3,
   inside the bound AGENTS.md states (68 files after this batch), so the first plugin merged would
   turn `test_the_documented_doc_read_bound_is_not_understated` red on `main`. Slice 4 decides:

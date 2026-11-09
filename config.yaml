@@ -617,6 +617,18 @@ plugins_enabled: true
 # modal calls reviewed.
 plugin_marketplace: YahyaHammad/Venastine-Research-Harness
 
+# AUTHORITY -- where a plugin's tools run. container (the default): each
+# plugin in a container of its own, from sandbox_docker_image, with the
+# shell's limits, no network and no workspace unless the project granted
+# them; it needs Docker or Podman. process: each plugin as a process of its
+# own on this computer, with its dependencies built for this Python. On
+# Linux the process holds itself to the grant with Landlock and seccomp, or
+# refuses every call; on Windows and macOS NOTHING holds it, and its code
+# can read, write and send anything you can. Changing this means
+# reinstalling a plugin that has dependencies, which are built for one or
+# the other.
+plugin_tool_isolation: container
+
 # ======================================================================
 # Network limits
 # ======================================================================

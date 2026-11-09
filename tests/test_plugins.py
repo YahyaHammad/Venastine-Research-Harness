@@ -487,21 +487,23 @@ class TestTheFiles:
         assert "no plugin.yaml" in problems and "no README.md" in problems
 
     def test_what_later_slices_run_is_named_not_refused_here(self):
+        """Slice 2 took tools and dependencies off PL5's list; MCP servers
+        wait for slice 3."""
         problems, later = plugin_format.check_files(self._sizes(**{
             "tools/run.py": 1, "mcp.json": 1, "requirements.txt": 1}))
         assert problems == []
-        assert later == ["tools", "MCP servers", "Python dependencies"]
+        assert later == ["MCP servers"]
 
-    def test_validate_holds_back_a_valid_plugin_with_tools(self):
+    def test_validate_holds_back_a_valid_plugin_with_mcp_servers(self):
         """PL5: the install is refused, not half done."""
         with pytest.raises(NeedsLaterVersion) as caught:
-            plugin_format.validate("demo", plugin_files(more={"tools/x.py": b"pass"}))
-        assert caught.value.features == ["tools"]
+            plugin_format.validate("demo", plugin_files(more={"mcp.json": b"{}"}))
+        assert caught.value.features == ["MCP servers"]
 
     def test_an_invalid_plugin_is_reported_as_invalid_first(self):
         with pytest.raises(PluginFormatError) as caught:
             plugin_format.validate("demo", plugin_files(
-                version="x", more={"tools/x.py": b"pass"}))
+                version="x", more={"mcp.json": b"{}"}))
         assert not isinstance(caught.value, NeedsLaterVersion)
 
     def test_text_must_be_utf8(self):
@@ -746,8 +748,8 @@ class TestTheMarketplace:
             plugin_source.fetch("demo", github.REPO)
         assert github.raw_requests() == []
 
-    def test_tools_are_held_back_before_any_download(self, github):
-        github.add("demo", plugin_files(more={"tools/run.py": b"pass"}))
+    def test_mcp_servers_are_held_back_before_any_download(self, github):
+        github.add("demo", plugin_files(more={"mcp.json": b"{}"}))
         with pytest.raises(NeedsLaterVersion):
             plugin_source.fetch("demo", github.REPO)
         assert github.raw_requests() == []
@@ -869,8 +871,9 @@ class TestInstalling:
         record = plugin_store.installed()["demo"]
         assert record.id == "math/demo" and record.source["commit"] == github.COMMIT
 
-    def test_a_plugin_with_tools_is_refused_before_the_modal(self, project, github):
-        github.add("demo", plugin_files(more={"tools/run.py": b"pass"}))
+    def test_a_plugin_with_mcp_servers_is_refused_before_the_modal(
+            self, project, github):
+        github.add("demo", plugin_files(more={"mcp.json": b"{}"}))
         rec = run("install demo", answer=True)
         assert rec.asked == []
         assert "does not run yet" in rec.text

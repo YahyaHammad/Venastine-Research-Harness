@@ -139,6 +139,11 @@ AUTHORITY_EFFECT = {
         "which GitHub repository /plugin install fetches plugins from, and "
         "calls reviewed in its trust modal. What a plugin from there says "
         "becomes part of the model's instructions once you install it."),
+    "plugin_tool_isolation": (
+        "where a plugin's tools run: in a container of their own, or as a "
+        "process on this computer. As a process, only Linux can hold them "
+        "to the access you granted; elsewhere they can read, write and send "
+        "anything you can."),
     "allow_insecure_sandbox_fallback": (
         "whether a shell command may run WITHOUT the container when neither "
         "Docker nor Podman can run one -- on the host, with your files."),

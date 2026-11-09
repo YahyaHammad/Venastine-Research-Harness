@@ -6,7 +6,7 @@ format: 1
 name: example
 # Quote it, or YAML reads 1.0 as a number.
 version: "1.0.0"
-description: A worked example of the plugin format, with one skill, one agent and two settings.
+description: A worked example of the plugin format, with one skill, one agent, one tool and two settings.
 authors: [Venastine Research Harness contributors]
 # GitHub usernames asked to review a change to this plugin.
 maintainers: []
@@ -19,10 +19,32 @@ settings:
     type: choice
     choices: [brief, full]
     default: brief
-    description: How much the example's tools would write.
+    description: How much the outline tool writes.
   max_items:
     type: integer
     default: 5
     min: 1
     max: 20
-    description: The longest list the example's tools would return.
+    description: The longest outline the outline tool returns.
+# What the model can call. Each tool's code is tools/<name>.py (a hyphen
+# in the name becomes an underscore), with a run(params, context)
+# function. The harness reads this list without running any of it.
+tools:
+  - name: outline
+    description: >-
+      Turn a list of points into a short outline, numbered when the
+      plugin's detail setting is full, and no longer than its max_items
+      setting allows.
+    input_schema:
+      type: object
+      properties:
+        points:
+          type: array
+          items: {type: string}
+          description: The points, in order.
+      required: [points]
+# What its tools may touch. This one needs neither, so it asks for
+# neither; a tool that reads files would say workspace: read.
+access:
+  workspace: none
+  network: false

@@ -15,6 +15,23 @@ other name.
 
 ---
 
+## Plugins, slice 2: tools (batch 250)
+
+| Change | Test | Fix |
+|---|---|---|
+| Run a plugin's code to learn its tools | `test_a_tool_is_read_without_running_its_code` | PL20: the manifest declares every tool |
+| Name a plugin tool anything but `plugin__<plugin>__<tool>`, or past 64 characters | `test_the_whole_name_is_held_to_the_providers_64`, `test_the_prefix_comes_apart_one_way` | PL20 |
+| Accept a requirements line that is not an exact pin with a hash | `test_anything_but_a_hashed_pin_is_refused` | PL22: a full lock, installed with `--require-hashes --only-binary=:all:` |
+| Build dependencies before the yes, or commit after pip refused | `test_the_build_comes_after_the_yes`, `test_a_failed_build_installs_nothing` | PL22 |
+| Mount the workspace or open the network past the project's grant, or the grant past the manifest | `test_a_read_grant_mounts_it_read_only`, `test_a_stored_grant_is_capped_by_a_narrower_reinstall`, `test_access_cannot_pass_the_declaration` | PL21 |
+| Let a plugin tool run unasked without `/plugin approval auto` | `test_a_plugin_tool_is_allowed_and_asks_by_default`, `test_auto_approval_is_per_plugin_and_at_once` | PL23 |
+| Change the shell's container argv while adding a plugin path | `test_the_shells_argv_is_unchanged_by_default`, and the argv tests in `tests/test_shell.py` | PL24: each new `_docker_argv` keyword defaults to what the shell sent |
+| Let a child of the runner inherit the protocol's pipe | `test_a_tool_may_start_a_process` | PL24: the runner reads a private copy and points descriptor 0 at the null device; on Windows a child inheriting the pipe hangs |
+| Run `process` isolation on Linux without its walls, or let a UNIX socket through | `TestTheWallsHold`, `test_never_a_unix_netlink_or_packet_socket` | PL25: enforce, else refuse |
+| Keep a runner across a reinstall, an access change or an uninstall | `test_reinstalling_replaces_the_runner`, `test_access_changes_the_grant_and_restarts_the_runner`, `test_uninstall_and_disable_remove_the_tool` | PL26 |
+| Add a module-level table to `core/plugin_tools.py` | `tests/test_process_memos.py` | Reset it in `plugin_tools.reset()`, which `PROCESS_MEMOS` calls |
+| Add a key under the Plugins block of `config.yaml` | `test_the_key_is_an_authority_key_with_a_sentence`, `test_the_config_command_gates_every_posture_key` | As slice 1's row below; the counts are 24 authority keys and 171 settable scalars |
+
 ## Plugins, slice 1 (batch 249)
 
 | Change | Test | Fix |
@@ -22,7 +39,7 @@ other name.
 | Load a manifest with `yaml.safe_load`, or let an alias, a repeated key or an unknown field through | `test_aliases_are_refused`, `test_a_repeated_key_is_refused`, `test_an_unknown_key_is_refused_not_ignored` | The manifest parser is part of the boundary (PL2); keep `plugin_format.load_yaml` |
 | Load a plugin whose files changed since install | `test_a_changed_plugin_does_not_load` | `plugin_store.loadable` checks every recorded hash (PL8) |
 | Load a plugin's skill or agent under its bare name | `test_skills_and_agents_load_under_the_plugin_name`, `test_a_plugin_cannot_shadow_a_builtin` | Everything a plugin adds is prefixed (PL4); `_plugin_definition` renames |
-| Install a plugin that ships tools, MCP servers or dependencies before slices 2-3 | `test_a_plugin_with_tools_is_refused_before_the_modal`, `test_tools_are_held_back_before_any_download` | PL5 until those slices land; then this row goes |
+| Install a plugin that ships MCP servers before slice 3 | `test_a_plugin_with_mcp_servers_is_refused_before_the_modal`, `test_mcp_servers_are_held_back_before_any_download` | PL5 until slice 3 lands; then this row goes. Slice 2 (batch 250) took tools and dependencies off the list |
 | Download a file before the tree is checked, or skip the blob hash | `test_a_link_in_the_tree_is_refused_before_any_download`, `test_a_byte_that_differs_from_the_commit_is_refused` | PL12 |
 | Build the modal from the files rather than the staged parse | `test_the_modal_lists_what_will_load`, `test_a_broken_skill_refuses_the_install` | PL15: `config_loader.preview_plugin` |
 | Write anything before the yes | `test_no_writes_nothing`, `test_an_interrupted_cli_question_is_a_no` | Stage, ask, then commit (PL15) |

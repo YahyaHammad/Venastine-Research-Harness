@@ -2609,8 +2609,36 @@ def _docker_argv(
     *,
     session_timeout_s: Optional[int] = None,
     prompt_token: str = "",
+    workspace_access: str = "rw",
+    mounts: tuple = (),
+    keep_stdin: bool = False,
+    program: Optional[list] = None,
+    labels: tuple = (),
+    env: tuple = (),
+    user: Optional[str] = None,
 ) -> list[str]:
     """The container command line, for a one-shot run and for a session.
+
+    ROADMAP_v3 §94 (PL24) adds a plugin's tool runner and its dependency
+    build as callers, through the keyword arguments after *prompt_token*,
+    whose defaults are exactly what every shell path sent before them --
+    so a plugin's container is this function's container, with the
+    workspace mount narrowed and nothing widened:
+
+      workspace_access   "rw" (the shell's), "ro" for a read grant, or
+                         "none": no workspace mount at all, and so none of
+                         the read-only binds that protect paths inside it.
+      mounts             (host, container, "ro"|"rw") binds: the runner,
+                         the plugin's files and its dependencies, all
+                         read-only; only the build writes, into a fresh
+                         folder the store then moves into place.
+      keep_stdin         `-i`, the runner's JSON-lines pipe.
+      program            the argv after the image, in place of `bash -c`.
+      labels, env, user  which plugin a container is, its environment,
+                         and the build's `--user` on a rootful Docker.
+
+    The limits, the process label, `--network none` unless asked, the
+    image and PATH are not parameters, because no caller may change them.
 
     ONE builder (ROADMAP_v3 §49), so a background session cannot come to
     run in a laxer container than a one-shot command: a `--network none`
@@ -2660,7 +2688,17 @@ def _docker_argv(
                          always the one measured here rather than whatever
                          the text happened to start.
     """
+    if workspace_access not in ("rw", "ro", "none"):
+        raise ValueError(f"workspace_access is rw, ro or none, not "
+                         f"{workspace_access!r}")
     workspace_real = os.path.realpath(workspace_dir)
+    if workspace_access == "none":
+        workspace_mount = ["-w", "/tmp"]  # nosec B108 - the container's own /tmp, inside the container
+    else:
+        workspace_mount = [
+            "-v", f"{workspace_real}:/workspace"
+            + (":ro" if workspace_access == "ro" else ""),
+            "-w", "/workspace"]
 
     docker_args = [
         runtime, "run", "--rm",
@@ -2674,31 +2712,47 @@ def _docker_argv(
         # may run at once, so cleaning up "our" containers by the label
         # above would kill the other's sessions; this one scopes it.
         "--label", f"venastine.process={PROCESS_TOKEN}",
-        "-v", f"{workspace_real}:/workspace",
-        "-w", "/workspace",
+        *workspace_mount,
         "--memory", f"{config.SANDBOX_MEMORY_MB}m",
         "--cpus", "1",
         "--pids-limit", str(config.SANDBOX_MAX_PIDS),
     ]
-    if session_timeout_s is not None:
+    for label in labels:
+        docker_args.extend(["--label", label])
+    if user:
+        docker_args.extend(["--user", user])
+    if session_timeout_s is not None or keep_stdin:
         docker_args.append("--sig-proxy=false")
-    if prompt_token:
+    if prompt_token or keep_stdin:
         docker_args.append("-i")
 
     if not network:
         docker_args.append("--network")
         docker_args.append("none")
 
-    docker_args.extend(_venastine_readonly_mount(workspace_real))
-    # Kept separate from the line above because the two answer different
-    # questions: that one protects a PROJECT's `.venastine/`, this one
-    # protects the HARNESS -- its source, and the user-tier state that
-    # decides what it trusts and what it spawns. See
-    # security/protected_paths.py for the geometry and its limits.
-    docker_args.extend(protected_paths.readonly_mounts(workspace_real))
+    if workspace_access != "none":
+        docker_args.extend(_venastine_readonly_mount(workspace_real))
+        # Kept separate from the line above because the two answer
+        # different questions: that one protects a PROJECT's
+        # `.venastine/`, this one protects the HARNESS -- its source, and
+        # the user-tier state that decides what it trusts and what it
+        # spawns. See security/protected_paths.py for the geometry and
+        # its limits.
+        docker_args.extend(protected_paths.readonly_mounts(workspace_real))
+    for host, inside, mode in mounts:
+        if mode not in ("ro", "rw"):
+            raise ValueError(f"a mount is ro or rw, not {mode!r}")
+        docker_args.extend(["-v", f"{os.path.realpath(host)}:{inside}"
+                            + (":ro" if mode == "ro" else "")])
 
     docker_args.extend(["-e", "PATH=/usr/bin:/bin:/usr/local/bin"])
+    for pair in env:
+        docker_args.extend(["-e", pair])
     docker_args.append(config.SANDBOX_DOCKER_IMAGE)
+    if program is not None:
+        # §94 (PL24). A plugin's argv is the harness's own runner or pip,
+        # never text a model wrote, so it takes no shell and no wrapper.
+        return docker_args + list(program)
     if session_timeout_s is not None:
         docker_args.extend(["timeout", "-k", "10", str(session_timeout_s)])
     if prompt_token:

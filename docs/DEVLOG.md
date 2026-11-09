@@ -31449,3 +31449,106 @@ marketplace holds no plugin.
   - no install from the real marketplace, which holds no plugin yet (slice 6);
   - no Linux run, which CI does;
   - no TUI screenshot of the modal, which `ConfirmScreen` draws as for `/init` and `/forget`.
+
+## Batch 250 -- Plugins, slice 2: tools, in a container per plugin (2026-11-09)
+
+**Asked.** The owner asked to start slice 2 of the plugin system, a plugin's tools, from the
+record ROADMAP_v3 §94 kept so a later slice needs no transcript.
+
+**Four answers first.** Through the question tool, before anything was built. The owner took the
+recommendation each time:
+
+- a tool's name, description and schema live in `plugin.yaml`, not in its Python module, so
+  nothing of a plugin runs to describe it;
+- `requirements.txt` is a full lock with hashes, installed with `--require-hashes
+  --only-binary=:all:`;
+- `process` isolation on Linux enforces the grant with Landlock and seccomp, or refuses the call;
+- the opt-out from asking is `/plugin approval <id> ask|auto`, kept in the store.
+
+**Measured first.**
+
+- Killing `docker run -i`'s client ended the container within a second under Docker Desktop
+  29.7.2 and rootless Podman 5.7, and closing its stdin ended it at once. So the runner needs no
+  `timeout` wrapper; it has an idle exit as a backstop.
+- pip's `--target` install into a bind mount works under both, from Windows too, with no links in
+  what it writes, and imports back from a read-only mount under `python -I -S`.
+- WSL's 6.6 kernel has Landlock ABI 3, which has no TCP rules, so the network wall there has to
+  be seccomp's.
+
+**Built.** Decisions PL20-PL26 in §94.
+
+- **The format:** `tools:` and `access:` in the manifest, read by the same strict parser, and the
+  lock's parser (PL20-PL22). Tools and `requirements.txt` leave PL5's list; `mcp.json` stays on
+  it.
+- **The runner,** `core/plugin_runner.py`: the one program that runs a plugin's code, standard
+  library only, mounted read-only in the container (PL24).
+- **The host side,** `core/plugin_tools.py`:
+  - registration as `plugin__<plugin>__<tool>`, asking by default;
+  - the grant asked on a plugin's first call in a project;
+  - one runner per plugin per session, in a container from the shell's own `_docker_argv` or a
+    process of its own;
+  - the dependency build after the yes, and the record of what it was built for (PL21-PL26).
+- **The walls,** `security/confine.py`'s plugin profile: Landlock to the grant, and a seccomp
+  filter that admits only internet sockets, only with the network (PL25).
+- **The store:** grants per project, the approval choice, and the build's folder beside the
+  files.
+- **`/plugin`:** the modal lists tools, access and the lock; `access` and `approval` are new.
+- **One authority key,** `plugin_tool_isolation`. `plugin__` joins `mcp__` as a dynamic prefix in
+  `security/permissions.py`.
+- **The guide** covers tools, access and the lock, and the template gains a tool.
+
+**Found by running it.**
+
+- A tool that started a child process hung for a minute on Windows. The child inherited the
+  runner's stdin, the pipe its reader thread was blocked on, and Windows serialises synchronous
+  I/O on one pipe handle. The runner now reads the protocol from a private copy and points
+  descriptor 0 at the null device.
+- The first Landlock-rules test asked for no path under `/home`, and on WSL a user site-packages
+  is one. The rule that matters is that no rule covers the home directory or anything above it,
+  which is what the test now asks.
+
+**Not changed.** No workflow file. No MCP code: `mcp.json` in a plugin is still refused. The
+marketplace holds no plugin.
+
+**Verification.**
+
+- **Full suite:**
+  - Run on Windows with `AGENT_WORKSPACE` unset, after the same setup as tests.yml's checkout. The
+    venv the last batches used had lost its `python.exe`, so a fresh one was built from
+    `requirements.txt` and `requirements-test.txt`.
+  - Result: 9668 passed, 94 skipped, none failed. That is 9762, the stated count.
+- **The first full run failed 3 tests,** none a behaviour break: the stated test count, the
+  settable-scalar count (170 to 171), and the production-module tree. That last one was the
+  template's `tools/outline.py`, the first `.py` file in a plugin. Slice 1's gap register
+  predicted it; the tree names it now.
+- **The new tests:** 290 in `tests/test_plugin_tools.py`, and one more marked `integration`.
+  - On Windows, 5 skip: the walls tests, which need Landlock.
+  - On WSL the file passes whole, the walls included, and so do `tests/test_plugins.py` and
+    `tests/test_confine.py` beside it: 554 passed there before the last 16 cases were added.
+  - The `integration` test passed against Docker Desktop: a plugin tool in a real container, with
+    `six` built by pip in the image, read-only then read-write, and no container left after.
+- **Breakages:** 33 of 33 deliberate breakages each turned a named test red, 32 on Windows and
+  the one only Linux can catch (confinement switched off) on WSL. Two of the first answers were
+  wrong and were fixed before the pass:
+  - turning off `ptrace`'s denial survived, because the test read the denied calls from the list
+    it was checking. A test now spells out eight of them by number.
+  - removing the runner's `dup2` of descriptor 1 survived, because the probe tool only called
+    `print()`, which the runner's `sys.stdout` swap already redirects. The tool now writes to
+    descriptor 1 directly, as C code would.
+- **Other gates:**
+  - ruff is clean on the whole tree.
+  - bandit has 0 new findings against the rewritten baseline, with the new files scanned, and its
+    count check is green. The first run found two LOW findings in the new test file, an import
+    of `subprocess` and the integration test's `ps`, now annotated as the other tests are.
+  - gitleaks is clean on an export of the tracked and new files, with CI's config.
+  - pip-audit was not run, since no dependency of the harness moved.
+- **End to end, outside the suite:** a tool plugin was installed from a folder into a throwaway
+  HOME and called through `/plugin`'s own path three times: `process` on Windows, `process` on
+  WSL, and in a Docker container. The second showed the write and the socket refused and the
+  read granted; the third built `six` with pip in the image.
+- **Not done here:**
+  - no Linux Docker run, which CI's `integration` job does; that is where `--user` on a rootful
+    Docker is exercised;
+  - no Podman run of the whole tool path, only of the measurements;
+  - no TUI screenshot of the grant question, which is the `ConfirmScreen` the other CONFIRM
+    questions use.

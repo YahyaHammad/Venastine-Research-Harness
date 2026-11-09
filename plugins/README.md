@@ -19,7 +19,8 @@ There are no plugins here yet.
 ## Adding one
 
 [`docs/PLUGINS.md`](../docs/PLUGINS.md) is the guide: the folder convention, the manifest,
-the settings, and how to try a plugin from your own folder first.
+the settings, the tools and their locked dependencies, and how to try a plugin from your
+own folder first.
 [`docs/plugin-template/example.plugin`](../docs/plugin-template/example.plugin/) is a
 worked example to copy.
 

@@ -322,7 +322,8 @@ class TestTheRoundTripIsLossless:
         # bounds, `fetch_max_html_mb` and `fetch_max_pdf_mb`. 168 since
         # batch 248: ROADMAP_v3 §56's ten `shell_classifier_*` keys. 170
         # since batch 249: §94's `plugins_enabled` and `plugin_marketplace`.
-        assert touched == 170, f"{touched} settable scalars, expected 170"
+        # 171 since batch 250: §94's `plugin_tool_isolation` (PL25).
+        assert touched == 171, f"{touched} settable scalars, expected 171"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

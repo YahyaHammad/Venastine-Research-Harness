@@ -22,10 +22,11 @@ the first, a loader keeps the last), every field typed, and every unknown
 key refused rather than ignored.
 """
 
+import json
 import math
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 import yaml
@@ -74,17 +75,39 @@ MAX_FILE_BYTES = 1_000_000
 MAX_TOTAL_BYTES = 5_000_000
 MAX_MANIFEST_BYTES = 64 * 1024
 
+#: Slice 2 (PL20-PL22). A plugin's Python dependencies: a full lock, every
+#: package pinned exactly and by the hash of what installs.
+REQUIREMENTS = "requirements.txt"
+
 #: The top level of a plugin, and nothing else may sit there (PL3).
-TOP_LEVEL = frozenset({MANIFEST, README, LICENSE, "skills", "agents", "tests"})
+TOP_LEVEL = frozenset({MANIFEST, README, LICENSE, REQUIREMENTS, "skills",
+                       "agents", "tools", "tests"})
 
 #: PL5. What later slices of §94 run, by the top-level name that carries
 #: it. A plugin holding any of them is refused by this version, before the
-#: trust modal, rather than installed with half of what it is.
+#: trust modal, rather than installed with half of what it is. Slice 2
+#: took tools and dependencies off this list.
 NOT_YET = {
-    "tools": "tools",
     "mcp.json": "MCP servers",
-    "requirements.txt": "Python dependencies",
 }
+
+#: PL20. Every tool a plugin adds is `plugin__<plugin>__<tool>`. A plugin
+#: name never holds `_` and a tool name never holds `__`, so unlike
+#: `mcp__<server>__<tool>` this prefix CAN be taken apart again.
+TOOL_PREFIX = "plugin__"
+_TOOL_NAME = re.compile(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*")
+#: The providers' rule for a whole tool name, prefix included:
+#: `^[a-zA-Z0-9_-]{1,64}$` (mcp_client/registration.py has the sources).
+MAX_TOOL_NAME_CHARS = 64
+MAX_TOOLS = 32
+#: The two bounds mcp_client/registration.py puts on a third party's tool,
+#: for its reasons: both are paid on every model call.
+MAX_TOOL_DESCRIPTION_CHARS = 2000
+MAX_TOOL_SCHEMA_CHARS = 16384
+MAX_SCHEMA_DEPTH = 20
+#: PL21. What a plugin's tools may ask to touch.
+WORKSPACE_ACCESS = ("none", "read", "write")
+MAX_REQUIREMENTS = 200
 
 _VERSION = re.compile(r"(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})")
 _HANDLE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
@@ -94,7 +117,8 @@ MAX_PEOPLE = 20
 MAX_PERSON_CHARS = 100
 
 _FIELDS = ("format", "name", "version", "description", "authors",
-           "maintainers", "license", "min_harness", "settings")
+           "maintainers", "license", "min_harness", "settings", "tools",
+           "access")
 _REQUIRED = ("format", "name", "version", "description", "authors",
              "license")
 
@@ -391,11 +415,305 @@ def problems_for(where: str, problems: list) -> bool:
     return any(p.startswith((where + ":", where + ".")) for p in problems)
 
 
+# ---- tools (slice 2) -----------------------------------------------------
+
+def tool_name(plugin: str, tool: str) -> str:
+    """The name the model calls a plugin's tool by (PL20)."""
+    return f"{TOOL_PREFIX}{plugin}__{tool}"
+
+
+def split_tool_name(full: str) -> Optional[tuple]:
+    """(plugin, tool) from `plugin__<plugin>__<tool>`, or None."""
+    if not full.startswith(TOOL_PREFIX):
+        return None
+    plugin, sep, tool = full[len(TOOL_PREFIX):].partition("__")
+    if not sep or not valid_name(plugin) or not _TOOL_NAME.fullmatch(tool):
+        return None
+    return plugin, tool
+
+
+@dataclass(frozen=True)
+class ToolDef:
+    """One tool a plugin declares in its manifest (PL20). Its code is
+    `tools/<module>.py`, whose `run(params, context)` the runner calls; the
+    harness learns everything else here without running any of it."""
+
+    name: str
+    description: str
+    input_schema: dict = field(hash=False)
+
+    @property
+    def module(self) -> str:
+        return self.name.replace("-", "_")
+
+    @property
+    def path(self) -> str:
+        return f"tools/{self.module}.py"
+
+
+@dataclass(frozen=True)
+class Access:
+    """What a plugin's tools ask to touch (PL21). A ceiling: the grant
+    made per project may be less, never more."""
+
+    workspace: str = "none"
+    network: bool = False
+
+    @property
+    def asks(self) -> bool:
+        return self.workspace != "none" or self.network
+
+
+def _layout_only(text: str) -> bool:
+    """`_invisible`, except that a newline or a tab is layout: a tool's
+    description is written for the model, and YAML's block scalars end
+    their lines with one."""
+    return not any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp")
+                   and ch not in "\n\t" for ch in text)
+
+
+def _json_like(value, depth: int = 0) -> Optional[str]:
+    """None when `value` is JSON a provider will take as a schema, else
+    why not. YAML can hold more than JSON can -- a date, a set, a
+    non-string key -- and a schema that will not serialise is a tool that
+    fails on the first model call rather than here."""
+    if depth > MAX_SCHEMA_DEPTH:
+        return f"nests deeper than {MAX_SCHEMA_DEPTH} levels"
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return None if _number(value) else "holds a number JSON cannot"
+    if isinstance(value, str):
+        return None if _layout_only(value) else (
+            "holds control or invisible characters")
+    if isinstance(value, list):
+        for item in value:
+            why = _json_like(item, depth + 1)
+            if why:
+                return why
+        return None
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str) or isinstance(key, bool):
+                return f"has the key {key!r}, which is not text"
+            if not _layout_only(key):
+                return "has a key with control or invisible characters"
+            why = _json_like(item, depth + 1)
+            if why:
+                return why
+        return None
+    return f"holds a {type(value).__name__}, which JSON has no form for"
+
+
+def _parse_tools(plugin: str, raw, problems: list) -> tuple:
+    if not isinstance(raw, list) or not raw:
+        problems.append("tools: a list of 1 to "
+                        f"{MAX_TOOLS} tools, each with a name, a description "
+                        "and an input_schema")
+        return ()
+    if len(raw) > MAX_TOOLS:
+        problems.append(f"tools: at most {MAX_TOOLS}")
+        return ()
+    out, names, modules = [], set(), set()
+    for index, spec in enumerate(raw):
+        where = f"tools[{index}]"
+        if not isinstance(spec, dict):
+            problems.append(f"{where}: a mapping with a name, a description "
+                            f"and an input_schema")
+            continue
+        unknown = sorted(str(k) for k in spec
+                         if k not in ("name", "description", "input_schema"))
+        if unknown:
+            problems.append(f"{where}: {', '.join(unknown)} "
+                            f"{'is' if len(unknown) == 1 else 'are'} not a "
+                            f"field of a tool")
+        name = spec.get("name")
+        if not isinstance(name, str) or not _TOOL_NAME.fullmatch(name):
+            problems.append(f"{where}.name: lowercase letters and digits, "
+                            f"words joined by single '-' or '_', starting "
+                            f"with a letter")
+            continue
+        where = f"tools.{name}"
+        full = tool_name(plugin, name)
+        if len(full) > MAX_TOOL_NAME_CHARS:
+            problems.append(
+                f"{where}: the model calls it {full}, {len(full)} characters, "
+                f"and a provider accepts at most {MAX_TOOL_NAME_CHARS}; "
+                f"shorten the tool's name or the plugin's")
+        if name in names:
+            problems.append(f"{where}: declared twice")
+        module = name.replace("-", "_")
+        if module in modules and name not in names:
+            problems.append(f"{where}: its code would be tools/{module}.py, "
+                            f"which another tool's name also maps to")
+        names.add(name)
+        modules.add(module)
+        description = spec.get("description")
+        if (not isinstance(description, str) or not description.strip()
+                or len(description) > MAX_TOOL_DESCRIPTION_CHARS
+                or not _layout_only(description)):
+            problems.append(f"{where}.description: text of at most "
+                            f"{MAX_TOOL_DESCRIPTION_CHARS} characters, no "
+                            f"control or invisible characters")
+            description = None
+        schema = spec.get("input_schema")
+        why = None
+        if not isinstance(schema, dict):
+            why = "must be a mapping"
+        elif schema.get("type") != "object":
+            why = "must have type: object, as every tool's parameters do"
+        elif "properties" in schema and not isinstance(
+                schema["properties"], dict):
+            why = "its properties must be a mapping"
+        else:
+            why = _json_like(schema)
+            if why is None:
+                size = len(json.dumps(schema))
+                if size > MAX_TOOL_SCHEMA_CHARS:
+                    why = (f"is {size} characters as JSON, and a tool's "
+                           f"schema is at most {MAX_TOOL_SCHEMA_CHARS}")
+        if why:
+            problems.append(f"{where}.input_schema: {why}")
+            continue
+        if description is not None:
+            out.append(ToolDef(name=name, description=description,
+                               input_schema=schema))
+    return tuple(out)
+
+
+def _parse_access(raw, problems: list) -> Access:
+    if not isinstance(raw, dict):
+        problems.append("access: a mapping with workspace and network")
+        return Access()
+    unknown = sorted(str(k) for k in raw if k not in ("workspace", "network"))
+    if unknown:
+        problems.append(f"access: {', '.join(unknown)} "
+                        f"{'is' if len(unknown) == 1 else 'are'} not a field "
+                        f"of access")
+    workspace = raw.get("workspace", "none")
+    if workspace not in WORKSPACE_ACCESS:
+        problems.append("access.workspace: none, read or write")
+        workspace = "none"
+    network = raw.get("network", False)
+    if not isinstance(network, bool):
+        problems.append("access.network: true or false")
+        network = False
+    return Access(workspace=workspace, network=network)
+
+
+# ---- requirements.txt (slice 2) ------------------------------------------
+
+@dataclass(frozen=True)
+class Requirement:
+    """One locked package (PL22): an exact version and the hashes of the
+    files that version may install from."""
+
+    name: str
+    version: str
+    hashes: tuple
+    extras: tuple = ()
+
+    @property
+    def pin(self) -> str:
+        extras = f"[{','.join(self.extras)}]" if self.extras else ""
+        return f"{self.name}{extras}=={self.version}"
+
+
+_REQUIREMENT = re.compile(
+    r"(?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?)"
+    r"(?:\[(?P<extras>[A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+)*)\])?"
+    r"==(?P<version>[0-9][A-Za-z0-9.+!_-]{0,62})")
+_HASH = re.compile(r"--hash=sha256:([0-9a-f]{64})")
+_COMMENT = re.compile(r"(?:^|\s)#.*$")
+
+
+def canonical_package(name: str) -> str:
+    """PEP 503's normal form, so `Foo_Bar` and `foo-bar` are one package."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def parse_requirements(text: str) -> tuple:
+    """`requirements.txt`'s locked packages (PL22). PluginFormatError
+    listing every problem otherwise.
+
+    A FULL LOCK AND NOTHING ELSE. Each requirement is `name==version`
+    followed by at least one `--hash=sha256:`; comments and blank lines are
+    allowed, and every option pip has -- an index, a URL, `-r`, `-e`, an
+    environment marker -- is refused, because each is a way for what
+    installs to differ from what the modal listed. pip is then run with
+    `--require-hashes`, which refuses a dependency the lock left out, so
+    an incomplete lock fails the install rather than resolving the rest
+    from the index.
+    """
+    problems, out, seen = [], [], {}
+    logical, start = [], 0
+    lines = text.splitlines()
+    for number, line in enumerate(lines, 1):
+        if _invisible(line.replace("\t", " ")):
+            problems.append(f"{REQUIREMENTS} line {number}: holds control or "
+                            f"invisible characters")
+            continue
+        stripped = _COMMENT.sub("", line).rstrip()
+        if not logical:
+            start = number
+        if stripped.endswith("\\"):
+            logical.append(stripped[:-1])
+            continue
+        logical.append(stripped)
+        joined = " ".join(logical).split()
+        logical = []
+        if not joined:
+            continue
+        where = f"{REQUIREMENTS} line {start}"
+        match = _REQUIREMENT.fullmatch(joined[0])
+        if match is None:
+            problems.append(
+                f"{where}: {joined[0][:80]!r} is not name==version. A plugin's "
+                f"requirements are a full lock: exact versions with hashes, "
+                f"and no options, URLs or environment markers")
+            continue
+        hashes = []
+        for token in joined[1:]:
+            found = _HASH.fullmatch(token)
+            if found is None:
+                problems.append(f"{where}: {token[:80]!r} -- only "
+                                f"--hash=sha256:<64 hex digits> may follow a "
+                                f"pin")
+            else:
+                hashes.append(found.group(1))
+        name = match.group("name")
+        if not hashes:
+            problems.append(f"{where}: {name} has no --hash=sha256:. Generate "
+                            f"the file with `uv pip compile --generate-hashes` "
+                            f"or pip-tools' `pip-compile --generate-hashes`")
+        key = canonical_package(name)
+        if key in seen:
+            problems.append(f"{where}: {name} is already pinned on line "
+                            f"{seen[key]}")
+        seen[key] = start
+        extras = tuple(match.group("extras").split(",")) if match.group(
+            "extras") else ()
+        out.append(Requirement(name=name, version=match.group("version"),
+                               hashes=tuple(hashes), extras=extras))
+    if logical:
+        problems.append(f"{REQUIREMENTS} ends with a line continued by '\\'")
+    if len(out) > MAX_REQUIREMENTS:
+        problems.append(f"{REQUIREMENTS}: {len(out)} packages; a plugin "
+                        f"locks at most {MAX_REQUIREMENTS}")
+    if not out and not problems:
+        problems.append(f"{REQUIREMENTS} pins no package; leave the file out "
+                        f"instead")
+    if problems:
+        raise PluginFormatError(problems)
+    return tuple(out)
+
+
 # ---- the manifest --------------------------------------------------------
 
 @dataclass(frozen=True)
 class Manifest:
-    """A plugin's `plugin.yaml`, validated (PL2)."""
+    """A plugin's `plugin.yaml`, validated (PL2). `requirements` is
+    `requirements.txt`'s, when `validate` or `read_installed` read one."""
 
     name: str
     version: str
@@ -405,9 +723,15 @@ class Manifest:
     maintainers: tuple = ()
     min_harness: Optional[str] = None
     settings: tuple = ()
+    tools: tuple = ()
+    access: Access = Access()
+    requirements: tuple = ()
 
     def setting(self, key: str) -> Optional[Setting]:
         return next((s for s in self.settings if s.key == key), None)
+
+    def tool(self, name: str) -> Optional[ToolDef]:
+        return next((t for t in self.tools if t.name == name), None)
 
 
 class _StrictLoader(yaml.SafeLoader):
@@ -533,12 +857,24 @@ def parse_manifest(text: str, name: str) -> Manifest:
                 if setting is not None:
                     settings.append(setting)
 
+    tools = ()
+    if "tools" in data:
+        tools = _parse_tools(data.get("name") if valid_name(data.get("name"))
+                             else name, data["tools"], problems)
+    access = Access()
+    if "access" in data:
+        access = _parse_access(data["access"], problems)
+        if "tools" not in data and access.asks:
+            problems.append("access: is what a plugin's tools may touch, and "
+                            "this plugin declares no tools")
+
     if problems:
         raise PluginFormatError(problems)
     return Manifest(name=data["name"], version=version,
                     description=description, authors=authors,
                     license=license_id, maintainers=maintainers,
-                    min_harness=min_harness, settings=tuple(settings))
+                    min_harness=min_harness, settings=tuple(settings),
+                    tools=tools, access=access)
 
 
 def _line_person(value) -> bool:
@@ -617,7 +953,7 @@ def check_files(sizes: dict) -> tuple:
         if top not in TOP_LEVEL:
             problems.append(f"{path!r}: {top!r} is not part of the plugin "
                             f"format")
-        elif top in (MANIFEST, README, LICENSE):
+        elif top in (MANIFEST, README, LICENSE, REQUIREMENTS):
             if len(parts) > 1:
                 problems.append(f"{path!r}: {top} is a file, not a folder")
         elif len(parts) == 1:
@@ -627,6 +963,11 @@ def check_files(sizes: dict) -> tuple:
         elif top == "agents" and (len(parts) != 2 or not path.endswith(".md")):
             problems.append(f"{path!r}: agents/ holds .md files, with no "
                             f"folders inside it")
+        elif top == "tools" and not path.endswith(".py"):
+            # Code only. Data a tool reads ships inside a .py file or comes
+            # from the workspace; a binary here is what a reviewer cannot
+            # read, and slice 4's scanner refuses one outright.
+            problems.append(f"{path!r}: tools/ holds .py files")
     for required in (MANIFEST, README):
         if required not in sizes:
             problems.append(f"no {required}")
@@ -643,9 +984,10 @@ def validate(name: str, files: dict) -> Manifest:
     if not valid_name(name):
         problems.insert(0, f"{name + SUFFIX!r}: the folder name must be "
                            f"lowercase letters, digits and single hyphens")
-    manifest = None
+    manifest, requirements = None, ()
     text_files = [path for path in files
-                  if path in (MANIFEST, README) or path.endswith(".md")]
+                  if path in (MANIFEST, README, REQUIREMENTS)
+                  or path.endswith((".md", ".py"))]
     for path in sorted(text_files):
         try:
             text = files[path].decode("utf-8")
@@ -654,11 +996,56 @@ def validate(name: str, files: dict) -> Manifest:
             continue
         if path == MANIFEST:
             try:
-                manifest = parse_manifest(text.lstrip("\ufeff"), name)
+                manifest = parse_manifest(text.lstrip(BOM), name)
             except PluginFormatError as exc:
                 problems.extend(exc.problems)
+        elif path == REQUIREMENTS:
+            try:
+                requirements = parse_requirements(text.lstrip(BOM))
+            except PluginFormatError as exc:
+                problems.extend(exc.problems)
+    if manifest is not None:
+        problems.extend(_tool_files(manifest, files, requirements))
     if problems:
         raise PluginFormatError(problems)
     if later:
         raise NeedsLaterVersion(later)
-    return manifest
+    return replace(manifest, requirements=requirements)
+
+
+BOM = chr(0xFEFF)
+
+
+def _tool_files(manifest: Manifest, files, requirements) -> list:
+    """What the manifest's tools and the files must agree on (PL20, PL22):
+    each declared tool's code is there, no code sits there for a tool
+    nobody declared, and dependencies come with tools to use them."""
+    problems = []
+    code = [path for path in files if path.startswith("tools/")]
+    for tool in manifest.tools:
+        if tool.path not in files:
+            problems.append(f"tools.{tool.name}: its code, {tool.path}, is "
+                            f"not in the plugin")
+    if code and not manifest.tools:
+        problems.append(f"tools/ holds code, but {MANIFEST} declares no "
+                        f"tools; declare them under tools:")
+    if REQUIREMENTS in files and not manifest.tools:
+        problems.append(f"{REQUIREMENTS}: dependencies are for a plugin's "
+                        f"tools, and this plugin declares none")
+    return problems
+
+
+def read_installed(root: str, name: str) -> Manifest:
+    """The manifest of the plugin installed at `root`, with its
+    requirements, read from disk. PluginFormatError or OSError otherwise.
+    Not `validate`: the files were validated at install, and PL8's hashes
+    say whether they still are those files."""
+    with open(f"{root}/{MANIFEST}", encoding="utf-8-sig") as handle:
+        manifest = parse_manifest(handle.read(), name)
+    requirements = ()
+    try:
+        with open(f"{root}/{REQUIREMENTS}", encoding="utf-8-sig") as handle:
+            requirements = parse_requirements(handle.read())
+    except FileNotFoundError:
+        pass
+    return replace(manifest, requirements=requirements)

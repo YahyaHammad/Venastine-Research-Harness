@@ -13,10 +13,14 @@ into something the trust modal never showed.
 
 LAYOUT
   registry.json            what is installed: id, version, source, and the
-                           SHA-256 of every file as it was installed
-  projects.json            per project, the plugins turned off there
+                           SHA-256 of every file as it was installed, and
+                           what its dependencies were built for (PL22)
+  projects.json            per project, the plugins turned off there, and
+                           what each plugin's tools were granted (PL21)
   <name>/files/...         the plugin, byte for byte as it was fetched
+  <name>/deps/...          its locked dependencies, built at install
   <name>/settings.json     your values for its settings (PL6)
+  <name>/approval.json     whether its tool calls ask first (PL23)
   .staging-<hex>/          an install in progress, removed on every outcome
 
 A CHANGED FILE IS A DISABLED PLUGIN (PL8). The registry holds the hash of
@@ -33,6 +37,7 @@ mirrors it.
 """
 
 import hashlib
+import json
 import logging
 import os
 import secrets
@@ -51,7 +56,9 @@ STORE_VERSION = 1
 REGISTRY = "registry.json"
 PROJECTS = "projects.json"
 FILES = "files"
+DEPS = "deps"
 SETTINGS = "settings.json"
+APPROVAL = "approval.json"
 _STAGING = ".staging-"
 _OLD = ".old-"
 
@@ -78,19 +85,30 @@ class Record:
     source: dict
     files: dict = field(default_factory=dict)  # path -> sha256
     installed_at: float = 0.0
+    # PL22. Empty for a plugin with no requirements.txt; else what the
+    # dependencies were built for and the digest of what was built:
+    # {"isolation", "image", "python", "digest", "packages"}.
+    deps: dict = field(default_factory=dict)
 
     @property
     def root(self) -> str:
         return os.path.join(store_dir(), self.name, FILES)
 
     @property
+    def deps_root(self) -> str:
+        return os.path.join(store_dir(), self.name, DEPS)
+
+    @property
     def local(self) -> bool:
         return self.source.get("kind") == "folder"
 
     def as_json(self) -> dict:
-        return {"id": self.id, "version": self.version, "source": self.source,
-                "files": dict(sorted(self.files.items())),
-                "installed_at": self.installed_at}
+        row = {"id": self.id, "version": self.version, "source": self.source,
+               "files": dict(sorted(self.files.items())),
+               "installed_at": self.installed_at}
+        if self.deps:
+            row["deps"] = dict(sorted(self.deps.items()))
+        return row
 
 
 def sha256(data: bytes) -> str:
@@ -115,7 +133,8 @@ def installed() -> dict:
             out[name] = Record(name=name, id=row["id"], version=row["version"],
                                source=dict(row["source"]),
                                files=dict(row["files"]),
-                               installed_at=float(row.get("installed_at", 0)))
+                               installed_at=float(row.get("installed_at", 0)),
+                               deps=dict(row.get("deps") or {}))
         except (KeyError, TypeError, ValueError):
             logger.warning("Ignoring the registry entry for plugin %r: it is "
                            "not a record this version can read.", name)
@@ -180,54 +199,82 @@ def sweep_leftovers() -> None:
                     discard(os.path.join(plugin_dir, entry))
 
 
+def new_deps_dir() -> str:
+    """An empty folder in the store for a dependency build (PL22), which
+    `commit` renames into place. A staging name, so an interrupted build
+    is swept like an interrupted install."""
+    path = os.path.join(store_dir(), _STAGING + "deps-" + secrets.token_hex(6))
+    os.makedirs(path)
+    return path
+
+
 def commit(staging: str, *, name: str, plugin_id: str, version: str,
-           source: dict, files: dict) -> Record:
-    """Move a staged plugin into place, replacing an installed one of the
-    same name, and record it. The old files are moved aside first and put
-    back if the move in fails, so an install that fails half way leaves
-    what was there."""
+           source: dict, files: dict, deps_dir: Optional[str] = None,
+           deps: Optional[dict] = None) -> Record:
+    """Move a staged plugin, and its built dependencies when it has any,
+    into place, replacing an installed one of the same name, and record
+    it. The old folders are moved aside first and put back if a move in
+    fails, so an install that fails half way leaves what was there.
+
+    An installed plugin's old dependencies go whether or not new ones
+    come: what was built for another version is not this version's."""
     plugin_dir = os.path.join(store_dir(), name)
-    target = os.path.join(plugin_dir, FILES)
     os.makedirs(plugin_dir, exist_ok=True)
-    aside = None
-    if os.path.exists(target):
-        aside = os.path.join(plugin_dir, _OLD + secrets.token_hex(6))
-        os.rename(target, aside)
+    moves = ((staging, os.path.join(plugin_dir, FILES)),
+             (deps_dir, os.path.join(plugin_dir, DEPS)))
+    aside, placed = [], []
     try:
-        os.rename(staging, target)
+        for source_dir, target in moves:
+            if os.path.exists(target):
+                old = os.path.join(plugin_dir, _OLD + secrets.token_hex(6))
+                os.rename(target, old)
+                aside.append((target, old))
+            if source_dir:
+                os.rename(source_dir, target)
+                placed.append(target)
     except OSError:
-        if aside:
-            os.rename(aside, target)
+        for target in placed:
+            discard(target)
+        for target, old in reversed(aside):
+            os.rename(old, target)
         raise
     record = Record(name=name, id=plugin_id, version=version, source=source,
                     files={path: sha256(data) for path, data in files.items()},
-                    installed_at=time.time())
+                    installed_at=time.time(), deps=dict(deps or {}))
     records = installed()
     records[name] = record
     try:
         _write_registry(records)
     finally:
-        discard(aside)
+        for _, old in aside:
+            discard(old)
     return record
 
 
 def remove(name: str, *, purge: bool = False) -> None:
-    """Uninstall: the files and the registry entry. Your settings and the
-    projects it was turned off in stay unless `purge` (PL9), so a
+    """Uninstall: the files, the built dependencies and the registry
+    entry. Your settings, whether its tools ask first, and the projects it
+    was turned off in or granted access to stay unless `purge` (PL9), so a
     reinstall finds them."""
     records = installed()
     records.pop(name, None)
     _write_registry(records)
     plugin_dir = os.path.join(store_dir(), name)
     discard(os.path.join(plugin_dir, FILES))
+    discard(os.path.join(plugin_dir, DEPS))
     if purge:
         discard(plugin_dir)
-        projects = _read_projects()
-        for project in list(projects):
-            projects[project] = [n for n in projects[project] if n != name]
-            if not projects[project]:
-                del projects[project]
-        _write_projects(projects)
+        data = _projects_data()
+        for project in list(data["disabled"]):
+            data["disabled"][project] = [
+                n for n in data["disabled"][project] if n != name]
+            if not data["disabled"][project]:
+                del data["disabled"][project]
+        for project in list(data["grants"]):
+            data["grants"][project].pop(name, None)
+            if not data["grants"][project]:
+                del data["grants"][project]
+        _write_projects_data(data)
     elif os.path.isdir(plugin_dir) and not os.listdir(plugin_dir):
         os.rmdir(plugin_dir)
 
@@ -258,6 +305,14 @@ def on_disk(root: str) -> dict:
             except OSError:
                 out[rel] = "unreadable"
     return out
+
+
+def digest(root: str) -> str:
+    """One hash over every file under `root`, paths included (PL22). A
+    dependency build is thousands of files nobody reviews one by one, so
+    the registry keeps this rather than a row per file; a missing folder
+    hashes as an empty one, which matches no build."""
+    return sha256(json.dumps(sorted(on_disk(root).items())).encode("utf-8"))
 
 
 def changes(record: Record) -> list:
@@ -307,18 +362,40 @@ def _key(project_path: str) -> str:
     return os.path.normcase(os.path.realpath(project_path))
 
 
-def _read_projects() -> dict:
+def _projects_data() -> dict:
+    """{"disabled": {project: [names]}, "grants": {project: {name: row}}},
+    with anything malformed left out."""
     data = read_versioned(_projects_path(), STORE_VERSION)
     raw = data.get("disabled") or {}
-    return {project: [n for n in names if isinstance(n, str)]
-            for project, names in raw.items() if isinstance(names, list)}
+    disabled = {project: [n for n in names if isinstance(n, str)]
+                for project, names in raw.items() if isinstance(names, list)}
+    grants = {}
+    for project, rows in (data.get("grants") or {}).items():
+        if isinstance(rows, dict):
+            grants[project] = {name: dict(row) for name, row in rows.items()
+                               if isinstance(name, str)
+                               and isinstance(row, dict)}
+    return {"disabled": disabled, "grants": grants}
+
+
+def _write_projects_data(data: dict) -> None:
+    disabled, grants = data["disabled"], data["grants"]
+    write_json_atomic(_projects_path(), {
+        "version": STORE_VERSION,
+        "disabled": {p: sorted(set(disabled[p])) for p in sorted(disabled)},
+        "grants": {p: dict(sorted(grants[p].items()))
+                   for p in sorted(grants) if grants[p]},
+    })
+
+
+def _read_projects() -> dict:
+    return _projects_data()["disabled"]
 
 
 def _write_projects(projects: dict) -> None:
-    write_json_atomic(_projects_path(), {
-        "version": STORE_VERSION,
-        "disabled": {p: sorted(set(projects[p])) for p in sorted(projects)},
-    })
+    data = _projects_data()
+    data["disabled"] = projects
+    _write_projects_data(data)
 
 
 def disabled_in(project_path: str) -> set:
@@ -335,6 +412,54 @@ def set_disabled(project_path: str, name: str, off: bool) -> None:
     else:
         projects.pop(key, None)
     _write_projects(projects)
+
+
+# ---- what a plugin's tools may touch, per project (PL21) -----------------
+
+WORKSPACE_LEVELS = ("none", "read", "write")
+
+
+def grant(project_path: str, name: str) -> Optional[dict]:
+    """{"workspace": none|read|write, "network": bool} granted to plugin
+    `name`'s tools in `project_path`, or None when nobody has been asked
+    there yet. A damaged row reads as None, so the question is put again
+    rather than a grant guessed."""
+    row = _projects_data()["grants"].get(_key(project_path), {}).get(name)
+    if (row is None or row.get("workspace") not in WORKSPACE_LEVELS
+            or not isinstance(row.get("network"), bool)):
+        return None
+    return {"workspace": row["workspace"], "network": row["network"]}
+
+
+def set_grant(project_path: str, name: str, workspace: str,
+              network: bool) -> None:
+    if workspace not in WORKSPACE_LEVELS:
+        raise ValueError(f"workspace access is none, read or write, not "
+                         f"{workspace!r}")
+    data = _projects_data()
+    data["grants"].setdefault(_key(project_path), {})[name] = {
+        "workspace": workspace, "network": bool(network)}
+    _write_projects_data(data)
+
+
+# ---- whether its tool calls ask first (PL23) -----------------------------
+
+def _approval_path(name: str) -> str:
+    return os.path.join(store_dir(), name, APPROVAL)
+
+
+def auto_approved(name: str) -> bool:
+    """True only when you ran `/plugin approval <name> auto`. Anything
+    else -- no file, a damaged one -- asks, which is the default the owner
+    chose."""
+    return read_versioned(_approval_path(name), STORE_VERSION).get(
+        "auto") is True
+
+
+def set_auto_approved(name: str, on: bool) -> None:
+    os.makedirs(os.path.join(store_dir(), name), exist_ok=True)
+    write_json_atomic(_approval_path(name), {
+        "version": STORE_VERSION, "auto": bool(on)})
 
 
 # ---- settings ------------------------------------------------------------

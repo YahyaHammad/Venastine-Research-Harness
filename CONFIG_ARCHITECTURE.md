@@ -936,8 +936,9 @@ size. An ordinary key rather than harness authority, like
 
 ## Plugins (ROADMAP_v3 §94)
 
-Two keys, both harness authority (PL10, PL11): one decides whether any third party's skills and
-agents reach a system prompt, the other whose repository `/plugin install` calls reviewed. A
+Three keys, all harness authority (PL10, PL11, PL25): one decides whether any third party's
+skills and agents reach a system prompt, one whose repository `/plugin install` calls reviewed,
+and one whether a plugin's code runs in a container or as a process on this computer. A
 plugin's OWN settings are not keys here and never can be: each plugin declares them in its
 manifest and `/plugin config` keeps your values beside the install (PL6). That is the owner's
 rule, so that no plugin can add a key to this file or steer the parser that reads it.
@@ -958,6 +959,17 @@ be pasted into an API path. Installs come from that repository's DEFAULT branch,
 commit at install time, so the files installed are one merged state of it; every file is then
 checked against that commit's git blob hash. A fork points this at its own marketplace, and the
 trust modal calls whatever repository it names reviewed -- which is why it is an authority key.
+
+### `plugin_tool_isolation`
+
+`container`, the owner's default (batch 249): each plugin's tools in a container of their own,
+from `sandbox_docker_image` through the shell's own argv builder, so a plugin can never run
+laxer than a shell command, and never in an image it names. `process` is the fallback the
+owner asked for, allowed on every platform: each plugin's own process, with its dependencies
+built for this Python. On Linux the runner confines itself with Landlock and seccomp to what
+the project granted, or refuses every call (PL25); elsewhere nothing confines it, and the trust
+modal says so. A plugin's dependencies are built for one or the other, so changing this means
+reinstalling any plugin that has them; its tools say so rather than run on the wrong build.
 
 ## Network limits (ROADMAP_v3 §53)
 

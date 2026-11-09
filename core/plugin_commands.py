@@ -13,6 +13,8 @@ modal says the same thing in a terminal as in the app.
     /plugin uninstall <id> [--purge]
     /plugin disable <id> | enable <id>   in this project
     /plugin config <id> [<key> [<value> | --reset]]
+    /plugin access <id> [none|read|write | network on|off]   in this project
+    /plugin approval <id> [ask|auto]     whether its tool calls ask first
 
 THE MODAL DESCRIBES WHAT WILL LOAD (PL15). Its skills and agents are read
 from the staged copy by the loader's own parser, under the names they will
@@ -35,14 +37,23 @@ from dataclasses import dataclass
 from typing import Optional
 
 import config
-from core import ansi, config_loader, plugin_format, plugin_source, plugin_store
+from core import (
+    ansi,
+    config_loader,
+    plugin_format,
+    plugin_source,
+    plugin_store,
+    plugin_tools,
+)
 from core.plugin_format import NeedsLaterVersion, PluginFormatError
 from core.plugin_source import FetchError
 from security import hosted
 
 USAGE = ("/plugin [list [category] | info <id> | install <id> | "
          "install --from <folder> | uninstall <id> [--purge] | "
-         "disable <id> | enable <id> | config <id> [<key> [<value>|--reset]]]")
+         "disable <id> | enable <id> | config <id> [<key> [<value>|--reset]] | "
+         "access <id> [none|read|write | network on|off] | "
+         "approval <id> [ask|auto]]")
 
 #: The subcommands, with what the panel shows beside each.
 SUBCOMMANDS = {
@@ -53,9 +64,14 @@ SUBCOMMANDS = {
     "disable": "turn a plugin off in this project",
     "enable": "turn it back on here",
     "config": "a plugin's own settings",
+    "access": "what its tools may touch in this project",
+    "approval": "whether its tool calls ask you first",
 }
 _NETWORK = ("list", "info", "install")
-_ON_INSTALLED = ("info", "uninstall", "disable", "enable", "config")
+_ON_INSTALLED = ("info", "uninstall", "disable", "enable", "config",
+                 "access", "approval")
+_ACCESS_WORDS = ("none", "read", "write", "network on", "network off")
+_APPROVAL_WORDS = ("ask", "auto")
 
 #: PL15's bounds on the modal, on both axes: a plugin decides how long
 #: none of its own consent screen is.
@@ -63,6 +79,7 @@ MAX_LISTED_DEFINITIONS = 50
 MAX_LISTED_FILES = 40
 MAX_README_LINES = 40
 MAX_README_CHARS = 4000
+MAX_TOOL_DESCRIPTION_SHOWN = 400
 
 
 @dataclass
@@ -125,8 +142,19 @@ def run(args: str, shell: Shell) -> None:
         _uninstall(rest, shell)
     elif word in ("disable", "enable"):
         _toggle(rest, shell, off=(word == "disable"))
+    elif word == "access":
+        _access(rest, shell)
+    elif word == "approval":
+        _approval(rest, shell)
     else:
         _config(rest, shell)
+
+
+def _refresh() -> None:
+    """PL9: what `/plugin` changed takes effect at once -- the skills and
+    agents, and the tools with no runner left on code that is gone."""
+    config_loader.refresh_plugins()
+    plugin_tools.refresh()
 
 
 # ---- what is installed ---------------------------------------------------
@@ -289,8 +317,8 @@ def describe(prepared: Prepared, replacing=None) -> list:
                      f"over where they still fit.")
     lines += ["", "What it adds, in every project until /plugin disable "
                   "turns it off there:"]
-    if not prepared.skills and not prepared.agents:
-        lines.append("  No skills or agents: nothing it holds loads.")
+    if not prepared.skills and not prepared.agents and not manifest.tools:
+        lines.append("  No skills, agents or tools: nothing it holds loads.")
     if prepared.skills:
         lines.append("  Skills. The model sees each one's name and "
                      "description in every conversation, and its whole "
@@ -306,6 +334,8 @@ def describe(prepared: Prepared, replacing=None) -> list:
                            f"{_agent_flags(a)}"
                            for name, a in sorted(prepared.agents.items())],
                           MAX_LISTED_DEFINITIONS, "agents")
+    if manifest.tools:
+        lines += _tool_lines(candidate.id, manifest)
     if manifest.settings:
         lines.append(f"  Settings, yours to change with /plugin config "
                      f"{candidate.id}:")
@@ -323,6 +353,51 @@ def describe(prepared: Prepared, replacing=None) -> list:
         "utf-8", "replace")
     lines += ["", f"{plugin_format.README}:"]
     lines += ["  " + _clean(line) for line in _readme(readme)]
+    return lines
+
+
+def _shown_description(text: str) -> str:
+    line = _one_line(text)
+    if len(line) <= MAX_TOOL_DESCRIPTION_SHOWN:
+        return line
+    return (line[:MAX_TOOL_DESCRIPTION_SHOWN] + " ... [cut here; the model "
+            f"reads all {len(line):,} characters]")
+
+
+def _tool_lines(plugin_id: str, manifest) -> list:
+    """The modal's account of a plugin's code (PL20-PL25): what the model
+    can call, where it runs, what it asks to touch, and what it installs.
+    A description is shown as the model will read it, up to
+    MAX_TOOL_DESCRIPTION_SHOWN characters, and says where it was cut."""
+    lines = [f"  Tools. The model sees each one and can call it; its code "
+             f"runs {plugin_tools.where_phrase()}:"]
+    lines += _bounded(
+        [f"    {plugin_format.tool_name(manifest.name, t.name)}  "
+         f"{_shown_description(t.description)}" for t in manifest.tools],
+        MAX_LISTED_DEFINITIONS, "tools")
+    lines.append(f"  Each call asks you first. /plugin approval {plugin_id} "
+                 f"auto turns that off for this plugin.")
+    declared = manifest.access
+    if declared.asks:
+        lines.append(
+            f"  Its tools ask for "
+            f"{plugin_tools.access_phrase(declared.workspace, declared.network)}"
+            f". Each project is asked the first time one of them runs there, "
+            f"and /plugin access {plugin_id} changes the answer.")
+    else:
+        lines.append("  Its tools ask for no workspace and no network, and "
+                     "get neither.")
+    if manifest.requirements:
+        where = ("into the sandbox image"
+                 if plugin_tools.isolation() == plugin_tools.CONTAINER
+                 else "for this computer's Python")
+        count = len(manifest.requirements)
+        lines.append(f"  Dependencies: {count} locked package"
+                     f"{'' if count == 1 else 's'}, downloaded from PyPI and "
+                     f"installed {where} after you say yes. Wheels only, and "
+                     f"each file is checked against the hash listed here:")
+        lines += _bounded([f"    {r.pin}" for r in manifest.requirements],
+                          MAX_LISTED_DEFINITIONS, "packages")
     return lines
 
 
@@ -413,9 +488,7 @@ def _info(rest: str, shell: Shell) -> None:
 
 def _installed_manifest(record, shell: Shell):
     try:
-        with open(os.path.join(record.root, plugin_format.MANIFEST),
-                  encoding="utf-8-sig") as handle:
-            return plugin_format.parse_manifest(handle.read(), record.name)
+        return plugin_format.read_installed(record.root, record.name)
     except (OSError, UnicodeDecodeError, PluginFormatError) as exc:
         shell.error(f"{record.id}'s {plugin_format.MANIFEST} cannot be read: "
                     f"{_one_line(exc)}. Install it again.")
@@ -442,7 +515,128 @@ def _describe_installed(record, shell: Shell) -> None:
     agents = [n for n in config_loader.get_agents() if n.startswith(record.name + ":")]
     shell.out(f"Skills loaded here: {', '.join(sorted(loaded)) or 'none'}.")
     shell.out(f"Agents loaded here: {', '.join(sorted(agents)) or 'none'}.")
+    if manifest.tools:
+        _tools_here(record, manifest, project, shell)
     _settings_lines(record, manifest, shell)
+
+
+def _tools_here(record, manifest, project, shell: Shell) -> None:
+    tools = plugin_tools.registered(record.name)
+    shell.out(f"Tools loaded here: {', '.join(tools) or 'none'}.")
+    if tools and not plugin_tools.available():
+        shell.out("  Not offered to the model: they run in a container, and "
+                  "neither Docker nor Podman is available.")
+    shell.out(f"  They run {plugin_tools.where_phrase()}.")
+    shell.out("  Each call runs without asking (/plugin approval "
+              f"{record.id} ask)." if plugin_store.auto_approved(record.name)
+              else f"  Each call asks you first (/plugin approval {record.id} "
+                   f"auto stops that).")
+    granted = plugin_store.grant(project, record.name) if project else None
+    declared = manifest.access
+    if not declared.asks:
+        shell.out("  They ask for no workspace and no network.")
+    elif granted is None:
+        shell.out(f"  They ask for "
+                  f"{plugin_tools.access_phrase(declared.workspace, declared.network)}"
+                  f"; this project is asked the first time one runs.")
+    else:
+        granted = plugin_tools.capped(granted, declared)
+        shell.out(f"  Granted here: "
+                  f"{plugin_tools.access_phrase(granted['workspace'], granted['network'])}"
+                  f" (/plugin access {record.id} changes it).")
+    problem = plugin_tools.deps_problem(record, manifest)
+    if problem:
+        shell.out(f"  Cannot run: {problem}. Install it again.")
+
+
+def _access(rest: str, shell: Shell) -> None:
+    """PL21. What this project lets a plugin's tools touch, never more than
+    its manifest declares. A change stops its runner, so the next call
+    starts one with the new mounts and walls."""
+    words = rest.split()
+    if not words:
+        shell.error("/plugin access <id> [none|read|write | network on|off]")
+        return
+    record = plugin_store.find(words[0])
+    if record is None:
+        shell.error(f"{words[0]} is not installed. /plugin lists what is.")
+        return
+    manifest = _installed_manifest(record, shell)
+    if manifest is None:
+        return
+    if not manifest.tools:
+        shell.out(f"{record.id} has no tools, so there is nothing to grant.")
+        return
+    project = config_loader.get_project_path()
+    if not project:
+        shell.error("No project is open, so there is nowhere to grant it "
+                    "anything.")
+        return
+    declared = manifest.access
+    stored = plugin_store.grant(project, record.name)
+    current = plugin_tools.capped(stored, declared) if stored else None
+    if len(words) == 1:
+        shell.out(f"{record.id} asks for "
+                  f"{plugin_tools.access_phrase(declared.workspace, declared.network)}.")
+        shell.out("In this project: " + (
+            plugin_tools.access_phrase(current["workspace"], current["network"])
+            if current else "not asked yet; it is asked the first time one "
+                            "of its tools runs here") + ".")
+        return
+    new = dict(current or plugin_tools.NO_GRANT)
+    if len(words) == 2 and words[1] in plugin_store.WORKSPACE_LEVELS:
+        new["workspace"] = words[1]
+    elif len(words) == 3 and words[1] == "network" and words[2] in ("on", "off"):
+        new["network"] = words[2] == "on"
+    else:
+        shell.error("/plugin access <id> [none|read|write | network on|off]")
+        return
+    levels = plugin_store.WORKSPACE_LEVELS
+    if levels.index(new["workspace"]) > levels.index(declared.workspace):
+        shell.error(f"{record.id} declares {declared.workspace} workspace "
+                    f"access at most, so it cannot be granted "
+                    f"{new['workspace']}.")
+        return
+    if new["network"] and not declared.network:
+        shell.error(f"{record.id} does not declare the network, so it cannot "
+                    f"be granted it.")
+        return
+    plugin_store.set_grant(project, record.name, new["workspace"],
+                           new["network"])
+    plugin_tools.stop(record.name)
+    shell.out(f"{record.id} in {project}: "
+              f"{plugin_tools.access_phrase(new['workspace'], new['network'])}"
+              f". Its next call runs with that.")
+
+
+def _approval(rest: str, shell: Shell) -> None:
+    """PL23. Whether a plugin's tool calls ask first: the owner's default
+    is yes, and `auto` is the per-plugin opt-out, kept in the store and
+    never in anything the plugin ships."""
+    words = rest.split()
+    if not words or len(words) > 2:
+        shell.error("/plugin approval <id> [ask|auto]")
+        return
+    record = plugin_store.find(words[0])
+    if record is None:
+        shell.error(f"{words[0]} is not installed. /plugin lists what is.")
+        return
+    if len(words) == 1:
+        shell.out(f"{record.id}'s tool calls "
+                  + ("run without asking." if plugin_store.auto_approved(
+                      record.name) else "ask you first."))
+        return
+    if words[1] not in _APPROVAL_WORDS:
+        shell.error("/plugin approval <id> [ask|auto]")
+        return
+    auto = words[1] == "auto"
+    plugin_tools.set_auto_approve(record.name, auto)
+    if auto:
+        shell.out(f"{record.id}'s tools now run without asking, in every "
+                  f"project. What they may touch is still each project's "
+                  f"grant. /plugin approval {record.id} ask undoes it.")
+    else:
+        shell.out(f"{record.id}'s tool calls ask you first again.")
 
 
 def _install(rest: str, shell: Shell) -> None:
@@ -471,18 +665,41 @@ def _install(rest: str, shell: Shell) -> None:
         if not shell.confirm(title, "\n".join(describe(prepared, existing))):
             shell.out("Not installed; nothing was written.")
             return
-        record = plugin_store.commit(
-            prepared.staging, name=manifest.name, plugin_id=candidate.id,
-            version=manifest.version, source=candidate.source,
-            files=candidate.files)
+        # PL22. AFTER the yes, because a build downloads, and BEFORE the
+        # commit, so a lock pip refuses installs nothing at all.
+        deps_dir, deps = None, None
+        if manifest.requirements:
+            try:
+                deps_dir, deps = plugin_tools.build_deps(
+                    manifest.name, manifest, prepared.staging, shell.out)
+            except plugin_tools.BuildError as exc:
+                first, *more = str(exc).splitlines() or [""]
+                shell.error(f"Not installed, and nothing was written: "
+                            f"{_clean(first)}")
+                for line in more:
+                    shell.error(f"  {_clean(line)}")
+                return
+        # The old version's runner holds its files; it goes first.
+        plugin_tools.stop(manifest.name)
+        try:
+            record = plugin_store.commit(
+                prepared.staging, name=manifest.name, plugin_id=candidate.id,
+                version=manifest.version, source=candidate.source,
+                files=candidate.files, deps_dir=deps_dir, deps=deps)
+        except BaseException:
+            plugin_store.discard(deps_dir)
+            raise
         prepared.staging = None
     finally:
         plugin_store.discard(prepared.staging)
-    config_loader.refresh_plugins()
+    _refresh()
     _, notes = plugin_store.effective_settings(record.name, manifest)
+    adds = [_count(len(prepared.skills), 'skill'),
+            _count(len(prepared.agents), 'agent')]
+    if manifest.tools:
+        adds.append(_count(len(manifest.tools), 'tool'))
     shell.out(f"Installed {record.id} {record.version}: "
-              f"{_count(len(prepared.skills), 'skill')} and "
-              f"{_count(len(prepared.agents), 'agent')}, on in every project. "
+              f"{', '.join(adds[:-1])} and {adds[-1]}, on in every project. "
               f"/plugin disable {record.id} turns it off here"
               + (f"; /plugin config {record.id} sets its settings."
                  if manifest.settings else "."))
@@ -501,16 +718,19 @@ def _uninstall(rest: str, shell: Shell) -> None:
     if record is None:
         shell.error(f"{words[0]} is not installed. /plugin lists what is.")
         return
+    plugin_tools.stop(record.name)
     plugin_store.remove(record.name, purge=purge)
-    config_loader.refresh_plugins()
+    _refresh()
     if purge:
-        shell.out(f"Uninstalled {record.id}, with its settings and the "
-                  f"projects it was off in.")
+        shell.out(f"Uninstalled {record.id}, with its settings, whether its "
+                  f"tools asked first, and what each project granted them "
+                  f"or turned off.")
     else:
-        shell.out(f"Uninstalled {record.id}. Its settings and the projects "
-                  f"it was off in are kept for a reinstall; --purge removes "
-                  f"them. A skill or agent of it already active in this "
-                  f"session stays until you switch away.")
+        shell.out(f"Uninstalled {record.id}. Its settings, whether its tools "
+                  f"asked first, and what each project granted or turned off "
+                  f"are kept for a reinstall; --purge removes them. A skill "
+                  f"or agent of it already active in this session stays "
+                  f"until you switch away.")
 
 
 def _toggle(rest: str, shell: Shell, off: bool) -> None:
@@ -528,11 +748,11 @@ def _toggle(rest: str, shell: Shell, off: bool) -> None:
                     f"{'off' if off else 'on'}.")
         return
     plugin_store.set_disabled(project, record.name, off)
-    config_loader.refresh_plugins()
+    _refresh()
     if off:
-        shell.out(f"{record.id} is off in {project}: its skills and agents "
-                  f"do not load here. /plugin enable {record.id} turns it "
-                  f"back on.")
+        shell.out(f"{record.id} is off in {project}: its skills, agents and "
+                  f"tools do not load here. /plugin enable {record.id} turns "
+                  f"it back on.")
     else:
         shell.out(f"{record.id} is on in {project} again.")
 
@@ -554,8 +774,8 @@ def _settings_lines(record, manifest, shell: Shell) -> None:
                   f"{_one_line(setting.description)}")
     for note in notes:
         shell.out(f"Note: {note}.")
-    shell.out("Settings are read by a plugin's tools, which a later version "
-              "of the harness runs; skills and agents do not read them.")
+    shell.out("Its tools read these on every call, so a change applies to "
+              "the next one; skills and agents do not read them.")
 
 
 def _config(rest: str, shell: Shell) -> None:
@@ -622,6 +842,14 @@ def completions(argument: str) -> list:
     if not space:
         return [(f"plugin {word} {r.id}", f"{r.version} {_source_phrase(r)}")
                 for _, r in sorted(records.items()) if r.id.startswith(target)]
+    if word in ("access", "approval"):
+        record = plugin_store.find(target)
+        if record is None:
+            return []
+        words = _ACCESS_WORDS if word == "access" else _APPROVAL_WORDS
+        return [(f"plugin {word} {record.id} {offer}", "")
+                for offer in words if offer.startswith(rest)
+                and offer != rest]
     if word != "config":
         return []
     record = plugin_store.find(target)

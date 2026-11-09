@@ -97,6 +97,12 @@ _SCOPE_SIGNAL = 1 << 1                 # ABI 6
 # What the child may do beneath an import root: read, and map a C
 # extension. EXECUTE grants execve, which seccomp refuses regardless.
 _READ_ONLY = _FS_EXECUTE | _FS_READ_FILE | _FS_READ_DIR
+_FS_WRITE_FILE = 1 << 1
+# The rights a rule on a single file may carry; the rest are a directory's.
+_FILE_RIGHTS = (_FS_EXECUTE | _FS_WRITE_FILE | _FS_READ_FILE | _FS_TRUNCATE
+                | _FS_IOCTL_DEV)
+# Every right Landlock has, for a folder a plugin's grant lets it write.
+_READ_WRITE = (1 << 16) - 1
 
 # Never a read root, whatever sys.path says: a jail with `/` or `/tmp` in it
 # is no jail, and /proc is where another process's environment lives.
@@ -247,10 +253,10 @@ def _drop_root() -> Optional[str]:
 
 
 def _apply_landlock(roots) -> Optional[str]:
-    abi = landlock_abi()
-    if abi < 1:
-        return "Landlock is not available on this kernel"
+    return _landlock([(root, _READ_ONLY) for root in roots], deny_tcp=True)
 
+
+def _handled_fs(abi: int) -> int:
     handled_fs = (1 << 13) - 1                       # every ABI 1 right
     if abi >= 2:
         handled_fs |= _FS_REFER
@@ -258,11 +264,25 @@ def _apply_landlock(roots) -> Optional[str]:
         handled_fs |= _FS_TRUNCATE
     if abi >= 5:
         handled_fs |= _FS_IOCTL_DEV
+    return handled_fs
+
+
+def _landlock(rules, *, deny_tcp: bool) -> Optional[str]:
+    """Restrict this process to `rules`, (path, rights) pairs, and to no
+    TCP when `deny_tcp` and the kernel can say so (ABI 4). A rule on a
+    FILE keeps only the rights a file can carry, which is what the kernel
+    requires; a path that does not exist is left out, which leaves it
+    refused like everything else."""
+    abi = landlock_abi()
+    if abi < 1:
+        return "Landlock is not available on this kernel"
+
+    handled_fs = _handled_fs(abi)
     fields = [("handled_access_fs", ctypes.c_uint64)]
     values = [handled_fs]
     if abi >= 4:
         fields.append(("handled_access_net", ctypes.c_uint64))
-        values.append(_NET_BIND_TCP | _NET_CONNECT_TCP)
+        values.append(_NET_BIND_TCP | _NET_CONNECT_TCP if deny_tcp else 0)
     if abi >= 6:
         fields.append(("scoped", ctypes.c_uint64))
         values.append(_SCOPE_ABSTRACT_UNIX_SOCKET | _SCOPE_SIGNAL)
@@ -282,13 +302,17 @@ def _apply_landlock(roots) -> Optional[str]:
     if ruleset < 0:
         return f"Landlock ruleset: {_errno_name()}"
     try:
-        for root in roots:
+        for root, rights in rules:
+            if not os.path.exists(root):
+                continue
+            if not os.path.isdir(root):
+                rights &= _FILE_RIGHTS
             try:
                 dirfd = os.open(root, os.O_PATH | os.O_CLOEXEC)
             except OSError as exc:
                 return f"Landlock root {root}: {exc.strerror}"
             try:
-                rule = PathBeneath(_READ_ONLY & handled_fs, dirfd)
+                rule = PathBeneath(rights & handled_fs, dirfd)
                 if libc.syscall(_LANDLOCK_ADD_RULE, ruleset,
                                 _LANDLOCK_RULE_PATH_BENEATH,
                                 ctypes.byref(rule), 0) != 0:
@@ -324,7 +348,7 @@ def seccomp_program() -> list:
     return rows
 
 
-def _apply_seccomp() -> Optional[str]:
+def _apply_seccomp(rows: Optional[list] = None) -> Optional[str]:
     class Filter(ctypes.Structure):
         _fields_ = [("code", ctypes.c_ushort), ("jt", ctypes.c_ubyte),
                     ("jf", ctypes.c_ubyte), ("k", ctypes.c_uint32)]
@@ -333,7 +357,7 @@ def _apply_seccomp() -> Optional[str]:
         _fields_ = [("len", ctypes.c_ushort),
                     ("filter", ctypes.POINTER(Filter))]
 
-    rows = seccomp_program()
+    rows = seccomp_program() if rows is None else rows
     array = (Filter * len(rows))(*[Filter(*row) for row in rows])
     program = Program(len(rows), array)
     libc = _libc()
@@ -359,6 +383,146 @@ def lock_down(roots: Optional[list] = None) -> Optional[str]:
         if reason:
             return reason
     return None
+
+
+# --- a plugin's tool runner (ROADMAP_v3 §94, PL25) ------------------------------
+#
+# `plugin_tool_isolation: process` runs a plugin's tools as a process on the
+# host. On Linux the owner's rule is "enforce, else refuse": before the runner
+# imports a line of the plugin, it puts up the walls its grant describes, and
+# a wall that cannot go up refuses every call with the reason.
+#
+# NOT `lock_down`, which is a math child's: that one refuses every write,
+# every process and every socket, and a plugin's tools may be granted the
+# workspace and the network. What carries over is the method -- Landlock for
+# the filesystem, a seccomp filter for what Landlock cannot say -- and the
+# all-or-nothing verdict.
+#
+#   Landlock    reads beneath the interpreter, the plugin and its
+#               dependencies, and the system's libraries; reads or writes
+#               the workspace as granted; writes a private temporary folder.
+#               No home directory, so no ~/.ssh and no providers.json; no
+#               /proc, which is where the harness's own environment is.
+#   seccomp     a socket only of the internet families, and only when the
+#               network is granted -- so never a UNIX socket, which is how a
+#               process reaches a local daemon (Docker's socket is root on
+#               the host). This is the network wall on a kernel before
+#               Landlock ABI 4, which WSL's 6.6 is (ABI 3, measured
+#               2026-11-09). Starting processes stays allowed: a child
+#               inherits both walls. Tracing, mounting and the kernel's own
+#               control surfaces are refused, as for the math child.
+
+#: What a plugin's process may never do, whatever it was granted.
+PLUGIN_DENIED_SYSCALLS = {
+    name: DENIED_SYSCALLS[name] for name in (
+        "ptrace", "process_vm_readv", "process_vm_writev", "kcmp",
+        "perf_event_open", "pidfd_getfd",
+        "setuid", "setgid", "setreuid", "setregid", "setgroups", "setresuid",
+        "setresgid", "setfsuid", "setfsgid", "capset", "personality",
+        "chroot", "pivot_root", "mount", "umount2", "unshare", "setns",
+        "open_tree", "move_mount", "fsopen", "fsconfig", "fsmount", "fspick",
+        "mount_setattr", "name_to_handle_at", "open_by_handle_at",
+        "bpf", "userfaultfd", "io_uring_setup", "io_uring_enter",
+        "io_uring_register", "keyctl", "add_key", "request_key",
+        "init_module", "finit_module", "delete_module", "kexec_load",
+        "kexec_file_load", "reboot", "swapon", "swapoff", "acct", "quotactl",
+        "syslog", "iopl", "ioperm", "sethostname", "setdomainname",
+        "settimeofday", "clock_settime", "adjtimex", "clock_adjtime",
+        "vhangup")}
+_SOCKET = DENIED_SYSCALLS["socket"]
+_AF_INET, _AF_INET6 = 2, 10
+_ARG0 = 16      # seccomp_data.args[0], its low 32 bits on little-endian x86_64
+
+#: Read beneath these whenever they exist: the dynamic loader's libraries.
+_SYSTEM_READ = ("/usr", "/lib", "/lib64", "/lib32", "/etc/ld.so.cache")
+#: And these with the network: certificates and the resolver's files.
+_NETWORK_READ = ("/etc/ssl", "/etc/ca-certificates", "/etc/pki",
+                 "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf",
+                 "/etc/gai.conf", "/etc/host.conf", "/etc/services",
+                 "/etc/protocols")
+
+
+def plugin_seccomp_program(network: bool) -> list:
+    """The plugin filter as (code, jt, jf, k) rows: the architecture
+    checked, an x32 number refused, `socket` refused unless the network is
+    granted and the family is AF_INET or AF_INET6, every
+    PLUGIN_DENIED_SYSCALLS entry refused with EPERM, everything else
+    allowed."""
+    denied = sorted(set(PLUGIN_DENIED_SYSCALLS.values()))
+    count = len(denied)
+    # Layout: 0-3 the architecture and the number; 4 x32; 5 socket; then
+    # one row per denied call; ALLOW; with the network, a four-row block
+    # that admits the two internet families; DENY last. Every jump is
+    # forward and relative, as classic BPF's are.
+    allow = 6 + count
+    socket_block = allow + 1
+    deny = socket_block + (4 if network else 0)
+    rows = [
+        (_BPF_LD_W_ABS, 0, 0, 4),                       # seccomp_data.arch
+        (_BPF_JEQ_K, 1, 0, _AUDIT_ARCH_X86_64),
+        (_BPF_RET_K, 0, 0, _RET_KILL_PROCESS),
+        (_BPF_LD_W_ABS, 0, 0, 0),                       # seccomp_data.nr
+        (_BPF_JGE_K, deny - 5, 0, _X32_SYSCALL_BIT),
+        (_BPF_JEQ_K, socket_block - 6, 0, _SOCKET),
+    ]
+    for index, number in enumerate(denied):
+        here = 6 + index
+        rows.append((_BPF_JEQ_K, deny - (here + 1), 0, number))
+    rows.append((_BPF_RET_K, 0, 0, _RET_ALLOW))
+    if network:
+        # The family; AF_INET -> the ALLOW three rows on, AF_INET6 -> the
+        # same, anything else -> DENY.
+        rows.append((_BPF_LD_W_ABS, 0, 0, _ARG0))
+        rows.append((_BPF_JEQ_K, 1, 0, _AF_INET))
+        rows.append((_BPF_JEQ_K, 0, 1, _AF_INET6))
+        rows.append((_BPF_RET_K, 0, 0, _RET_ALLOW))
+    rows.append((_BPF_RET_K, 0, 0, _RET_ERRNO | errno.EPERM))
+    if len(rows) != deny + 1:
+        raise RuntimeError(f"the plugin filter's layout is off: {len(rows)} "
+                           f"rows, DENY expected at {deny}")
+    return rows
+
+
+def plugin_rules(*, plugin_dir: str, deps_dir: Optional[str],
+                 workspace: Optional[str], access: str, network: bool,
+                 tmp_dir: str) -> list:
+    """(path, rights) for a plugin runner's Landlock ruleset (PL25)."""
+    rules = [(root, _READ_ONLY) for root in read_roots()]
+    rules += [(path, _READ_ONLY) for path in _SYSTEM_READ]
+    rules.append((plugin_dir, _READ_ONLY))
+    if deps_dir:
+        rules.append((deps_dir, _READ_ONLY))
+    if network:
+        rules += [(path, _READ_ONLY) for path in _NETWORK_READ]
+    if workspace and access == "read":
+        rules.append((workspace, _READ_ONLY))
+    elif workspace and access == "write":
+        rules.append((workspace, _READ_WRITE))
+    rules.append((tmp_dir, _READ_WRITE))
+    rules.append(("/dev/null", _FS_READ_FILE | _FS_WRITE_FILE | _FS_TRUNCATE))
+    rules += [(path, _FS_READ_FILE) for path in ("/dev/urandom", "/dev/zero")]
+    return rules
+
+
+def plugin_lock_down(**grant) -> Optional[str]:
+    """Put a plugin runner's walls up around THIS process (PL25). None when
+    every one is up; else the reason, and the runner refuses every call.
+    `grant` is `plugin_rules`'s keyword arguments. Irreversible."""
+    reason = supported()
+    if reason:
+        return reason
+    import resource
+
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (OSError, ValueError) as exc:
+        return f"limits: {exc}"
+    if _libc().prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+        return f"non-dumpable: {_errno_name()}"
+    reason = _landlock(plugin_rules(**grant), deny_tcp=not grant["network"])
+    if reason:
+        return reason
+    return _apply_seccomp(plugin_seccomp_program(grant["network"]))
 
 
 # --- the self-test --------------------------------------------------------------

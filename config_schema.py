@@ -198,6 +198,10 @@ def _github_repo(value: Any) -> Any:
 #: `plugin_marketplace` (ROADMAP_v3 §94, PL11): a GitHub `owner/name`.
 GitHubRepo = Annotated[str, BeforeValidator(_github_repo)]
 
+#: `plugin_tool_isolation` (ROADMAP_v3 §94, PL24/PL25): where a plugin's
+#: tools run -- a container of their own, or a process of their own.
+PluginToolIsolation = Literal["container", "process"]
+
 #: "rederive" / "chain". Validated here AND in
 #: `config_loader.effective_compaction`, which checks the value a
 #: `settings.json` or a `/compact --strength N` supplied against this list.
@@ -442,11 +446,13 @@ class HarnessConfig(_Model):
     mcp_max_event_bytes: PositiveInt
 
     # -- Plugins (ROADMAP_v3 section 94) -----------------------------------
-    # Both authority keys (PL10, PL11): one decides whether any third
-    # party's skills and agents reach a system prompt, the other whose
-    # repository /plugin install calls reviewed.
+    # All three are authority keys (PL10, PL11, PL25): one decides whether
+    # any third party's skills and agents reach a system prompt, one whose
+    # repository /plugin install calls reviewed, and one whether a plugin's
+    # code runs in a container or as a process on this computer.
     plugins_enabled: StrictBool
     plugin_marketplace: GitHubRepo
+    plugin_tool_isolation: PluginToolIsolation
 
     # -- Network limits (ROADMAP_v3 section 53) ----------------------------
     # One window for all three meters (IO8) and one ceiling each, in
@@ -731,10 +737,12 @@ HARNESS_AUTHORITY_KEYS = frozenset({
     "shell_classifier_max_risk",
     "shell_classifier_max_modification",
     "shell_classifier_max_network",
-    # ROADMAP_v3 §94 (PL10, PL11): whether plugins load at all, and which
-    # repository's marketplace /plugin install reads.
+    # ROADMAP_v3 §94 (PL10, PL11, PL25): whether plugins load at all,
+    # which repository's marketplace /plugin install reads, and whether a
+    # plugin's code runs in a container or as a process on this computer.
     "plugins_enabled",
     "plugin_marketplace",
+    "plugin_tool_isolation",
     "allow_insecure_sandbox_fallback",
     "auto_approve_sandbox_fallback",
     "allow_wsl_backend",

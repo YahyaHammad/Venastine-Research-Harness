@@ -8,7 +8,10 @@ It adds:
 - the skill `example:checklist`, a method for turning a vague request into
   a checklist before starting;
 - the agent `example:planner`, which writes such a checklist and nothing
-  else.
+  else;
+- the tool `plugin__example__outline`, which turns a list of points into
+  an outline as long as its `max_items` setting allows. It asks for no
+  workspace and no network, so it never gets either.
 
 Try it from a folder on your own computer before you open a pull request:
 

@@ -1046,6 +1046,12 @@ PROCESS_MEMOS = (
     # minutes. A leftover would answer the next test from another server.
     ("core.plugin_source", ("_trees",),
      lambda module: module.clear_cache()),
+    # §94 slice 2 (PL20, PL24): the tools a plugin registered, and the
+    # runner processes this one started. A leftover would be a live
+    # process another test calls into, and a tool in the global registry
+    # that no installed plugin backs.
+    ("core.plugin_tools", ("_registered", "_runners"),
+     lambda module: module.reset()),
     # D15's per-tool approval defaults for dynamically named tools, through
     # the module's own function: with no arguments it drops all of them.
     ("security.permissions", ("_dynamic_approval_defaults",),
