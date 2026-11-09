@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§94. Plugins: skills, agents and settings from a reviewed marketplace** - **(NOT BUILT beyond slice 2: the format, the store, `/plugin` and its trust modal BUILT in batch 249, and tools in a container per plugin, with locked dependencies, BUILT in batch 250; MCP servers, the CI and the scanner, git URLs and a first plugin to come)** (the owner asked for plugins that add tools, skills, agents, MCP servers and settings without touching a core file, pulled from this repository's nested `plugins/` folder behind a trust modal, tested only when they change, and kept out of any pull request that touches anything else. A `.plugin` folder is a plugin; its manifest is read by the strictest parser in the tree; everything it adds is prefixed with its name; installs come from one resolved commit with every file checked against git's hash, live outside the install, and stop loading if a file changes; PL1-PL19)
+- **§94. Plugins: skills, agents and settings from a reviewed marketplace** - **(NOT BUILT beyond slice 3: the format, the store, `/plugin` and its trust modal BUILT in batch 249, tools in a container per plugin, with locked dependencies, BUILT in batch 250, and MCP servers written in Python BUILT in batch 251; the CI and the scanner, git URLs and a first plugin to come)** (the owner asked for plugins that add tools, skills, agents, MCP servers and settings without touching a core file, pulled from this repository's nested `plugins/` folder behind a trust modal, tested only when they change, and kept out of any pull request that touches anything else. A `.plugin` folder is a plugin; its manifest is read by the strictest parser in the tree; everything it adds is prefixed with its name; installs come from one resolved commit with every file checked against git's hash, live outside the install, and stop loading if a file changes; PL1-PL31)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
 - **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
@@ -3067,7 +3067,7 @@ leaked PID.
 ## §94. Plugins: skills, agents and settings from a reviewed marketplace
 
 **Added in batch 249, from the owner's request; slice 1 BUILT in batch 249, slice 2 BUILT in
-batch 250, slices 3-6 NOT BUILT.** A plugin adds tools (with their own dependencies), skills, agents, MCP servers and
+batch 250, slice 3 BUILT in batch 251, slices 4-6 NOT BUILT.** A plugin adds tools (with their own dependencies), skills, agents, MCP servers and
 settings of its own. It never touches a core file, and it cannot alter the core harness
 runtime; the harness may call into it, and nothing else. Plugins are pulled from GitHub, as the
 installers are, because the owner has no serving infrastructure. The marketplace is this
@@ -3131,7 +3131,8 @@ processes. The owner's rule was separate containers if the difference is minimal
 2. **Tools,** in a container per plugin, with their dependencies in a Linux venv built inside the
    shell's image at install. Workspace grants are per project, calls ask by default, and
    `plugin_tool_isolation: container | process` is the fallback key. BUILT in batch 250, below.
-3. **MCP servers** in plugins, a local command running in the plugin's container.
+3. **MCP servers** in plugins, a Python module running where the plugin's tools run. BUILT in
+   batch 251, below. Remote servers and npx/uvx commands are deferred by the owner.
 4. **CI.**
    - Core workflows skip plugin-only changes.
    - `plugins.yml` tests the plugins that changed: when a plugin changes, every plugin when the
@@ -3175,8 +3176,10 @@ detail a slice needs. Ask before departing from any of them.
   - **Approval:** a plugin tool's call asks by default, with a per-plugin opt-out, the way an MCP
     server's `autoApprove` works.
   - **Names:** tools are `plugin__<name>__<tool>`, held to the providers' 64-character limit.
-- **Slice 3, MCP servers.** A local command runs in the plugin's container. The scanner flags a
-  `npx`, `uvx` or `docker` pull of an unpinned package, and a remote URL.
+- **Slice 3, MCP servers.** A local command runs in the plugin's container. Built as PL27-PL31
+  (batch 251), Python only for now. When the deferred commands and remote servers land, the
+  scanner flags a `npx`, `uvx` or `docker` pull of an unpinned package, and a remote URL;
+  until then the format refuses them.
 - **Slice 4, CI.** This slice edits `.github/workflows/`, which the agent's token cannot push, so
   the owner pushes it.
   - **Core workflows** (tests, compat, lint, bandit, codeql) skip a pull request or push whose
@@ -3235,7 +3238,26 @@ recommendation each time.
 - **The opt-out from asking:** `/plugin approval <id> ask|auto`, kept in the store and never in
   anything the plugin ships, with a warning at every launch while on (PL23).
 
-### Decisions (PL1-PL26)
+### Slice 3's answers (batch 251, 2026-11-09)
+
+Four questions, then a discussion of the first. The owner took the recommendation on the other
+three.
+
+- **Where a server and its tools are declared.** The owner turned down `plugin.yaml`: a server
+  would be declared there differently from everywhere else, and YAML might not keep JSON as
+  written. Measured: of 19 JSON forms through the strict loader, 14 came back the same, a tab was
+  refused loudly, and three exponents and an escaped surrogate pair changed silently. The choice
+  was then a strict `mcp.json` in the plugin, in the user file's shape, with each server's tools
+  pasted from its own `tools/list` (PL27, PL28). The alternative was finding the tools by
+  starting the server after the yes, which needs a second prompt.
+- **What a server may run:** Python, a module the plugin ships or one its lock installs (PL29).
+- **Remote servers:** not in this version (PL29).
+- **Names:** `plugin__<plugin>__<tool>` (PL28).
+- **The YAML fix:** `1e6` as a number, an escaped half of a pair refused (PL31).
+- **Mid-batch, the owner:** remote servers and npx/uvx servers are deferred rather than scrapped.
+  The refusals say so, and the gap register says what each needs.
+
+### Decisions (PL1-PL31)
 
 | id | decision |
 |---|---|
@@ -3243,7 +3265,7 @@ recommendation each time.
 | **PL2** | **The manifest is `plugin.yaml`, read by the strictest parser in the tree.** YAML's safe loader, with aliases refused, duplicate keys refused, every field typed, and unknown keys refused rather than ignored. The owner's reason for keeping settings out of `config.yaml` was a parser a plugin could steer, and this is the one file every plugin hands the harness to parse. No field may hold control, format (bidi, zero-width) or separator characters. A key YAML reads as a boolean (`on:`) is refused with a sentence that says so, because the file plainly says `on`. Every problem is reported, not the first |
 | **PL3** | **A plugin is `plugin.yaml`, `README.md`, an optional `LICENSE`, `skills/` (`.md`, nested), `agents/` (`.md`, flat) and `tests/`, and nothing else.** File names are portable, with no leading dot, no Windows-reserved name, no case-only collision, and no link. At most 300 files, 1 MB each and 5 MB together, sized from what skills are: the largest shipped skill is under 10 KB |
 | **PL4** | **Everything a plugin adds is prefixed with its name** (`example:checklist`). No plugin can shadow a builtin, a file the user wrote, or another plugin. Plugins are a tier between user and project (harness > user > plugin > project): below what you wrote, and above what arrived with a cloned directory, since a plugin passed its own trust modal. Skills are grouped in the catalog under the plugin's id. A silent `spawnable` reads as false, as for every non-harness tier |
-| **PL5** | **Slice 1 refuses a plugin that ships `tools/`, `mcp.json` or `requirements.txt`,** before the modal, naming what it ships. A plugin whose skills tell the model to call tools that do not exist would be half working, and the model would keep reaching for them (D24's reason). Slice 2 took `tools/` and `requirements.txt` off the list (PL20, PL22); `mcp.json` waits for slice 3 |
+| **PL5** | **Slice 1 refuses a plugin that ships `tools/`, `mcp.json` or `requirements.txt`,** before the modal, naming what it ships. A plugin whose skills tell the model to call tools that do not exist would be half working, and the model would keep reaching for them (D24's reason). Slice 2 took `tools/` and `requirements.txt` off the list (PL20, PL22), and slice 3 took `mcp.json` (PL27). The emptied list went with its code: `check_files` returns its problems alone, and nothing is held back |
 | **PL6** | **Settings are declared in the manifest, up to 32, as boolean, integer, number, string or choice,** each with a default that fits and a one-line description. The user's values live in `<store>/<name>/settings.json`, never in `config.yaml`. A stored value the schema no longer accepts falls back to the default with a note |
 | **PL7** | **Installed plugins live in `~/.config/venastine/plugins/`.** That is outside the install directory, so an update or reinstall of the harness never touches one, and inside the user tier, which the shell sandbox mounts read-only and the file tools refuse to write without asking |
 | **PL8** | **A changed file is a plugin that stops loading.** The registry holds the SHA-256 of every file the modal described, and every discovery checks them. A plugin whose files were edited, added or removed is left out, with a warning naming them, until it is installed again. That is D17's workspace-trust rule, applied to the second place third-party text reaches a system prompt from |
@@ -3265,6 +3287,11 @@ recommendation each time.
 | **PL24** | **The runner is the harness's own program, one per plugin per session, in the shell's container.** `core/plugin_runner.py`, standard library only, started with `python -I -S -B` and mounted read-only. It starts on the plugin's first call and is kept alive. It speaks JSON lines over stdin and stdout, and settings travel with every call. The protocol runs on private copies of both descriptors. Descriptor 1 points at stderr, so a `print` cannot corrupt a reply. Descriptor 0 points at the null device, because on Windows a child inheriting the pipe that the reader thread is blocked on hangs (measured). A result is at most 1 MB of JSON. A call is bounded by `sandbox_timeout_seconds`, after which the runner is killed and the next call starts another, and an idle runner exits after 30 minutes. The container is `_docker_argv`'s: the workspace mount is none, `:ro` or read-write to match the grant; the runner, the plugin and its build are mounted read-only; it adds `-i` and keeps every limit and label the shell's have. Each new keyword defaults to what the shell sent, so the shell's argv is unchanged. Killing `docker run -i`'s client ended the container within a second under Docker 29.7.2 and Podman 5.7, so no `timeout` wrapper is needed |
 | **PL25** | **`plugin_tool_isolation: container \| process`, an authority key, defaults to container.** `process` runs each plugin's runner on the host, with a scrubbed environment and a private temporary folder. On Linux the runner confines itself before it imports a line of the plugin, or refuses every call with the reason (owner, batch 250). Landlock lets it read beneath the interpreter, the plugin, its build and the system's libraries, read or write the workspace as granted, and write its temporary folder; no home directory and no `/proc` is reachable. A seccomp filter allows a socket only of AF_INET or AF_INET6, and only with the network granted. So never a UNIX socket, since Docker's is root on the host. It also refuses tracing, mounting and the kernel's control surfaces. Starting a process stays allowed, because a child inherits both walls. On WSL's 6.6 kernel, whose Landlock is ABI 3 with no TCP rules, the filter is the whole network wall. Off Linux nothing confines the runner, and the modal and `/plugin info` say so in capitals |
 | **PL26** | **Tools come and go with their plugin.** They are registered at startup after MCP, without starting a runner, and a container's tools are not advertised while neither Docker nor Podman is available. Install, reinstall, uninstall, disable and enable re-register every plugin's tools and stop every runner, so none outlives the code it ran. `plugin__` joins `mcp__` as a dynamic prefix in `security/permissions.py`: allowed, asked by default, and exempt from the declared-field check. A changed file unloads the tools with the skills, and a call to one says what changed. The containers carry the process's label, so the exit sweep ends them |
+| **PL27** | **A plugin's MCP servers are in its `mcp.json`, in the `mcpServers` shape your own file has, read as strictly as the manifest** (owner, batch 251: in `plugin.yaml` a server would be declared differently from everywhere else, and YAML does not keep JSON as written, measured). `plugin_format.parse_mcp_json` refuses a repeated key, `NaN` and `Infinity`, anything at the top but `mcpServers`, more than 8 servers, a server name a plugin name could not be, and any field but `command`, `args`, `env`, `tools` and `type: stdio`. `url`, `headers` and another `type` are refused as deferred; `cwd`, `autoApprove` and `disabled` as the harness's or yours. Every problem is reported. `servers/` holds `.py` files, in folders. Not `mcp_client.config`, whose decision G is right for a file you wrote and wrong for one a plugin ships |
+| **PL28** | **Each server lists the tools it serves, pasted from its own `tools/list` answer, and the model reads the listing, never the server's own words at run time** (owner). Every MCP Tool field is accepted; the model reads `name`, `title` (composed in as `mcp_client` composes it), `description` and `inputSchema`, held to PL20's bounds. A tool the server serves and the listing leaves out never loads; one the listing names and the server lacks fails by name, and each start logs both. Names are `plugin__<plugin>__<tool>`, one namespace with the plugin's own tools (owner), compared ignoring case and at most 32 together. A server's may be camelCase and never hold `__`, so the prefix still comes apart one way. A76's provenance sentence gains a sibling for `[plugin: <id>]`, so a server moved from your mcp.json into a plugin keeps it |
+| **PL29** | **A server is Python: `"command": "python"` and `args` starting `"-m", "<module>"`, the module in `servers/` or the lock** (owner). It runs as `plugin_runner.py serve <spec>`. The spec is a file, since stdin is MCP's from the first byte. The walls go up as for a tool, then the module runs as `__main__` with `sys.stdin` and `sys.stdout` on private copies of the pipes, descriptor 0 at the null device and descriptor 1 at stderr: PL24's reasons, for a server on any SDK, since MCP SDK 2.3.0's own stdio server diverts both and 1.x does not. Settings arrive as `VENASTINE_PLUGIN_SETTINGS` and the granted workspace as `VENASTINE_WORKSPACE`. `env` is the plugin's, less what the harness sets or what decides what runs (`PATH`, `HOME`, the temporary folders, `PYTHON*`, `LD_*`, `DYLD_*`, `VENASTINE_*`). **Deferred, not refused for good (owner):** servers started by `npx`, `uvx` or another command, and remote `http` or SSE servers; the format refuses them with a sentence that says so |
+| **PL30** | **A server runs where the plugin's tools run, starts on the first call of one of its tools, and is kept for the session.** One container per server, from `_docker_argv` with the runner's mounts and the spec read-only, or a process behind PL25's walls; one client per server, the harness's own MCP client, so A79's bound applies. The grant (PL21) and the approval choice (PL23) are the plugin's. A change of isolation, grant, workspace, install or setting starts it again, and `/plugin access` and every refresh stop it at once, since a server is a process that can act between calls. A failure below the server's own answer -- a closed connection, an unanswered request, a wedged loop -- stops it, and the next call starts another; an error the server sends does not. A call takes `sandbox_timeout_seconds` and can be cancelled. Its stderr goes to a file in its private folder, read back as the reason it did not start. The MCP loop is shared with your own servers and stops when the last client lets go |
+| **PL31** | **`plugin.yaml` keeps what pasted JSON meant** (owner, batch 251, after a measurement). PyYAML reads YAML 1.1, where `1e6`, `1E+6` and `1.5e3` are text; the strict loader reads them as numbers, YAML 1.2's and JSON's rule, on its own copy of the resolver table. An escaped half of a surrogate pair, which YAML keeps as a broken half where JSON joins the pair, is refused in every field, with a sentence saying what to write |
 
 ### Built and measured (slice 1, batch 249, 2026-11-08)
 
@@ -3319,6 +3346,42 @@ recommendation each time.
   - a Docker container, with a locked `six` built by pip in the image, the workspace read-only,
     and no network.
 
+### Built and measured (slice 3, batch 251, 2026-11-09)
+
+- **Measured first:**
+  - the YAML probe above, on PyYAML 6.0.3;
+  - MCP SDK 2.3.0's own stdio server already diverts descriptors 0 and 1, and 1.x does not, so
+    the launcher does it for every server;
+  - `mcp==2.3.0` locks 28 packages for Linux's Python 3.13 (uv 0.12.5).
+- **The modules:**
+  - `core/plugin_mcp.py`, new: a server's launch, lifecycle and call;
+  - `core/plugin_runner.py` gains `serve`;
+  - `core/plugin_format.py` gains `parse_mcp_json`, `McpServer`, `McpTool`, the one namespace
+    and PL31, and loses PL5's hold-back;
+  - `core/plugin_tools.py` registers server tools and stops servers with runners;
+  - `mcp_client/client.py` gains the shared loop's holders, a cancellable call and `broken`;
+  - `prompts/system_prompts.py` gains `PLUGIN_PROVENANCE`;
+  - `core/plugin_commands.py`'s modal and `info` show each server.
+- **The guide:** `docs/PLUGINS.md` gains MCP servers, how to take a listing, and a server
+  written with the SDK. The template is unchanged: an SDK server needs a 28-package lock, which
+  the offline suite cannot build.
+- **Run end to end, outside the suite.** A plugin with a standard-library server, installed from
+  a folder and called through `/plugin`'s path:
+  - `process` on Windows, unconfined as the modal warns;
+  - `process` on WSL, where the write and the socket were refused and the read granted;
+  - a Docker container, its first call 9.1 s with the VM cold, a restart 0.4 s.
+- **And a server written with the SDK's `MCPServer`,** its listing taken as the guide says and
+  pasted unchanged, its 28-package lock built by pip:
+  - in a container, a 53 s build and a first call of 4.1 s;
+  - under the walls on WSL's Python 3.14, an 8 s build, with asyncio and pydantic running
+    behind Landlock and seccomp.
+- **Found while building:**
+  - taking access back left a running server on the old grant until its next call, and a server
+    is a process that can act between calls. `/plugin access` stops it at once, and a test
+    holds that;
+  - the first test server read stdin on its main thread, so it could not show the Windows pipe
+    hang an SDK server would. It reads on a thread now, as SDK servers do.
+
 ### Gap register
 
 - **No live marketplace install.** `plugins/` holds no plugin yet; the fetch is tested against a
@@ -3352,6 +3415,24 @@ recommendation each time.
   inside the bound AGENTS.md states (68 files after this batch), so the first plugin merged would
   turn `test_the_documented_doc_read_bound_is_not_understated` red on `main`. Slice 4 decides:
   count `plugins/` apart, or keep the marketplace out of the tool's reach in this repository.
+- **Deferred by the owner (batch 251): servers started by `npx`, `uvx` or another command, and
+  remote `http` or SSE servers.** Both are refused now, with a sentence that says deferred.
+  - The first needs an image with node or uv, the network granted for the fetch, and slice 4's
+    scanner rule for an unpinned package.
+  - The second needs somewhere a credential can live that is not the plain JSON `/plugin config`
+    prints, and the MCP meter (§53).
+- **A listing can drift from its server.** Each start compares them and logs the difference, and a
+  listed tool the server lacks fails by name. Nothing compares at install, since nothing runs
+  before the yes; slice 4's CI can start each server and compare.
+- **A server has no idle exit,** unlike a runner's 30 minutes; it lives for the session.
+- **A server's stderr file grows for the session,** in its private folder, removed when it stops.
+- **A server's first start holds the plugin-server table's lock,** as a runner's does.
+- **Under `process`, the MCP SDK's stdio client adds its own short list of environment
+  variables** to a server's: HOME, PATH, USER and the like on POSIX, USERPROFILE, APPDATA and the
+  like on Windows. On Linux the walls keep the home unreadable; elsewhere nothing is enforced.
+- **The SDK-written server ran by hand,** in a container and on WSL, not in CI: a 28-package lock
+  is a network build the offline suite cannot do. The suite's server is standard library over
+  the same protocol, and the `integration` job runs it in a container.
 
 ---
 

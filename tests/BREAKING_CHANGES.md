@@ -15,6 +15,21 @@ other name.
 
 ---
 
+## Plugins, slice 3: MCP servers (batch 251)
+
+| Change | Test | Fix |
+|---|---|---|
+| Read a plugin's mcp.json with `mcp_client.config` or a plain `json.loads` | `test_the_reader_is_strict`, `test_every_problem_is_reported` | PL27: `plugin_format.parse_mcp_json` |
+| Accept `url`, `headers`, another `type`, or a command but `python` | `test_a_remote_server_is_deferred_not_refused_for_good`, `test_a_server_is_python_and_other_commands_are_deferred` | PL29. Deferred by the owner, so the slice that adds them replaces the refusal; until then keep the sentence that says deferred |
+| Advertise what a server says about its tools, or a tool its listing leaves out | `test_tools_register_from_the_listing_and_nothing_starts` | PL28: the model reads the listing |
+| Let a server tool take a name another tool of the plugin has, case aside | `test_tool_names_are_one_namespace` | PL28 |
+| Leave a server running once its grant is taken back or its plugin turned off | `test_an_access_change_starts_it_again_with_the_new_grant`, `test_turning_the_plugin_off_unregisters_and_stops_its_servers` | PL30: `plugin_tools.stop` and `stop_all` stop servers too |
+| Stop the MCP loop while another client is connected | `test_one_client_leaving_keeps_the_loop_for_another` | PL30: `_hold` and `_release` around `_shutdown_loop` |
+| Restart a server over an error it sent | `test_broken_means_below_the_servers_own_answer`, `test_the_servers_own_errors_leave_it_running` | PL30: only `_BROKEN_CODES` and the transport mark it |
+| Let a server's descriptor 0 or 1 be the pipe | `test_descriptor_1_and_a_child_are_not_the_wire` | PL29: the launcher swaps both, as the tool runner does |
+| Read `1e6` in plugin.yaml as text, or keep half of a surrogate pair | `test_a_number_reads_as_json_reads_it`, `test_a_half_pair_in_any_field_is_refused` | PL31 |
+| Add a module-level table to `core/plugin_mcp.py` | `tests/test_process_memos.py` | Reset it in `plugin_mcp.reset()`, which `PROCESS_MEMOS` calls |
+
 ## Plugins, slice 2: tools (batch 250)
 
 | Change | Test | Fix |
@@ -39,7 +54,7 @@ other name.
 | Load a manifest with `yaml.safe_load`, or let an alias, a repeated key or an unknown field through | `test_aliases_are_refused`, `test_a_repeated_key_is_refused`, `test_an_unknown_key_is_refused_not_ignored` | The manifest parser is part of the boundary (PL2); keep `plugin_format.load_yaml` |
 | Load a plugin whose files changed since install | `test_a_changed_plugin_does_not_load` | `plugin_store.loadable` checks every recorded hash (PL8) |
 | Load a plugin's skill or agent under its bare name | `test_skills_and_agents_load_under_the_plugin_name`, `test_a_plugin_cannot_shadow_a_builtin` | Everything a plugin adds is prefixed (PL4); `_plugin_definition` renames |
-| Install a plugin that ships MCP servers before slice 3 | `test_a_plugin_with_mcp_servers_is_refused_before_the_modal`, `test_mcp_servers_are_held_back_before_any_download` | PL5 until slice 3 lands; then this row goes. Slice 2 (batch 250) took tools and dependencies off the list |
+| ~~Install a plugin that ships MCP servers before slice 3~~ | ~~`test_a_plugin_with_mcp_servers_is_refused_before_the_modal`~~, ~~`test_mcp_servers_are_held_back_before_any_download`~~ | Gone with PL5's list in slice 3 (batch 251); `test_an_invalid_mcp_json_is_refused_before_the_modal` and `test_a_server_outside_the_format_is_refused_before_any_download` took their places. Slice 2 (batch 250) took tools and dependencies off the list |
 | Download a file before the tree is checked, or skip the blob hash | `test_a_link_in_the_tree_is_refused_before_any_download`, `test_a_byte_that_differs_from_the_commit_is_refused` | PL12 |
 | Build the modal from the files rather than the staged parse | `test_the_modal_lists_what_will_load`, `test_a_broken_skill_refuses_the_install` | PL15: `config_loader.preview_plugin` |
 | Write anything before the yes | `test_no_writes_nothing`, `test_an_interrupted_cli_question_is_a_no` | Stage, ask, then commit (PL15) |

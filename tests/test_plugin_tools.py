@@ -304,8 +304,11 @@ class TestTheToolFormat:
                            f"    description: d\n    input_schema: {{type: object}}\n")
 
     def test_access_without_tools_is_refused(self):
-        with pytest.raises(PluginFormatError, match="declares no tools"):
-            self._manifest("access: {workspace: read}\n")
+        """Validate's question since slice 3, which knows mcp.json too."""
+        files = plugin_files("words", extra="access: {workspace: read}\n")
+        with pytest.raises(PluginFormatError,
+                           match="declares no tools and no MCP servers"):
+            plugin_format.validate("words", files)
 
     def test_the_prefix_comes_apart_one_way(self):
         name = plugin_format.tool_name("web-design", "word-count")

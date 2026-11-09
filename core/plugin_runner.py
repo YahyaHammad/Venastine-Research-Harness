@@ -37,6 +37,24 @@ THE PLUGIN'S OUTPUT IS NOT THE PROTOCOL. The protocol is written to a copy
 of the original stdout, and descriptor 1 is then pointed at stderr, so a
 `print()` in a tool -- or a C library writing to fd 1 -- lands in stderr,
 which the harness drains and bounds, instead of corrupting a reply.
+
+SLICE 3 (PL29): `plugin_runner.py serve <spec.json>` runs one of a plugin's
+MCP servers instead. The spec is a file, not a line on stdin, because stdin
+is the server's from its first byte: MCP over stdio, which the harness's
+MCP client speaks. The walls go up as for a tool, then the server's module
+runs as `__main__` with `sys.stdin` and `sys.stdout` on private copies of
+the pipes -- so a server on any MCP SDK, old or new, speaks on those -- and
+descriptors 0 and 1 pointed at the null device and stderr, for the reasons
+above. The spec:
+
+    {"protocol": 1, "module": "notes_server", "args": [...],
+     "env": {name: value}, "settings": {...}, "plugin_dir", "deps_dir",
+     "workspace", "access", "network", "tmp_dir",
+     "confine": {"module": path} | null}
+
+The server reads its plugin's settings as JSON in VENASTINE_PLUGIN_SETTINGS,
+and the workspace's path, where the grant lets it see one, in
+VENASTINE_WORKSPACE.
 """
 
 import importlib
@@ -45,6 +63,7 @@ import json
 import os
 import platform
 import queue
+import runpy
 import sys
 import threading
 import traceback
@@ -220,5 +239,60 @@ def main() -> int:
         out.flush()
 
 
+def serve(spec_path: str) -> int:
+    """One of a plugin's MCP servers, from the spec at `spec_path` (PL29).
+    A refusal is a line on stderr and an exit, which the harness reads
+    back as the reason the server did not connect."""
+    try:
+        with open(spec_path, encoding="utf-8") as handle:
+            spec = json.load(handle)
+        if spec.get("protocol") != PROTOCOL or not spec.get("module"):
+            raise ValueError("not a serve spec of this protocol")
+    except (OSError, ValueError) as exc:
+        print(f"venastine: bad serve spec: {exc}", file=sys.stderr, flush=True)
+        return 2
+    wire_in = os.fdopen(os.dup(0), "r", encoding="utf-8", newline="")
+    wire_out = os.fdopen(os.dup(1), "w", encoding="utf-8", newline="\n")
+    os.dup2(2, 1)
+    null = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(null, 0)
+    os.close(null)
+    if spec.get("confine"):
+        reason = _confine(spec)
+        if reason:
+            print(f"venastine: refused to run: {reason}", file=sys.stderr,
+                  flush=True)
+            return 3
+    # After the walls and appended, as for a tool: the standard library
+    # wins over a module the plugin ships under the same name.
+    sys.path.append(os.path.join(spec["plugin_dir"], "servers"))
+    if spec.get("deps_dir"):
+        sys.path.append(spec["deps_dir"])
+    os.environ.update({str(k): str(v) for k, v in (spec.get("env") or {}).items()})
+    os.environ["VENASTINE_PLUGIN_SETTINGS"] = json.dumps(spec.get("settings") or {})
+    os.environ.pop("VENASTINE_WORKSPACE", None)
+    if spec.get("workspace") and spec.get("access") in ("read", "write"):
+        os.environ["VENASTINE_WORKSPACE"] = spec["workspace"]
+        try:
+            os.chdir(spec["workspace"])
+        except OSError:
+            pass  # the harness set the working directory already
+    sys.stdin, sys.stdout = wire_in, wire_out
+    sys.argv = [spec["module"], *[str(a) for a in spec.get("args") or ()]]
+    try:
+        runpy.run_module(spec["module"], run_name="__main__", alter_sys=True)
+    except SystemExit as exc:
+        code = exc.code
+        return code if isinstance(code, int) else (0 if code is None else 1)
+    finally:
+        try:
+            wire_out.flush()
+        except (OSError, ValueError):
+            pass  # the harness closed its end; nothing is listening
+    return 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "serve":
+        sys.exit(serve(sys.argv[2]))
     sys.exit(main())

@@ -1052,6 +1052,9 @@ PROCESS_MEMOS = (
     # that no installed plugin backs.
     ("core.plugin_tools", ("_registered", "_runners"),
      lambda module: module.reset()),
+    # §94 slice 3 (PL30): the MCP servers this process started for
+    # plugins. A leftover is a live server another test calls into.
+    ("core.plugin_mcp", ("_servers",), lambda module: module.reset()),
     # D15's per-tool approval defaults for dynamically named tools, through
     # the module's own function: with no arguments it drops all of them.
     ("security.permissions", ("_dynamic_approval_defaults",),

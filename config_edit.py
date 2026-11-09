@@ -140,7 +140,8 @@ AUTHORITY_EFFECT = {
         "calls reviewed in its trust modal. What a plugin from there says "
         "becomes part of the model's instructions once you install it."),
     "plugin_tool_isolation": (
-        "where a plugin's tools run: in a container of their own, or as a "
+        "where a plugin's tools and MCP servers run: in a container of their "
+        "own, or as a "
         "process on this computer. As a process, only Linux can hold them "
         "to the access you granted; elsewhere they can read, write and send "
         "anything you can."),

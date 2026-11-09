@@ -45,7 +45,7 @@ from core import (
     plugin_store,
     plugin_tools,
 )
-from core.plugin_format import NeedsLaterVersion, PluginFormatError
+from core.plugin_format import PluginFormatError
 from core.plugin_source import FetchError
 from security import hosted
 
@@ -208,12 +208,6 @@ def _fetch(rest: str, shell: Shell, verb: str):
         if folder:
             return plugin_source.read_folder(folder)
         return plugin_source.fetch(plugin_id, config.PLUGIN_MARKETPLACE)
-    except NeedsLaterVersion as exc:
-        shell.error(
-            f"{folder or plugin_id} ships {', '.join(exc.features)}, which "
-            f"this version of the harness does not run yet, so it was not "
-            f"{'installed' if verb == 'install' else 'read'}. A later "
-            f"version runs them in a sandbox of their own.")
     except PluginFormatError as exc:
         _format_problems(folder or plugin_id, exc, shell)
     except FetchError as exc:
@@ -317,8 +311,9 @@ def describe(prepared: Prepared, replacing=None) -> list:
                      f"over where they still fit.")
     lines += ["", "What it adds, in every project until /plugin disable "
                   "turns it off there:"]
-    if not prepared.skills and not prepared.agents and not manifest.tools:
-        lines.append("  No skills, agents or tools: nothing it holds loads.")
+    if not prepared.skills and not prepared.agents and not manifest.has_code:
+        lines.append("  No skills, agents, tools or MCP servers: nothing it "
+                     "holds loads.")
     if prepared.skills:
         lines.append("  Skills. The model sees each one's name and "
                      "description in every conversation, and its whole "
@@ -334,7 +329,7 @@ def describe(prepared: Prepared, replacing=None) -> list:
                            f"{_agent_flags(a)}"
                            for name, a in sorted(prepared.agents.items())],
                           MAX_LISTED_DEFINITIONS, "agents")
-    if manifest.tools:
+    if manifest.has_code:
         lines += _tool_lines(candidate.id, manifest)
     if manifest.settings:
         lines.append(f"  Settings, yours to change with /plugin config "
@@ -365,28 +360,47 @@ def _shown_description(text: str) -> str:
 
 
 def _tool_lines(plugin_id: str, manifest) -> list:
-    """The modal's account of a plugin's code (PL20-PL25): what the model
-    can call, where it runs, what it asks to touch, and what it installs.
-    A description is shown as the model will read it, up to
+    """The modal's account of a plugin's code (PL20-PL25, PL27-PL29): what
+    the model can call, where it runs, what it asks to touch, and what it
+    installs. A description is shown as the model will read it, up to
     MAX_TOOL_DESCRIPTION_SHOWN characters, and says where it was cut."""
-    lines = [f"  Tools. The model sees each one and can call it; its code "
-             f"runs {plugin_tools.where_phrase()}:"]
-    lines += _bounded(
-        [f"    {plugin_format.tool_name(manifest.name, t.name)}  "
-         f"{_shown_description(t.description)}" for t in manifest.tools],
-        MAX_LISTED_DEFINITIONS, "tools")
+    lines = []
+    if manifest.tools:
+        lines.append(f"  Tools. The model sees each one and can call it; "
+                     f"its code runs {plugin_tools.where_phrase()}:")
+        lines += _bounded(
+            [f"    {plugin_format.tool_name(manifest.name, t.name)}  "
+             f"{_shown_description(t.description)}" for t in manifest.tools],
+            MAX_LISTED_DEFINITIONS, "tools")
+    if manifest.servers:
+        lines.append(f"  MCP servers. Each starts the first time the model "
+                     f"calls one of its tools, and runs "
+                     f"{plugin_tools.where_phrase()}. The model sees the "
+                     f"tools listed here and no others the server has:")
+        for server in manifest.servers:
+            lines.append(f"    {server.name}: {_clean(server.command_line)}")
+            if server.env:
+                shown = ", ".join(f"{k}={v}" for k, v in server.env)
+                lines.append(f"      environment: {_one_line(shown)}")
+            lines += _bounded(
+                [f"      {plugin_format.tool_name(manifest.name, t.name)}  "
+                 f"{_shown_description(t.model_description)}"
+                 for t in server.tools],
+                MAX_LISTED_DEFINITIONS, "tools")
     lines.append(f"  Each call asks you first. /plugin approval {plugin_id} "
                  f"auto turns that off for this plugin.")
     declared = manifest.access
+    what = ("Its tools and servers" if manifest.tools and manifest.servers
+            else "Its servers" if manifest.servers else "Its tools")
     if declared.asks:
         lines.append(
-            f"  Its tools ask for "
+            f"  {what} ask for "
             f"{plugin_tools.access_phrase(declared.workspace, declared.network)}"
-            f". Each project is asked the first time one of them runs there, "
-            f"and /plugin access {plugin_id} changes the answer.")
+            f". Each project is asked the first time one of its tools runs "
+            f"there, and /plugin access {plugin_id} changes the answer.")
     else:
-        lines.append("  Its tools ask for no workspace and no network, and "
-                     "get neither.")
+        lines.append(f"  {what} ask for no workspace and no network, and "
+                     f"get neither.")
     if manifest.requirements:
         where = ("into the sandbox image"
                  if plugin_tools.isolation() == plugin_tools.CONTAINER
@@ -515,7 +529,7 @@ def _describe_installed(record, shell: Shell) -> None:
     agents = [n for n in config_loader.get_agents() if n.startswith(record.name + ":")]
     shell.out(f"Skills loaded here: {', '.join(sorted(loaded)) or 'none'}.")
     shell.out(f"Agents loaded here: {', '.join(sorted(agents)) or 'none'}.")
-    if manifest.tools:
+    if manifest.has_code:
         _tools_here(record, manifest, project, shell)
     _settings_lines(record, manifest, shell)
 
@@ -527,6 +541,14 @@ def _tools_here(record, manifest, project, shell: Shell) -> None:
         shell.out("  Not offered to the model: they run in a container, and "
                   "neither Docker nor Podman is available.")
     shell.out(f"  They run {plugin_tools.where_phrase()}.")
+    if manifest.servers:
+        from core import plugin_mcp
+        live = plugin_mcp.running(record.name)
+        for server in manifest.servers:
+            state = ("running" if server.name in live
+                     else "starts on the first call of one of its tools")
+            shell.out(f"  MCP server {server.name}: "
+                      f"{_clean(server.command_line)} ({state}).")
     shell.out("  Each call runs without asking (/plugin approval "
               f"{record.id} ask)." if plugin_store.auto_approved(record.name)
               else f"  Each call asks you first (/plugin approval {record.id} "
@@ -564,8 +586,9 @@ def _access(rest: str, shell: Shell) -> None:
     manifest = _installed_manifest(record, shell)
     if manifest is None:
         return
-    if not manifest.tools:
-        shell.out(f"{record.id} has no tools, so there is nothing to grant.")
+    if not manifest.has_code:
+        shell.out(f"{record.id} has no tools or MCP servers, so there is "
+                  f"nothing to grant.")
         return
     project = config_loader.get_project_path()
     if not project:
@@ -696,8 +719,9 @@ def _install(rest: str, shell: Shell) -> None:
     _, notes = plugin_store.effective_settings(record.name, manifest)
     adds = [_count(len(prepared.skills), 'skill'),
             _count(len(prepared.agents), 'agent')]
-    if manifest.tools:
-        adds.append(_count(len(manifest.tools), 'tool'))
+    if manifest.has_code:
+        adds.append(_count(len(manifest.tools) + len(manifest.mcp_tools),
+                           'tool'))
     shell.out(f"Installed {record.id} {record.version}: "
               f"{', '.join(adds[:-1])} and {adds[-1]}, on in every project. "
               f"/plugin disable {record.id} turns it off here"
@@ -775,7 +799,10 @@ def _settings_lines(record, manifest, shell: Shell) -> None:
     for note in notes:
         shell.out(f"Note: {note}.")
     shell.out("Its tools read these on every call, so a change applies to "
-              "the next one; skills and agents do not read them.")
+              "the next one; skills and agents do not read them."
+              + (" Its MCP servers read them when they start, so a change "
+                 "starts each one again on its next call."
+                 if manifest.servers else ""))
 
 
 def _config(rest: str, shell: Shell) -> None:

@@ -25,6 +25,7 @@ key refused rather than ignored.
 import json
 import math
 import re
+import shlex
 import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Optional
@@ -79,23 +80,25 @@ MAX_MANIFEST_BYTES = 64 * 1024
 #: package pinned exactly and by the hash of what installs.
 REQUIREMENTS = "requirements.txt"
 
-#: The top level of a plugin, and nothing else may sit there (PL3).
-TOP_LEVEL = frozenset({MANIFEST, README, LICENSE, REQUIREMENTS, "skills",
-                       "agents", "tools", "tests"})
+#: Slice 3 (PL27-PL31). A plugin's MCP servers, in the `mcpServers` shape
+#: of your own mcp.json, each listing the tools it serves; the code of one
+#: the plugin ships sits in `servers/`.
+MCP_JSON = "mcp.json"
+SERVERS = "servers"
 
-#: PL5. What later slices of §94 run, by the top-level name that carries
-#: it. A plugin holding any of them is refused by this version, before the
-#: trust modal, rather than installed with half of what it is. Slice 2
-#: took tools and dependencies off this list.
-NOT_YET = {
-    "mcp.json": "MCP servers",
-}
+#: The top level of a plugin, and nothing else may sit there (PL3). PL5's
+#: list of what later slices run emptied with slice 3, and went with it.
+TOP_LEVEL = frozenset({MANIFEST, README, LICENSE, REQUIREMENTS, MCP_JSON,
+                       "skills", "agents", "tools", SERVERS, "tests"})
 
 #: PL20. Every tool a plugin adds is `plugin__<plugin>__<tool>`. A plugin
 #: name never holds `_` and a tool name never holds `__`, so unlike
 #: `mcp__<server>__<tool>` this prefix CAN be taken apart again.
 TOOL_PREFIX = "plugin__"
 _TOOL_NAME = re.compile(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*")
+#: PL28. A tool an MCP server serves keeps the server's own name, which may
+#: be camelCase; still no `__`, so the prefix comes apart one way.
+_MCP_TOOL_NAME = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*")
 #: The providers' rule for a whole tool name, prefix included:
 #: `^[a-zA-Z0-9_-]{1,64}$` (mcp_client/registration.py has the sources).
 MAX_TOOL_NAME_CHARS = 64
@@ -152,15 +155,6 @@ class PluginFormatError(ValueError):
         super().__init__("; ".join(self.problems))
 
 
-class NeedsLaterVersion(PluginFormatError):
-    """A well-formed plugin holding something this version does not run
-    (PL5). `features` names them, for the sentence that refuses it."""
-
-    def __init__(self, features):
-        self.features = list(features)
-        super().__init__([f"ships {', '.join(self.features)}"])
-
-
 # ---- names and ids -------------------------------------------------------
 
 def valid_name(name) -> bool:
@@ -199,12 +193,31 @@ def folder_of(parts: tuple) -> str:
 
 # ---- text fields ---------------------------------------------------------
 
+#: The categories no field may hold. Cs since batch 251 (PL31): a lone
+#: surrogate, which only an escape can make -- YAML takes an escaped pair
+#: as two halves where JSON joins it into one character, measured -- and
+#: which no UTF-8 encoder will write, so it could never reach a provider.
+_HIDDEN = ("Cc", "Cf", "Cs", "Zl", "Zp")
+
+
 def _invisible(text: str) -> bool:
-    """Control, format (bidi overrides, zero-width marks) and line or
-    paragraph separators. Each one makes what a reviewer reads and what a
-    reader prints differ, so no field of the manifest may hold one."""
-    return any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp")
-               for ch in text)
+    """Control, format (bidi overrides, zero-width marks), lone surrogates
+    and line or paragraph separators. Each one makes what a reviewer reads
+    and what a reader prints differ, so no field of the manifest may hold
+    one."""
+    return any(unicodedata.category(ch) in _HIDDEN for ch in text)
+
+
+def _half_pair(text: str) -> bool:
+    return any(unicodedata.category(ch) == "Cs" for ch in text)
+
+
+#: What to write instead of an escaped surrogate pair. No backslash-u in
+#: this file's own text, so no tool that edits it can turn one into the
+#: character it names.
+_HALF_PAIR = ("holds half of an escaped surrogate pair, which YAML keeps "
+              "as two broken halves where JSON makes one character; write "
+              "the character itself, or its eight-digit escape (a capital U)")
 
 
 def _line(value, max_chars: int):
@@ -427,7 +440,8 @@ def split_tool_name(full: str) -> Optional[tuple]:
     if not full.startswith(TOOL_PREFIX):
         return None
     plugin, sep, tool = full[len(TOOL_PREFIX):].partition("__")
-    if not sep or not valid_name(plugin) or not _TOOL_NAME.fullmatch(tool):
+    # The MCP rule, which holds every PL20 name too.
+    if not sep or not valid_name(plugin) or not _MCP_TOOL_NAME.fullmatch(tool):
         return None
     return plugin, tool
 
@@ -468,7 +482,7 @@ def _layout_only(text: str) -> bool:
     """`_invisible`, except that a newline or a tab is layout: a tool's
     description is written for the model, and YAML's block scalars end
     their lines with one."""
-    return not any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp")
+    return not any(unicodedata.category(ch) in _HIDDEN
                    and ch not in "\n\t" for ch in text)
 
 
@@ -484,6 +498,8 @@ def _json_like(value, depth: int = 0) -> Optional[str]:
     if isinstance(value, (int, float)):
         return None if _number(value) else "holds a number JSON cannot"
     if isinstance(value, str):
+        if _half_pair(value):
+            return _HALF_PAIR
         return None if _layout_only(value) else (
             "holds control or invisible characters")
     if isinstance(value, list):
@@ -496,6 +512,8 @@ def _json_like(value, depth: int = 0) -> Optional[str]:
         for key, item in value.items():
             if not isinstance(key, str) or isinstance(key, bool):
                 return f"has the key {key!r}, which is not text"
+            if _half_pair(key):
+                return _HALF_PAIR
             if not _layout_only(key):
                 return "has a key with control or invisible characters"
             why = _json_like(item, depth + 1)
@@ -557,21 +575,7 @@ def _parse_tools(plugin: str, raw, problems: list) -> tuple:
                             f"control or invisible characters")
             description = None
         schema = spec.get("input_schema")
-        why = None
-        if not isinstance(schema, dict):
-            why = "must be a mapping"
-        elif schema.get("type") != "object":
-            why = "must have type: object, as every tool's parameters do"
-        elif "properties" in schema and not isinstance(
-                schema["properties"], dict):
-            why = "its properties must be a mapping"
-        else:
-            why = _json_like(schema)
-            if why is None:
-                size = len(json.dumps(schema))
-                if size > MAX_TOOL_SCHEMA_CHARS:
-                    why = (f"is {size} characters as JSON, and a tool's "
-                           f"schema is at most {MAX_TOOL_SCHEMA_CHARS}")
+        why = _schema_problem(schema)
         if why:
             problems.append(f"{where}.input_schema: {why}")
             continue
@@ -579,6 +583,24 @@ def _parse_tools(plugin: str, raw, problems: list) -> tuple:
             out.append(ToolDef(name=name, description=description,
                                input_schema=schema))
     return tuple(out)
+
+
+def _schema_problem(schema) -> Optional[str]:
+    """Why `schema` cannot be a tool's parameters, or None. One rule for
+    a tool's `input_schema` and an MCP tool's `inputSchema` (PL20, PL28)."""
+    if not isinstance(schema, dict):
+        return "must be a mapping"
+    if schema.get("type") != "object":
+        return "must have type: object, as every tool's parameters do"
+    if "properties" in schema and not isinstance(schema["properties"], dict):
+        return "its properties must be a mapping"
+    why = _json_like(schema)
+    if why is None:
+        size = len(json.dumps(schema))
+        if size > MAX_TOOL_SCHEMA_CHARS:
+            why = (f"is {size} characters as JSON, and a tool's schema is "
+                   f"at most {MAX_TOOL_SCHEMA_CHARS}")
+    return why
 
 
 def _parse_access(raw, problems: list) -> Access:
@@ -708,12 +730,296 @@ def parse_requirements(text: str) -> tuple:
     return tuple(out)
 
 
+# ---- mcp.json (slice 3) --------------------------------------------------
+
+#: PL27. Servers in one plugin; each is a container of its own while it
+#: runs.
+MAX_SERVERS = 8
+MAX_ARGS = 64
+MAX_ARG_CHARS = 1000
+MAX_ENV = 32
+MAX_TITLE_CHARS = 200
+_ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+#: What the harness sets for a server, or what decides what runs rather
+#: than what it is told: a plugin's `env` may hold neither.
+_HARNESS_ENV = frozenset({"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "PWD"})
+_HARNESS_ENV_PREFIXES = ("PYTHON", "LD_", "DYLD_", "VENASTINE_")
+_MODULE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+#: MCP's own Tool fields, as a server's tools/list answer spells them, so a
+#: listing pastes in unchanged (PL28). The model reads the first four.
+_MCP_TOOL_KEYS = ("name", "title", "description", "inputSchema",
+                  "outputSchema", "annotations", "icons", "_meta", "execution")
+_SERVER_KEYS = ("type", "command", "args", "env", "tools")
+#: Keys your own mcp.json reads that a plugin's may not hold, and why.
+#: Remote servers and other commands are deferred, not refused for good
+#: (owner, batch 251); the sentence says so.
+_REMOTE = ("is for a remote MCP server, and a plugin's servers are local in "
+           "this version; remote servers are deferred to a later one")
+_NOT_A_PLUGINS = {
+    "url": _REMOTE,
+    "headers": _REMOTE,
+    "cwd": ("is the harness's to choose: the workspace when the project "
+            "grants it, else a private folder"),
+    "autoApprove": "is yours, not the plugin's: /plugin approval <id> auto",
+    "auto_approve": "is yours, not the plugin's: /plugin approval <id> auto",
+    "disabled": "is yours, not the plugin's: /plugin disable <id>",
+}
+
+
+@dataclass(frozen=True)
+class McpTool:
+    """One tool a plugin's MCP server serves, as its mcp.json lists it
+    (PL28). The model reads this, never what the server says at run time,
+    so what the modal showed is what the model gets."""
+
+    name: str
+    description: str
+    input_schema: dict = field(hash=False)
+    title: Optional[str] = None
+    server: str = ""
+
+    @property
+    def model_description(self) -> str:
+        """The title composed in, as mcp_client/registration.py does."""
+        if self.title and self.title not in self.description:
+            return f"{self.title}. {self.description}"
+        return self.description
+
+
+@dataclass(frozen=True)
+class McpServer:
+    """One server in a plugin's mcp.json (PL27, PL29): `python -m module
+    args...`, a module the plugin ships in servers/ or one its lock
+    installs."""
+
+    name: str
+    module: str
+    args: tuple = ()
+    env: tuple = ()          # ((name, value), ...)
+    tools: tuple = ()
+
+    @property
+    def command_line(self) -> str:
+        return shlex.join(["python", "-m", self.module, *self.args])
+
+
+def _strict_json(text: str):
+    """`json.loads`, refusing what the user tier's reader lets through: a
+    repeated key (a reviewer sees the first, a loader keeps the last, as
+    PL2 says of YAML) and NaN or Infinity, which JSON proper has not got."""
+    def pairs(items):
+        out = {}
+        for key, value in items:
+            if key in out:
+                raise ValueError(f"the key {key!r} appears twice")
+            out[key] = value
+        return out
+
+    def constant(word):
+        raise ValueError(f"{word} is not a JSON value")
+
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+
+
+def _shown_key(key) -> str:
+    text = str(key)[:60]
+    return repr(text) if _invisible(text) else text
+
+
+def parse_mcp_json(text: str, plugin: str) -> tuple:
+    """A plugin's mcp.json (PL27): its servers, each with the tools it
+    serves. PluginFormatError listing every problem otherwise.
+
+    YOUR OWN mcp.json'S SHAPE, AND A STRICTER READER. The user tier ignores
+    a key it does not know and turns an entry it cannot read into that
+    server's failure at connect, because a file you wrote or pasted should
+    not stop a session (ROADMAP_v2 §17's decision G). A plugin's file is
+    read before its trust modal, by the rule the manifest has: every key
+    known, every field typed, every problem reported.
+    """
+    try:
+        data = _strict_json(text)
+    except RecursionError:
+        raise PluginFormatError(
+            [f"{MCP_JSON} nests too deeply to read"]) from None
+    except ValueError as exc:
+        if isinstance(exc, json.JSONDecodeError):
+            why = f"{exc.msg} (line {exc.lineno}, column {exc.colno})"
+        else:
+            why = str(exc)
+        raise PluginFormatError(
+            [f"{MCP_JSON} is not valid JSON: {why}"]) from None
+    if not isinstance(data, dict):
+        raise PluginFormatError(
+            [f'{MCP_JSON} must be an object: {{"mcpServers": {{...}}}}'])
+    problems = []
+    unknown = [_shown_key(k) for k in data if k != "mcpServers"]
+    if unknown:
+        problems.append(f"{MCP_JSON}: {', '.join(unknown)} "
+                        f"{'is' if len(unknown) == 1 else 'are'} not a field; "
+                        f"a plugin's {MCP_JSON} holds mcpServers and nothing "
+                        f"else")
+    raw = data.get("mcpServers")
+    if not isinstance(raw, dict) or not raw or len(raw) > MAX_SERVERS:
+        problems.append(f"{MCP_JSON}: mcpServers must be an object of 1 to "
+                        f"{MAX_SERVERS} servers")
+        raise PluginFormatError(problems)
+    servers = []
+    for name, spec in raw.items():
+        server = _parse_server(plugin, name, spec, problems)
+        if server is not None:
+            servers.append(server)
+    if problems:
+        raise PluginFormatError(problems)
+    return tuple(servers)
+
+
+def _parse_server(plugin: str, name: str, spec, problems: list):
+    if not valid_name(name):
+        problems.append(f"mcpServers: {_shown_key(name)!r} is not a server "
+                        f"name: lowercase letters, digits and single "
+                        f"hyphens, at most {MAX_NAME_CHARS} characters")
+        return None
+    where = f"mcpServers.{name}"
+    if not isinstance(spec, dict):
+        problems.append(f"{where}: an object with command, args and tools")
+        return None
+    count = len(problems)
+    for key in spec:
+        if key not in _SERVER_KEYS:
+            problems.append(f"{where}.{_shown_key(key)}: " + _NOT_A_PLUGINS.get(
+                key, "is not a field of a plugin's MCP server"))
+    kind = spec.get("type", "stdio")
+    if kind != "stdio":
+        problems.append(f"{where}.type: is {str(kind)[:40]!r}, and a "
+                        f"plugin's server speaks stdio; remote servers are "
+                        f"deferred to a later version")
+    if spec.get("command") != "python":
+        problems.append(
+            f'{where}.command: must be "python", with "args": ["-m", '
+            f'"<module>", ...]: a plugin\'s server is a Python module it '
+            f'ships in {SERVERS}/ or installs from its {REQUIREMENTS}. '
+            f'Servers started by npx, uvx or another command are deferred '
+            f'to a later version')
+    args = spec.get("args")
+    module, rest = None, ()
+    if (not isinstance(args, list) or len(args) < 2 or args[0] != "-m"
+            or not isinstance(args[1], str) or not _MODULE.fullmatch(args[1])):
+        problems.append(f'{where}.args: must start "-m", "<module>", a '
+                        f'dotted Python module name, as in ["-m", '
+                        f'"notes_server"]')
+    else:
+        module, rest = args[1], tuple(args[2:])
+        if len(rest) > MAX_ARGS or not all(
+                isinstance(a, str) and len(a) <= MAX_ARG_CHARS
+                and not _invisible(a) for a in rest):
+            problems.append(f"{where}.args: at most {MAX_ARGS} after the "
+                            f"module, each text of at most {MAX_ARG_CHARS} "
+                            f"characters on one line")
+    env = []
+    raw_env = spec.get("env", {})
+    if not isinstance(raw_env, dict) or len(raw_env) > MAX_ENV:
+        problems.append(f"{where}.env: an object of at most {MAX_ENV} "
+                        f"variables, each a text value")
+    else:
+        for key, value in raw_env.items():
+            if not _ENV_KEY.fullmatch(key):
+                problems.append(f"{where}.env: {_shown_key(key)!r} is not a "
+                                f"variable name: capital letters, digits and "
+                                f"'_', starting with a letter")
+            elif key in _HARNESS_ENV or key.startswith(_HARNESS_ENV_PREFIXES):
+                problems.append(f"{where}.env.{key}: is the harness's to set")
+            elif (not isinstance(value, str) or len(value) > MAX_ARG_CHARS
+                  or _invisible(value)):
+                problems.append(f"{where}.env.{key}: text of at most "
+                                f"{MAX_ARG_CHARS} characters on one line")
+            else:
+                env.append((key, value))
+    tools = []
+    raw_tools = spec.get("tools")
+    if not isinstance(raw_tools, list) or not raw_tools:
+        problems.append(
+            f"{where}.tools: a list of the tools this server serves that the "
+            f"model may call, each as the server's own tools/list answer "
+            f"gives it: name, description and inputSchema. A tool the server "
+            f"has and this list leaves out never loads")
+    elif len(raw_tools) > MAX_TOOLS:
+        problems.append(f"{where}.tools: at most {MAX_TOOLS}")
+    else:
+        for index, tool_spec in enumerate(raw_tools):
+            tool = _parse_mcp_tool(plugin, name, index, tool_spec, problems)
+            if tool is not None:
+                tools.append(tool)
+    if len(problems) > count or module is None:
+        return None
+    return McpServer(name=name, module=module, args=rest, env=tuple(env),
+                     tools=tuple(tools))
+
+
+def _parse_mcp_tool(plugin: str, server: str, index: int, spec,
+                    problems: list):
+    where = f"mcpServers.{server}.tools[{index}]"
+    if not isinstance(spec, dict):
+        problems.append(f"{where}: an object with name, description and "
+                        f"inputSchema")
+        return None
+    unknown = [_shown_key(k) for k in spec if k not in _MCP_TOOL_KEYS]
+    if unknown:
+        problems.append(f"{where}: {', '.join(unknown)} "
+                        f"{'is' if len(unknown) == 1 else 'are'} not a field "
+                        f"of an MCP tool")
+    name = spec.get("name")
+    if not isinstance(name, str) or not _MCP_TOOL_NAME.fullmatch(name):
+        problems.append(
+            f"{where}.name: letters and digits, words joined by single '-' or "
+            f"'_', starting with a letter. A provider takes no other tool "
+            f"name, so a server's tool named otherwise cannot be offered "
+            f"through a plugin")
+        return None
+    where = f"mcpServers.{server}.tools.{name}"
+    full = tool_name(plugin, name)
+    if len(full) > MAX_TOOL_NAME_CHARS:
+        problems.append(
+            f"{where}: the model calls it {full}, {len(full)} characters, and "
+            f"a provider accepts at most {MAX_TOOL_NAME_CHARS}; the server "
+            f"names its tools, so shorten the plugin's name")
+    description = spec.get("description")
+    if (not isinstance(description, str) or not description.strip()
+            or len(description) > MAX_TOOL_DESCRIPTION_CHARS
+            or not _layout_only(description)):
+        problems.append(
+            f"{where}.description: text of at most "
+            f"{MAX_TOOL_DESCRIPTION_CHARS} characters, no control or "
+            f"invisible characters. Write one here if the server gives none: "
+            f"this is what the model reads")
+        description = None
+    title = spec.get("title")
+    if title is not None and _line(title, MAX_TITLE_CHARS) is None:
+        problems.append(f"{where}.title: one line of at most "
+                        f"{MAX_TITLE_CHARS} characters")
+    why = _schema_problem(spec.get("inputSchema"))
+    if why:
+        problems.append(f"{where}.inputSchema: {why}")
+        return None
+    for key in _MCP_TOOL_KEYS[4:]:
+        if key in spec:
+            other = _json_like(spec[key])
+            if other:
+                problems.append(f"{where}.{key}: {other}")
+    if description is None:
+        return None
+    return McpTool(name=name, description=description,
+                   input_schema=spec["inputSchema"], title=title,
+                   server=server)
+
+
 # ---- the manifest --------------------------------------------------------
 
 @dataclass(frozen=True)
 class Manifest:
     """A plugin's `plugin.yaml`, validated (PL2). `requirements` is
-    `requirements.txt`'s, when `validate` or `read_installed` read one."""
+    `requirements.txt`'s and `servers` is `mcp.json`'s, when `validate` or
+    `read_installed` read them."""
 
     name: str
     version: str
@@ -726,12 +1032,26 @@ class Manifest:
     tools: tuple = ()
     access: Access = Access()
     requirements: tuple = ()
+    servers: tuple = ()
 
     def setting(self, key: str) -> Optional[Setting]:
         return next((s for s in self.settings if s.key == key), None)
 
     def tool(self, name: str) -> Optional[ToolDef]:
         return next((t for t in self.tools if t.name == name), None)
+
+    def server(self, name: str) -> Optional[McpServer]:
+        return next((s for s in self.servers if s.name == name), None)
+
+    @property
+    def mcp_tools(self) -> tuple:
+        """Every tool the plugin's servers serve, in mcp.json's order."""
+        return tuple(t for s in self.servers for t in s.tools)
+
+    @property
+    def has_code(self) -> bool:
+        """Whether anything of the plugin's runs: tools or servers."""
+        return bool(self.tools or self.servers)
 
 
 class _StrictLoader(yaml.SafeLoader):
@@ -766,6 +1086,19 @@ def _construct_mapping(loader, node, deep=False):
 
 _StrictLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping)
+
+#: PL31. YAML 1.1, which PyYAML reads, makes `1e6` -- JSON's way to write a
+#: million -- the TEXT "1e6": its floats need a dot and a signed exponent.
+#: Of `1e6`, `1E+6`, `1.5e3` and `1.5e-3`, only the last stayed a number
+#: (PyYAML 6.0.3, measured), so a schema pasted from JSON passed every check
+#: and sent a provider `"maximum": "1e6"`. YAML 1.2 reads all four as
+#: numbers, and so does this loader (owner, batch 251). Appended after
+#: SafeLoader's own resolvers, none of which matches these, on this class's
+#: own copy of the table.
+_StrictLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    re.compile(r"^[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[eE][-+]?[0-9]+$"),
+    list("-+0123456789."))
 
 
 def load_yaml(text: str):
@@ -863,10 +1196,9 @@ def parse_manifest(text: str, name: str) -> Manifest:
                              else name, data["tools"], problems)
     access = Access()
     if "access" in data:
+        # Whether anything uses it is `validate`'s question (_code_files),
+        # since an MCP server, which mcp.json declares, uses it too.
         access = _parse_access(data["access"], problems)
-        if "tools" not in data and access.asks:
-            problems.append("access: is what a plugin's tools may touch, and "
-                            "this plugin declares no tools")
 
     if problems:
         raise PluginFormatError(problems)
@@ -908,15 +1240,14 @@ def _component_ok(part: str) -> bool:
             and part.split(".")[0].casefold() not in _WINDOWS_RESERVED)
 
 
-def check_files(sizes: dict) -> tuple:
-    """(problems, later) for a plugin's files, given each one's size by
-    its path inside the plugin folder (posix separators).
+def check_files(sizes: dict) -> list:
+    """The problems with a plugin's files, given each one's size by its
+    path inside the plugin folder (posix separators).
 
     BY SIZE ALONE, so the marketplace refuses a plugin from GitHub's tree
-    listing before downloading any of it (PL12). `later` names what PL5
-    holds back: the features of later slices this plugin carries.
+    listing before downloading any of it (PL12).
     """
-    problems, later = [], []
+    problems = []
     if len(sizes) > MAX_FILES:
         problems.append(f"{len(sizes)} files; a plugin holds at most "
                         f"{MAX_FILES}")
@@ -947,13 +1278,10 @@ def check_files(sizes: dict) -> tuple:
             problems.append(f"{path!r}: {sizes[path]:,} bytes; one file holds "
                             f"at most {MAX_FILE_BYTES:,}")
         top = parts[0]
-        if top in NOT_YET:
-            later.append(top)
-            continue
         if top not in TOP_LEVEL:
             problems.append(f"{path!r}: {top!r} is not part of the plugin "
                             f"format")
-        elif top in (MANIFEST, README, LICENSE, REQUIREMENTS):
+        elif top in (MANIFEST, README, LICENSE, REQUIREMENTS, MCP_JSON):
             if len(parts) > 1:
                 problems.append(f"{path!r}: {top} is a file, not a folder")
         elif len(parts) == 1:
@@ -968,25 +1296,27 @@ def check_files(sizes: dict) -> tuple:
             # from the workspace; a binary here is what a reviewer cannot
             # read, and slice 4's scanner refuses one outright.
             problems.append(f"{path!r}: tools/ holds .py files")
+        elif top == SERVERS and not path.endswith(".py"):
+            # tools/'s rule, for its reason. Folders are allowed here: a
+            # server is a module and may be a package.
+            problems.append(f"{path!r}: {SERVERS}/ holds .py files")
     for required in (MANIFEST, README):
         if required not in sizes:
             problems.append(f"no {required}")
-    # In NOT_YET's order, the order the slices that run them come in.
-    return problems, [what for top, what in NOT_YET.items() if top in later]
+    return problems
 
 
 def validate(name: str, files: dict) -> Manifest:
     """The manifest of the plugin called `name`, whose files are `files`
     ({path: bytes}), after every check this module owns. Raises
-    PluginFormatError with every problem, or NeedsLaterVersion when the
-    plugin is valid and carries something PL5 holds back."""
-    problems, later = check_files({path: len(data) for path, data in files.items()})
+    PluginFormatError with every problem."""
+    problems = check_files({path: len(data) for path, data in files.items()})
     if not valid_name(name):
         problems.insert(0, f"{name + SUFFIX!r}: the folder name must be "
                            f"lowercase letters, digits and single hyphens")
-    manifest, requirements = None, ()
+    manifest, requirements, servers = None, (), ()
     text_files = [path for path in files
-                  if path in (MANIFEST, README, REQUIREMENTS)
+                  if path in (MANIFEST, README, REQUIREMENTS, MCP_JSON)
                   or path.endswith((".md", ".py"))]
     for path in sorted(text_files):
         try:
@@ -1004,22 +1334,27 @@ def validate(name: str, files: dict) -> Manifest:
                 requirements = parse_requirements(text.lstrip(BOM))
             except PluginFormatError as exc:
                 problems.extend(exc.problems)
+        elif path == MCP_JSON:
+            try:
+                servers = parse_mcp_json(text.lstrip(BOM), name)
+            except PluginFormatError as exc:
+                problems.extend(exc.problems)
     if manifest is not None:
-        problems.extend(_tool_files(manifest, files, requirements))
+        problems.extend(_code_files(manifest, files, servers))
     if problems:
         raise PluginFormatError(problems)
-    if later:
-        raise NeedsLaterVersion(later)
-    return replace(manifest, requirements=requirements)
+    return replace(manifest, requirements=requirements, servers=servers)
 
 
 BOM = chr(0xFEFF)
 
 
-def _tool_files(manifest: Manifest, files, requirements) -> list:
-    """What the manifest's tools and the files must agree on (PL20, PL22):
-    each declared tool's code is there, no code sits there for a tool
-    nobody declared, and dependencies come with tools to use them."""
+def _code_files(manifest: Manifest, files, servers: tuple) -> list:
+    """What the manifest, mcp.json and the files must agree on (PL20,
+    PL22, PL27-PL29): each declared tool's code is there, no code sits
+    there for nothing, each server's module is the plugin's or its lock's,
+    and dependencies and access come with something to use them. Tool
+    names are one namespace across tools and servers."""
     problems = []
     code = [path for path in files if path.startswith("tools/")]
     for tool in manifest.tools:
@@ -1029,23 +1364,67 @@ def _tool_files(manifest: Manifest, files, requirements) -> list:
     if code and not manifest.tools:
         problems.append(f"tools/ holds code, but {MANIFEST} declares no "
                         f"tools; declare them under tools:")
-    if REQUIREMENTS in files and not manifest.tools:
+    shipped = [path for path in files if path.startswith(SERVERS + "/")]
+    for server in servers:
+        top = server.module.split(".")[0]
+        if (f"{SERVERS}/{top}.py" in files
+                or any(p.startswith(f"{SERVERS}/{top}/") for p in shipped)):
+            continue
+        if REQUIREMENTS not in files:
+            problems.append(f"mcpServers.{server.name}: runs the module "
+                            f"{server.module}, which is not in {SERVERS}/, "
+                            f"and there is no {REQUIREMENTS} to install it "
+                            f"from")
+    if shipped and not servers:
+        problems.append(f"{SERVERS}/ holds code, but there is no {MCP_JSON} "
+                        f"naming a server to run it")
+    anything = manifest.tools or servers
+    if REQUIREMENTS in files and not anything:
         problems.append(f"{REQUIREMENTS}: dependencies are for a plugin's "
-                        f"tools, and this plugin declares none")
+                        f"tools and MCP servers, and this plugin declares "
+                        f"none")
+    if manifest.access.asks and not anything:
+        problems.append("access: is what a plugin's tools and MCP servers "
+                        "may touch, and this plugin declares no tools and "
+                        "no MCP servers")
+    # PL28: one namespace. Slice 2's tools are lowercase and already
+    # unique among themselves; a server's may be camelCase, and two names
+    # one letter's case apart are one name to a reader.
+    taken = {t.name.casefold(): f"tools.{t.name}" for t in manifest.tools}
+    count = len(manifest.tools)
+    for server in servers:
+        for tool in server.tools:
+            count += 1
+            where = f"mcpServers.{server.name}.tools.{tool.name}"
+            folded = tool.name.casefold()
+            if folded in taken:
+                problems.append(f"{where}: the name is already "
+                                f"{taken[folded]}; names are compared "
+                                f"ignoring case")
+            else:
+                taken[folded] = where
+    if count > MAX_TOOLS:
+        problems.append(f"{count} tools in all; a plugin adds at most "
+                        f"{MAX_TOOLS}, its own and its servers' together")
     return problems
 
 
 def read_installed(root: str, name: str) -> Manifest:
     """The manifest of the plugin installed at `root`, with its
-    requirements, read from disk. PluginFormatError or OSError otherwise.
-    Not `validate`: the files were validated at install, and PL8's hashes
-    say whether they still are those files."""
+    requirements and servers, read from disk. PluginFormatError or OSError
+    otherwise. Not `validate`: the files were validated at install, and
+    PL8's hashes say whether they still are those files."""
     with open(f"{root}/{MANIFEST}", encoding="utf-8-sig") as handle:
         manifest = parse_manifest(handle.read(), name)
-    requirements = ()
+    requirements, servers = (), ()
     try:
         with open(f"{root}/{REQUIREMENTS}", encoding="utf-8-sig") as handle:
             requirements = parse_requirements(handle.read())
     except FileNotFoundError:
         pass
-    return replace(manifest, requirements=requirements)
+    try:
+        with open(f"{root}/{MCP_JSON}", encoding="utf-8-sig") as handle:
+            servers = parse_mcp_json(handle.read(), name)
+    except FileNotFoundError:
+        pass
+    return replace(manifest, requirements=requirements, servers=servers)

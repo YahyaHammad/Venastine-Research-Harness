@@ -970,6 +970,8 @@ built for this Python. On Linux the runner confines itself with Landlock and sec
 the project granted, or refuses every call (PL25); elsewhere nothing confines it, and the trust
 modal says so. A plugin's dependencies are built for one or the other, so changing this means
 reinstalling any plugin that has them; its tools say so rather than run on the wrong build.
+Since batch 251 the key covers a plugin's MCP servers too (PL30): each server is a container of
+its own, or a process behind the same walls, started by the same launcher.
 
 ## Network limits (ROADMAP_v3 §53)
 

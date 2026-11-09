@@ -6,9 +6,9 @@ touching any of the harness's files. Plugins come from the marketplace in this r
 from a folder on your own computer. `docs/ROADMAP_v3.md` §94 records why each rule
 below is what it is.
 
-**What this version runs:** skills, agents, settings, and tools with their Python
-dependencies, each plugin's tools in a sandbox of their own. MCP servers are coming in a
-later version; a plugin that ships one is refused for now, rather than half installed.
+**What this version runs:** skills, agents, settings, tools with their Python dependencies,
+and MCP servers written in Python, each plugin's code in a sandbox of its own. Servers started
+by `npx` or `uvx`, and remote servers, are deferred to a later version.
 
 ## Using plugins
 
@@ -47,7 +47,8 @@ every file at install; if one changes afterwards, the plugin stops loading, and
 
 **Settings** are each plugin's own, declared in its manifest and stored beside it. They are
 never keys in `config.yaml`, and no plugin can add one there. A plugin's tools read them on
-every call, so a change applies to the next one; skills and agents do not read them.
+every call, so a change applies to the next one; its MCP servers read them when they start, so a
+change starts each one again. Skills and agents do not read them.
 
 ### A plugin's tools
 
@@ -80,6 +81,17 @@ and lives in the store, never in anything the plugin ships.
 
 **A tool cannot** call the model, call another tool, or ask you anything. It gets its
 parameters, the plugin's settings and what you granted, and returns a result.
+
+### A plugin's MCP servers
+
+A plugin can also run MCP servers. The trust modal lists each one with the command it runs, its
+environment, and every tool of it the model will see, with the description the model will read;
+a tool the server has that the plugin does not list never loads. A server starts the first time
+the model calls one of its tools, and runs where the plugin's tools run, with the same grant, the
+same asking first and the same `/plugin approval`. `/plugin info <id>` says whether each one is
+running. Taking access back with `/plugin access` stops it at once.
+
+Your own MCP servers stay in your `mcp.json`, and work as they always have.
 
 **Turning plugins off.** `plugins_enabled: false` in `config.yaml` (through `/config`) hides
 every installed plugin without uninstalling it. A hosted deployment never loads plugins.
@@ -120,7 +132,9 @@ example.plugin/
   skills/            .md files, in folders if you like
   agents/            .md files, no folders
   tools/             .py files: each declared tool's code, and any helpers it imports
-  requirements.txt   optional: the tools' Python dependencies, as a hashed lock
+  mcp.json           optional: its MCP servers, and the tools each serves
+  servers/           .py files, in folders if you like: the servers' own code
+  requirements.txt   optional: Python dependencies of tools and servers, as a hashed lock
   tests/             anything; never loaded by the harness
 ```
 
@@ -170,6 +184,9 @@ ignored:
 - YAML aliases (`&name` / `*name`) are refused.
 - No field may hold control characters or invisible ones, such as a right-to-left override.
 - Quote versions: YAML reads `1.0` as a number.
+- A number written as JSON writes it, such as `1e6`, reads as that number.
+- An escape for half of a character, such as an emoji's first half alone, is refused: write the
+  character itself.
 - Don't name a setting `on`, `off`, `yes` or `no`: YAML reads those words as true and false.
 
 ### Settings
@@ -265,10 +282,114 @@ def run(params, context):
 Every tool you declare needs its file, and a `.py` file with no declared tool is refused, so
 there is no dead code for a reviewer to wonder about.
 
+### MCP servers
+
+List them in **`mcp.json`**, in the shape your own `~/.config/venastine/mcp.json` has, with one
+addition: each server lists the tools it serves.
+
+```json
+{
+  "mcpServers": {
+    "notes": {
+      "command": "python",
+      "args": ["-m", "notes_server"],
+      "env": {"NOTES_MODE": "brief"},
+      "tools": [
+        {
+          "name": "word_count",
+          "description": "Count the words in some text.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {"text": {"title": "Text", "type": "string"}},
+            "required": ["text"]
+          }
+        }
+      ]
+    }
+  }
+}
+```
+
+- **A server is Python.** `command` is `"python"`, and `args` start with `"-m"` and a module.
+  Anything after the module is passed to it. The module is one your plugin ships in `servers/`,
+  as a file or a package, or one its `requirements.txt` installs. The harness starts it with its
+  own launcher, where your tools run and with the same grant.
+- **`tools`** is the server's own `tools/list` answer, pasted unchanged. Every field MCP gives a
+  tool is accepted (`name`, `title`, `description`, `inputSchema`, `outputSchema`,
+  `annotations`, `icons`, `_meta` and `execution`), and the first four are what the model reads.
+  List only what the model should have: a tool the server serves that is not listed never loads.
+  The model calls each one `plugin__<plugin>__<name>`, in one namespace with your plugin's own
+  tools and at most 32 of them in all. A server's tool may be named in camelCase; no `__`.
+- **`env`** holds plain values, and the modal shows them. It cannot set `PATH`, `HOME`, the
+  temporary-folder variables, or anything starting `PYTHON`, `LD_`, `DYLD_` or `VENASTINE_`.
+- **Not a plugin's:** `cwd`, `autoApprove` and `disabled`. The harness picks the working
+  directory, and asking first and turning a plugin off are yours (`/plugin approval`,
+  `/plugin disable`).
+- **Not yet:** servers started by `npx`, `uvx` or any command other than `python`, and remote
+  (`http` or SSE) servers. They are deferred to a later version, and refused until then with a
+  sentence that says so.
+
+The file is read as strictly as the manifest: a key that appears twice, `NaN`, an unknown field
+and a value of the wrong type are each refused, and every problem is reported at once. It is
+read as JSON, so it keeps your numbers and escapes as you wrote them.
+
+**Getting the listing.** Run your server once with the MCP SDK's client and print its answer:
+
+```python
+import asyncio, json
+from mcp import Client
+from mcp.client.stdio import StdioServerParameters, stdio_client
+
+async def main():
+    server = StdioServerParameters(command="python", args=["-m", "notes_server"], cwd="servers")
+    async with Client(stdio_client(server)) as client:
+        tools = (await client.list_tools()).tools
+        print(json.dumps([t.model_dump(by_alias=True, exclude_none=True) for t in tools], indent=2))
+
+asyncio.run(main())
+```
+
+**A server written with the SDK.** In version 2 of the MCP SDK, what version 1 called `FastMCP`
+is `MCPServer`:
+
+```python
+# servers/notes_server.py
+from mcp.server.mcpserver import MCPServer
+
+server = MCPServer("notes")
+
+@server.tool()
+def word_count(text: str) -> int:
+    """Count the words in some text."""
+    return len(text.split())
+
+if __name__ == "__main__":
+    server.run()
+```
+
+The SDK and everything it needs go in your lock: `mcp==2.3.0` in `requirements.in` locks 28
+packages, which took 53 seconds to build in the sandbox image, measured.
+
+**What a server is given:**
+
+| | |
+|---|---|
+| `VENASTINE_PLUGIN_SETTINGS` | The plugin's settings, as JSON |
+| `VENASTINE_WORKSPACE` | The workspace's path, when this project granted read or write; unset otherwise |
+| Its working directory | The workspace when granted, else a private folder |
+
+- **`sys.stdin` and `sys.stdout` are MCP's pipe; descriptors 0 and 1 are not.** A child
+  process the server starts gets nothing on its stdin, and a write to descriptor 1 lands in the
+  log. A `print()` goes on the pipe and breaks it, as under any MCP host, so log to stderr.
+- **A server keeps running** for the session. A settings change, an access change or a
+  reinstall starts it again on its next call, and so does a crash or a call past
+  `sandbox_timeout_seconds`. An error your tool reports is that call's error and nothing more.
+- **Its results are held to `max_read_chars`,** as your own servers' are.
+
 ### Dependencies
 
-`requirements.txt` lists every package your tools need, **including the ones those depend
-on**, each pinned exactly and with the hash of every file it may install from:
+`requirements.txt` lists every package your tools and servers need, **including the ones
+those depend on**, each pinned exactly and with the hash of every file it may install from:
 
 ```
 six==1.17.0 \
@@ -305,7 +426,8 @@ there needs another dependency. If yours does, say so in your README.
 `info` shows the trust modal's text without installing anything. Install again after each
 change: the modal marks it as a replacement. Then ask the model to use a tool, or test its
 module directly: `run(params, context)` is a plain function, and anything with the context's
-attributes will do for a test in your `tests/` folder.
+attributes will do for a test in your `tests/` folder. A server is tested the way its SDK
+tests one, or by running it and calling it with the client above.
 
 ## Contributing to the marketplace
 

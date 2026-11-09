@@ -151,6 +151,10 @@ EXEMPT = {
         "as the process by design",
     ("mcp_client/client.py", "_thread"):
         "the thread that loop runs in",
+    ("mcp_client/client.py", "_holders"):
+        "the clients connected on that loop, so the last to disconnect "
+        "stops it (PL30); a client leaves as it disconnects, and a "
+        "leftover only keeps the loop running, which `_loop` already does",
     ("prompts/system_prompts.py", "passes_source_files"):
         "a constant table, pass id to file name; nothing mutates it",
     ("security/posture.py", "_posture"):

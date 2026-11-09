@@ -542,6 +542,50 @@ class TestAnMcpToolsDescriptionIsSaidToBeTheServers:
             "Pass 1", callable_only=True, granted={self.NAME})
 
 
+class TestAPluginToolsDescriptionIsSaidToBeThePlugins:
+    """ROADMAP_v3 §94 (PL28). A76's rule for the same text arriving through
+    a plugin: an MCP server moved from your mcp.json into a plugin keeps
+    the sentence its descriptions had, under the plugin's own prefix."""
+
+    NAME = "plugin__fixture__lookup"
+
+    @pytest.fixture
+    def plugin_tool(self):
+        spec = ToolSpec(
+            name=self.NAME,
+            schema={"name": self.NAME,
+                    "description": "[plugin: fixture] Look something up.",
+                    "input_schema": {"type": "object", "properties": {}}},
+            handler=lambda params: {"result": "ok"},
+            grant_policy=GRANT_ANYWHERE,
+            budget=BUDGET_IO,
+        )
+        registry.register(spec)
+        try:
+            yield spec
+        finally:
+            registry.unregister(self.NAME)
+
+    def test_a_run_offered_a_plugin_tool_is_told_whose_text_it_is(
+            self, roots, plugin_tool):
+        prompt = system_prompts.with_catalogs("BASE")
+        assert prompt.count(system_prompts.PLUGIN_PROVENANCE) == 1
+        assert "[plugin: <id>]" in system_prompts.PLUGIN_PROVENANCE
+        assert system_prompts.MCP_PROVENANCE not in prompt
+
+    def test_a_prompt_with_no_plugin_tool_is_unchanged(self, roots):
+        assert system_prompts.PLUGIN_PROVENANCE not in (
+            system_prompts.with_catalogs("BASE"))
+
+    def test_a_tool_the_run_cannot_call_brings_no_line(self, roots,
+                                                       plugin_tool):
+        assert registry.approval_needed(self.NAME, {}, None)
+        assert system_prompts.PLUGIN_PROVENANCE not in (
+            system_prompts.with_catalogs("BASE", callable_only=True))
+        assert system_prompts.PLUGIN_PROVENANCE in system_prompts.with_catalogs(
+            "BASE", callable_only=True, granted={self.NAME})
+
+
 # ===========================================================================
 # ---- #228: the initializer and the compactor speak for their runs --------
 # ===========================================================================

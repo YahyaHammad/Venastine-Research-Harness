@@ -617,8 +617,9 @@ plugins_enabled: true
 # modal calls reviewed.
 plugin_marketplace: YahyaHammad/Venastine-Research-Harness
 
-# AUTHORITY -- where a plugin's tools run. container (the default): each
-# plugin in a container of its own, from sandbox_docker_image, with the
+# AUTHORITY -- where a plugin's tools and MCP servers run. container (the
+# default): each plugin's runner, and each of its MCP servers, in a
+# container of its own, from sandbox_docker_image, with the
 # shell's limits, no network and no workspace unless the project granted
 # them; it needs Docker or Podman. process: each plugin as a process of its
 # own on this computer, with its dependencies built for this Python. On

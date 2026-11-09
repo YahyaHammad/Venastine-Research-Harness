@@ -31552,3 +31552,121 @@ marketplace holds no plugin.
   - no Podman run of the whole tool path, only of the measurements;
   - no TUI screenshot of the grant question, which is the `ConfirmScreen` the other CONFIRM
     questions use.
+
+## Batch 251 -- Plugins, slice 3: MCP servers, written in Python (2026-11-09)
+
+**Asked.** The owner asked to start slice 3 of the plugin system, a plugin's MCP servers.
+
+**Answers first.** Four questions through the question tool before anything was built. The owner
+took the recommendation on three:
+
+- a server runs Python: a module the plugin ships, or one its hashed lock installs;
+- remote (`http` or SSE) servers are not in this version;
+- tools are named `plugin__<plugin>__<tool>`, one namespace with the plugin's own tools.
+
+On the first, where a server and its tools are declared, the owner turned down `plugin.yaml` and
+asked to discuss it. In `plugin.yaml` a server would be declared differently from everywhere
+else, and YAML might not keep JSON as written. That second worry was measured before answering.
+Of 19 JSON forms pasted into the manifest through its strict loader, 14 came back the same, and a
+tab between tokens was refused loudly. Four silent changes made the case:
+
+- `1e6`, `1E+6` and `1.5e3` became text, and only `1.5e-3` stayed a number;
+- an escaped emoji became two broken halves, which no UTF-8 encoder will write.
+
+Each passed every check the manifest had, in slice 2's tool schemas too. The owner then chose a
+strict `mcp.json` in the plugin, in the user file's own shape, with each server listing its tools
+pasted from its own `tools/list` answer. For `plugin.yaml` they chose `1e6` as a number and an
+escaped half of a pair refused. Mid-batch the owner added that npx/uvx and remote servers are
+deferred rather than scrapped, and the refusals say so.
+
+**Built.** Decisions PL27-PL31 in §94.
+
+- **The format** (PL27, PL28, PL31), `core/plugin_format.py`:
+  - `parse_mcp_json`, as strict as the manifest's parser;
+  - `McpServer` and `McpTool`;
+  - one namespace across tools and servers, compared ignoring case, at most 32 tools together;
+  - `servers/` beside `tools/`;
+  - the YAML loader's JSON-number rule, and lone surrogates refused in every field;
+  - PL5's list, emptied, gone with its code.
+- **The launcher** (PL29): `core/plugin_runner.py serve <spec>`. It runs a server's module as
+  `__main__` behind the same walls as a tool, on private copies of the pipes, with descriptors 0
+  and 1 pointed away from them.
+- **The lifecycle** (PL30), `core/plugin_mcp.py`, new:
+  - a server starts on the first call of one of its tools, in a container of its own or a
+    process behind the walls;
+  - it is spoken to by the harness's own MCP client, so A79's bound applies;
+  - it is started again on a changed grant, setting or install, and after a failure below the
+    server's own answer, and stopped at once when access is taken back.
+- **The MCP client,** `mcp_client/client.py`:
+  - the loop is shared, so it stops only when the last client lets go;
+  - a call can be cancelled;
+  - `broken` names a server whose last call failed below its own answer.
+- **Registration and the shells:**
+  - `core/plugin_tools.py` registers a server's tools from the listing and stops servers with
+    runners;
+  - `core/plugin_commands.py`'s modal and `/plugin info` show each server, its command line,
+    its environment and the tools the model will see.
+- **The prompt:** `PLUGIN_PROVENANCE`, A76's sentence for `[plugin: <id>]` descriptions. Without
+  it, moving a server from your `mcp.json` into a plugin would have dropped the sentence for the
+  same text.
+- **The guide:** MCP servers, how to take a listing, and a server written with the SDK.
+
+**Found by running it.**
+
+- Taking access back with `/plugin access` left a running server on the old grant until its next
+  call, and a server is a process that can act between calls. It now stops at once, and a test
+  holds that.
+- The first test server read stdin on its main thread, so it could not show the Windows pipe hang
+  slice 2 found, which an SDK server, reading on a thread, would. It reads on a thread now.
+- Two of the first mutation rows proved nothing: one changed a line after the refusal was already
+  recorded, and the args test had no case with a real module after something other than `-m`.
+
+**Not changed.** No workflow file. The marketplace holds no plugin. The template keeps its one
+tool: an SDK server needs a 28-package lock the offline suite cannot build.
+
+**Verification.**
+
+- **Full suite:**
+  - Run on Windows in the pinned venv with `AGENT_WORKSPACE` unset, after tests.yml's checkout
+    setup.
+  - Result: 9776 passed, 98 skipped, none failed. That is 9874, the
+    stated count.
+- **The first full run failed 3 tests,** all docs gates and none a behaviour break: the stated
+  count, the tree's entry for the new file and the catalog file's count, and AGENTS.md's PL range.
+- **One flake, not this batch's.** The second full run failed
+  `test_a_long_line_uses_the_panel_not_the_floor` with "the viewer painted nothing at all": one
+  `pilot.pause()` was not enough under the full suite's load. It passed three times alone and in
+  the runs either side, and the batch changes no TUI code. It is the pump-race kind of TUI flake,
+  recorded here because nothing recorded it before.
+- **The new tests:** 109 in `tests/test_plugin_mcp.py`, 3 in `tests/test_catalog_advertisement.py`,
+  and one more marked `integration`.
+  - On Windows, 4 skip: the walls tests, which need Landlock.
+  - On WSL the plugin, confinement and MCP-client files passed whole, the walls included, but
+    for 2 HTTP-transport tests this batch does not touch. They fail the same way on slice 2's
+    tree, because WSL's system Python has MCP SDK 2.2.0, which lacks a keyword 2.3.0's
+    streamable client takes.
+  - The `integration` test passed against Docker Desktop 29.7.2: a server in a real container,
+    the workspace read-only then read-write, no network, and no container left after.
+- **Breakages:** 46 of 46 deliberate breakages each turned a named test red, 45 on Windows and
+  one only Linux can catch (a server's walls switched off) on WSL. Three of the first 45 survived:
+  - one was a bad mutation that changed nothing observable, now replaced;
+  - one was a missing test case, now added (a module after something other than `-m`);
+  - one showed that the spec a server can read was never tested. A workspace path written into it
+    without a grant passed, because the launcher checks the grant again. A test of the spec
+    itself now holds it.
+- **Other gates:**
+  - ruff is clean on the whole tree.
+  - bandit has 0 new findings against the rewritten baseline, with the new files scanned, and
+    its count check is green. The first run found one Medium B108 in the new test file, the
+    container's own `/tmp`, now annotated as the code's is.
+  - gitleaks is clean on an export of the tracked and new files, with CI's config.
+  - pip-audit was not run, since no dependency of the harness moved.
+- **End to end, outside the suite:**
+  - a plugin with a standard-library server, installed from a folder and called through
+    `/plugin`'s path under `process` on Windows, `process` on WSL and in a Docker container;
+  - a server written with the SDK's `MCPServer`, its listing taken as the guide says and its
+    28-package lock built by pip, in a container and under the walls on WSL.
+- **Not done here:**
+  - no Linux Docker run, which CI's `integration` job does;
+  - no Podman run of a server;
+  - no TUI screenshot of the modal's server lines, which are the same `ConfirmScreen` text.

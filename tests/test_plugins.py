@@ -33,7 +33,7 @@ from core import (
     plugin_store,
 )
 from core.commands import CATALOG, CLI, TUI
-from core.plugin_format import NeedsLaterVersion, PluginFormatError
+from core.plugin_format import PluginFormatError
 from core.plugin_source import FetchError
 from tests.conftest import settle
 
@@ -458,7 +458,7 @@ class TestTheFiles:
 
     def test_a_plugin_of_skills_and_agents_passes(self):
         assert plugin_format.check_files(self._sizes(**{
-            "skills/sub/c.md": 1, "tests/test_x.py": 1, "LICENSE": 1})) == ([], [])
+            "skills/sub/c.md": 1, "tests/test_x.py": 1, "LICENSE": 1})) == []
 
     @pytest.mark.parametrize("path", [
         ".hidden", "skills/.secret.md", "CON.md", "skills/nul.md", "skills/a..md.",
@@ -466,45 +466,46 @@ class TestTheFiles:
         "skills/inner.plugin/x.md",
     ])
     def test_files_outside_the_format_are_refused(self, path):
-        problems, _ = plugin_format.check_files(self._sizes(**{path: 1}))
+        problems = plugin_format.check_files(self._sizes(**{path: 1}))
         assert problems, path
 
     def test_names_differing_only_in_case_are_refused(self):
-        problems, _ = plugin_format.check_files(self._sizes(**{"skills/A.md": 1}))
+        problems = plugin_format.check_files(self._sizes(**{"skills/A.md": 1}))
         assert any("differ only in case" in p for p in problems)
 
     def test_the_size_limits_hold(self):
-        big, _ = plugin_format.check_files(
+        big = plugin_format.check_files(
             self._sizes(**{"skills/big.md": plugin_format.MAX_FILE_BYTES + 1}))
-        many, _ = plugin_format.check_files({f"skills/s{i}.md": 1 for i in range(
+        many = plugin_format.check_files({f"skills/s{i}.md": 1 for i in range(
             plugin_format.MAX_FILES + 1)} | {"plugin.yaml": 1, "README.md": 1})
-        total, _ = plugin_format.check_files(self._sizes(**{
+        total = plugin_format.check_files(self._sizes(**{
             f"skills/s{i}.md": plugin_format.MAX_FILE_BYTES for i in range(6)}))
         assert big and many and total
 
     def test_the_manifest_and_readme_are_required(self):
-        problems, _ = plugin_format.check_files({"skills/a.md": 1})
+        problems = plugin_format.check_files({"skills/a.md": 1})
         assert "no plugin.yaml" in problems and "no README.md" in problems
 
-    def test_what_later_slices_run_is_named_not_refused_here(self):
-        """Slice 2 took tools and dependencies off PL5's list; MCP servers
-        wait for slice 3."""
-        problems, later = plugin_format.check_files(self._sizes(**{
-            "tools/run.py": 1, "mcp.json": 1, "requirements.txt": 1}))
-        assert problems == []
-        assert later == ["MCP servers"]
+    def test_every_part_of_the_format_is_allowed_by_size(self):
+        """Slice 3 emptied PL5's list: tools, dependencies, mcp.json and the
+        servers it runs are each part of the format."""
+        assert plugin_format.check_files(self._sizes(**{
+            "tools/run.py": 1, "mcp.json": 1, "requirements.txt": 1,
+            "servers/notes.py": 1, "servers/pkg/__init__.py": 1})) == []
 
-    def test_validate_holds_back_a_valid_plugin_with_mcp_servers(self):
-        """PL5: the install is refused, not half done."""
-        with pytest.raises(NeedsLaterVersion) as caught:
-            plugin_format.validate("demo", plugin_files(more={"mcp.json": b"{}"}))
-        assert caught.value.features == ["MCP servers"]
+    def test_servers_holds_python_only(self):
+        problems = plugin_format.check_files(self._sizes(**{
+            "servers/data.bin": 1, "mcp.json/x": 1}))
+        assert any("servers/ holds .py files" in p for p in problems)
+        assert any("mcp.json is a file" in p for p in problems)
 
-    def test_an_invalid_plugin_is_reported_as_invalid_first(self):
+    def test_the_manifest_and_mcp_json_are_reported_together(self):
+        """Every problem, not the first: PL2's rule across both files."""
         with pytest.raises(PluginFormatError) as caught:
             plugin_format.validate("demo", plugin_files(
                 version="x", more={"mcp.json": b"{}"}))
-        assert not isinstance(caught.value, NeedsLaterVersion)
+        text = "; ".join(caught.value.problems)
+        assert "version" in text and "mcpServers" in text
 
     def test_text_must_be_utf8(self):
         with pytest.raises(PluginFormatError, match="UTF-8"):
@@ -748,9 +749,10 @@ class TestTheMarketplace:
             plugin_source.fetch("demo", github.REPO)
         assert github.raw_requests() == []
 
-    def test_mcp_servers_are_held_back_before_any_download(self, github):
-        github.add("demo", plugin_files(more={"mcp.json": b"{}"}))
-        with pytest.raises(NeedsLaterVersion):
+    def test_a_server_outside_the_format_is_refused_before_any_download(
+            self, github):
+        github.add("demo", plugin_files(more={"servers/blob.bin": b"\x00"}))
+        with pytest.raises(PluginFormatError, match="servers/ holds"):
             plugin_source.fetch("demo", github.REPO)
         assert github.raw_requests() == []
 
@@ -871,12 +873,12 @@ class TestInstalling:
         record = plugin_store.installed()["demo"]
         assert record.id == "math/demo" and record.source["commit"] == github.COMMIT
 
-    def test_a_plugin_with_mcp_servers_is_refused_before_the_modal(
+    def test_an_invalid_mcp_json_is_refused_before_the_modal(
             self, project, github):
         github.add("demo", plugin_files(more={"mcp.json": b"{}"}))
         rec = run("install demo", answer=True)
         assert rec.asked == []
-        assert "does not run yet" in rec.text
+        assert "not a valid plugin" in rec.text and "mcpServers" in rec.text
         assert plugin_store.installed() == {}
 
     def test_an_invalid_plugin_lists_its_problems(self, project, tmp_path):

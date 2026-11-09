@@ -44,7 +44,6 @@ from core import plugin_format
 from core.plugin_format import (
     MANIFEST,
     SUFFIX,
-    NeedsLaterVersion,
     PluginFormatError,
 )
 from tools.builtin._net_common import USER_AGENT
@@ -237,7 +236,7 @@ def _not_found(plugin_id: str, entries: dict, repo: str) -> FetchError:
 
 def fetch(plugin_id: str, repo: str) -> Candidate:
     """The marketplace plugin `plugin_id`, downloaded and checked (PL12).
-    Raises FetchError, PluginFormatError or NeedsLaterVersion."""
+    Raises FetchError or PluginFormatError."""
     try:
         parts = plugin_format.parse_id(plugin_id)
     except ValueError as exc:
@@ -262,12 +261,9 @@ def fetch(plugin_id: str, repo: str) -> Candidate:
         else:
             problems.append(f"{rel!r}: a {kind or 'thing'} that is not a "
                             f"file, which a plugin may not hold")
-    found, later = plugin_format.check_files(sizes)
-    problems.extend(found)
+    problems.extend(plugin_format.check_files(sizes))
     if problems:
         raise PluginFormatError(problems)
-    if later:
-        raise NeedsLaterVersion(later)
     files = {}
     for rel in sorted(sizes):
         quoted = urllib.parse.quote(f"{MARKETPLACE_ROOT}/{folder}/{rel}")
@@ -359,7 +355,7 @@ def listing(repo: str, category: str = "") -> Listing:
 
 def read_folder(path: str) -> Candidate:
     """The plugin in the folder `path`, read from disk (PL13). Its id is
-    its name. Raises FetchError, PluginFormatError or NeedsLaterVersion."""
+    its name. Raises FetchError or PluginFormatError."""
     real = os.path.realpath(os.path.expanduser(path.strip()))
     if not os.path.isdir(real):
         raise FetchError(f"{path.strip()} is not a folder")
@@ -390,12 +386,9 @@ def read_folder(path: str) -> Candidate:
                 continue
             sizes[rel] = os.path.getsize(full)
             paths[rel] = full
-    found, later = plugin_format.check_files(sizes)
-    problems.extend(found)
+    problems.extend(plugin_format.check_files(sizes))
     if problems:
         raise PluginFormatError(problems)
-    if later:
-        raise NeedsLaterVersion(later)
     files = {}
     for rel, full in sorted(paths.items()):
         with open(full, "rb") as handle:

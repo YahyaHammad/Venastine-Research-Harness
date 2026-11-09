@@ -138,9 +138,13 @@ def _bounded(text: str) -> str:
 
 
 def schema_for(record, tool) -> dict:
+    """A tool's schema as the model reads it. For one an MCP server serves
+    (PL28), the description mcp.json lists, its title composed in as
+    mcp_client's registration composes a server's."""
+    description = getattr(tool, "model_description", tool.description)
     return {
         "name": plugin_format.tool_name(record.name, tool.name),
-        "description": _bounded(f"[plugin: {record.id}] {tool.description}"),
+        "description": _bounded(f"[plugin: {record.id}] {description}"),
         "input_schema": tool.input_schema,
     }
 
@@ -176,10 +180,20 @@ def register_all(registry, project_path: Optional[str]) -> list:
                 logger.warning("Plugin %s's tools are not loading: its "
                                "manifest cannot be read (%s).", record.id, exc)
                 continue
-            if not manifest.tools:
+            if not manifest.has_code:
                 continue
             auto = plugin_store.auto_approved(record.name)
-            for tool in manifest.tools:
+            handlers = [(tool, _handler(record.name, tool.name))
+                        for tool in manifest.tools]
+            if manifest.servers:
+                # Slice 3 (PL28). Registered from the listing; no server
+                # starts until a call of one of its tools.
+                from core import plugin_mcp
+                handlers += [(tool, plugin_mcp.handler(record.name,
+                                                       server.name, tool.name))
+                             for server in manifest.servers
+                             for tool in server.tools]
+            for tool, handler in handlers:
                 name = plugin_format.tool_name(record.name, tool.name)
                 if registry.is_registered(name):
                     logger.warning("Plugin tool %s is already registered; "
@@ -191,7 +205,7 @@ def register_all(registry, project_path: Optional[str]) -> list:
                 registry.register(ToolSpec(
                     name=name,
                     schema=schema_for(record, tool),
-                    handler=_handler(record.name, tool.name),
+                    handler=handler,
                     available_check=available,
                     approval_notice=_notice(record.name),
                     # MCP's two declarations, for MCP's reasons: the tool's
@@ -530,7 +544,15 @@ class Runner:
 _runners: dict = {}       # plugin name -> Runner
 
 
+def _mcp():
+    """core.plugin_mcp when something imported it, else None: with no
+    module loaded no server can be running, and stopping nothing should
+    not import the MCP SDK."""
+    return sys.modules.get("core.plugin_mcp")
+
+
 def stop_all() -> None:
+    """Every runner and every MCP server (PL26, PL30)."""
     with _lock:
         runners = list(_runners.values())
         _runners.clear()
@@ -539,13 +561,20 @@ def stop_all() -> None:
             runner.stop()
         except Exception:  # noqa: BLE001 -- on the way out
             logger.debug("Could not stop a plugin runner", exc_info=True)
+    mcp = _mcp()
+    if mcp is not None:
+        mcp.stop_all()
 
 
 def stop(plugin_name: str) -> None:
+    """One plugin's runner and servers, before its files or grant change."""
     with _lock:
         runner = _runners.pop(plugin_name, None)
     if runner is not None:
         runner.stop()
+    mcp = _mcp()
+    if mcp is not None:
+        mcp.stop(plugin_name)
 
 
 # ---- dependencies (PL22) -------------------------------------------------
