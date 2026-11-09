@@ -83,6 +83,7 @@ jobs:
   # refuses one, since a push could then leave this workflow unrun and the
   # demo's gate would wait for it forever. Standard library and git only.
   changes:
+    name: gate-bandit
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:

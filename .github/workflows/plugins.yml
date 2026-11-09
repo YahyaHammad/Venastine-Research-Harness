@@ -45,6 +45,7 @@ concurrency:
 
 jobs:
   changes:
+    name: select-plugins-to-test
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
