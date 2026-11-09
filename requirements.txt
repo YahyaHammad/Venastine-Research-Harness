@@ -21,10 +21,10 @@
 # test_sdk_conformance.py re-checks the shapes. What to re-measure when
 # these move: that the stream, the effort query and the error types still
 # match, since the suite fakes both packages everywhere else.
-anthropic==2.5.0
+anthropic==2.6.0
 ddgs==9.16.1
 httpx==0.28.1
-openai==3.45.0
+openai==3.46.0
 # ROADMAP_v3 §82 (GS1), batch 172: 1.0.0 -> 2.29.0, the owner's choice.
 # Gemini 3 refuses a request whose current turn holds a function call
 # without the thought signature it came with; 1.0.0's Part had no field
@@ -37,7 +37,7 @@ openai==3.45.0
 # transport is httpx now, not requests. 2.32.0 since batch 234, the newest
 # release at least two weeks old; test_sdk_conformance.py is the evidence,
 # with no live Gemini call (no key on this machine).
-google-genai==2.34.0
+google-genai==3.0.0
 # Batch 208, from Dependabot's group, the owner's choice of which: the
 # packages below are ones the suite runs for real rather than faking, so
 # a green suite is evidence about them, and each release was at least two
@@ -52,7 +52,7 @@ google-genai==2.34.0
 # core/reasoning/output_writer.py draws the chart as SVG with the standard
 # library now. pillow's floor (batch 201) went with it: nothing else here
 # reaches pillow.
-pydantic==2.14.2
+pydantic==2.14.3
 sympy==1.14.0
 # 0.0.48 since batch 234: test_storage_e2e.py runs it for real.
 sqlmodel==0.0.48
@@ -305,7 +305,7 @@ defusedxml==0.7.1
 # security fix, as it did for mcp 2.2.0 in batch 165. Exact, for defusedxml's
 # reason: a parser of hostile input is where a silent bump changes what is
 # refused.
-pypdf==6.21.4
+pypdf==7.0.0
 
 # Test dependencies live in requirements-test.txt, NOT here (S18-07,
 # batch 136). pyproject.toml reads THIS file for `[project].dependencies`
