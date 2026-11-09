@@ -40,7 +40,7 @@ python main.py --tui --provider OPENAI --model gpt-4o   # or switch in-session w
 #   under `shell_approval_mode: classified`; `test` asks it under any mode and runs nothing
 # ROADMAP_v3 §94, both shells: /plugin [list|info|install|uninstall|disable|enable|config|
 #   access|approval] -- skills, agents, tools and settings from the marketplace in plugins/ or
-#   --from a folder, behind a trust modal; installed in ~/.config/venastine/plugins/, never
+#   --from a folder or Git URL, behind a trust modal; installed in ~/.config/venastine/plugins/, never
 #   beside a core file; tools in a container per plugin, granted per project, asking per call;
 #   MCP servers from the plugin's mcp.json, Python only, each started on its first call
 # §79 in the TUI: /connect [name [--key]|custom <NAME> <url>|cancel] -- connect a provider
@@ -71,7 +71,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 10144 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 10156 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -394,7 +394,7 @@ made the move free: no import changed, and `tests/test_docs_consistency.py` is t
 opens any of these files (its `DOCS` constant is where the path now comes from).
 
 - **docs/ARCHITECTURE.md** — what's built, file-by-file contracts ("what belongs here / what does NOT"), known gotchas (§11).
-- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§55, §58, §59, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84, §85, §86, §87, §88, §89, §90, §91, §92 and §93 built; §94 designed with the owner in batch 249, its first slice built then, its second (tools) in batch 250, its third (MCP servers) in batch 251, its fourth (the marketplace's CI and the scanner) in batch 252, and slices 5-6 not yet; §60 recorded from the owner's request in batch 123, specified and not yet designed; §56 recorded in batch 122 and designed with the owner and built in batch 248; §53 recorded in batch 122 and designed with the owner and built in batch 239; §92 asked for and built in batch 240; §93 asked for and built in batch 241; §59 recorded in batch 122 and designed with the owner and built in batch 238; §57 recorded in batch 122 and designed with the owner and built in batch 235; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A90 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85, A81 in §86, A82 in §87, A83 in §88, A84 in §89, A85 in §90, A86, A87, A88, A89 and A90 in §91), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO15 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV20 from §56, SM1–SM11 from §57, PR1–PR6 from §58 UI1–UI8 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82, CG1–CG24 from §83, PT1–PT10 from §92, UV1–UV7 from §93 and PL1–PL40 from §94). Section and D-numbers are stable and cross-referenced everywhere.
+- **docs/ROADMAP.md** (§1–§12, all built — but see §10's revisit note) and **docs/ROADMAP_v2.md** (§13–§48, all built) and **docs/ROADMAP_v3.md** (§49–§55, §58, §59, §61, §62, §63, §64, §65, §66, §67, §68, §69, §70, §71, §72, §73, §74, §75, §76, §77, §78, §79, §80, §81, §82, §84, §85, §86, §87, §88, §89, §90, §91, §92 and §93 built; §94 designed with the owner in batch 249, its first slice built then, its second (tools) in batch 250, its third (MCP servers) in batch 251, its fourth (the marketplace's CI and the scanner) in batch 252, its fifth (Git URLs) in batch 253, and slice 6 not yet; §60 recorded from the owner's request in batch 123, specified and not yet designed; §56 recorded in batch 122 and designed with the owner and built in batch 248; §53 recorded in batch 122 and designed with the owner and built in batch 239; §92 asked for and built in batch 240; §93 asked for and built in batch 241; §59 recorded in batch 122 and designed with the owner and built in batch 238; §57 recorded in batch 122 and designed with the owner and built in batch 235; §79 designed with the owner in batch 163 and built in seven slices through batch 169; §83 decided with the owner in batch 180, measured in batches 181-183, its sign-in slice built in batch 184, and its Responses slice planned in batch 186, measured in batch 187, built in batch 188, checked live in batch 189 and completed in batch 203; §58 built in batch 203; §54 built in batch 204) — full implementation specs with a locked Design Decisions Record (D1–D31, plus S1–S4 from the §14–§18 review, R1–R16 from §25, K1–K7 from §19, V1–V9 from §20, M1–M21 from §21a/§21b/§21c, P1–P4 from §22, L1–L6 from §26, T1–T9 from §27, I1–I17 from §24, J1–J14 from §23, E1–E14 from §10's revisit, C1/C3/C6/C8/C10 from Rev. 1's review, G1–G7 from §28, N1–N8 from §29, B1–B11 from §30, H1–H10 from §31, A1–A90 from §32 (A16 in ROADMAP_v3 §62, A17, A18 and A19 in §63, A20 and A21 in §64, A22, A23 and A24 in §65, A25, A26 and A27 in §66, A28, A29, A30, A31, A32 and A33 in §67, A34, A35, A36, A37, A38 and A39 in §68, A40, A41, A42, A43, A44 and A45 in §69, A46, A47, A48 and A49 in §70, A50, A51, A52 and A53 in §71, A54, A55, A56 and A57 in §72, A58, A59, A60, A61 and A62 in §73, A63, A64 and A65 in §74, A66 and A67 in §75, A68, A69, A70, A71, A72, A73, A74, A75 and A76 in §76, A77 in §77, A78 in §78, A79 in §84, A80 in §85, A81 in §86, A82 in §87, A83 in §88, A84 in §89, A85 in §90, A86, A87, A88, A89 and A90 in §91), W1–W9 from §33 U1–U9 from §34, Y1–Y5 from §35, Z1–Z8 from §36, F1–F8 from §37, O1–O8 from §38 Q1–Q6 from §39, UN1–UN6 from §40, X1–X7 from §41, RA1–RA6 from §42, RM1–RM6 from §43, WS1–WS10 from §44, SQ1–SQ10 from §45 EP1–EP8 from §46, NA1–NA18 from §47, CE1–CE7 from §48 SS1–SS72 from §49, NW1–NW5 from §50, PG1–PG9 from §51, RB1–RB7 from §52, IO1–IO15 from §53, AT1–AT13 from §54, TR1–TR15 from §55, JV1–JV20 from §56, SM1–SM11 from §57, PR1–PR6 from §58 UI1–UI8 from §59, UH1–UH12 from §60, CN1–CN12 from §61, HD1–HD13 from §79, LY1–LY3 from §80, IM1–IM10 from §81, GS1–GS4 from §82, CG1–CG24 from §83, PT1–PT10 from §92, UV1–UV7 from §93 and PL1–PL41 from §94). Section and D-numbers are stable and cross-referenced everywhere.
 
 **Six namespaces use the same `LETTER+NUMBER` shape, and only the first is the
 record.** An id that resolves to two places is a cross-reference that fails
@@ -1782,8 +1782,8 @@ would never clear.
 ### Plugins (`core/plugin_*.py`, ROADMAP_v3 §94)
 
 A plugin is a `<name>.plugin` folder of skills, agents, tools, MCP servers and settings (slices
-1-3; slice 4 is the marketplace's CI and the scanner), installed with `/plugin install` behind a trust modal. ROADMAP_v3 §94 holds PL1-PL40; the
-nine things most likely to be re-derived wrongly:
+1-3; slice 4 is marketplace CI and scanning, and slice 5 is Git URLs), installed with
+`/plugin install` behind a trust modal. ROADMAP_v3 §94 holds PL1-PL41.
 
 - **The manifest parser is part of the security boundary** (PL2). `plugin_format.load_yaml` is
   `yaml.safe_load` with aliases and duplicate keys refused, and `parse_manifest` refuses every
@@ -1797,10 +1797,14 @@ nine things most likely to be re-derived wrongly:
 - **Names are prefixed, and the tier sits between user and project** (PL4). `math:review`, never
   `review`: no plugin can shadow a builtin or another plugin, and silence on `spawnable` reads as
   false as for any non-harness tier. `_discovery_dirs` is where the order lives.
-- **Nothing reaches the network but GitHub's API and raw hosts, at one commit** (PL11, PL12).
+- **Marketplace fetches use GitHub's API and raw hosts, at one commit** (PL11, PL12).
   `plugin_source._get` refuses any other URL and follows no redirect; every file is checked
   against the tree's git blob hash, and the tree against PL3's limits before anything downloads.
   `/plugin` downloads are deliberately not on §53's meters (PL14).
+- **An external Git install reads committed blobs without a checkout** (PL41). The temporary
+  clone uses the user's Git authentication and the remote's default branch. `--path` selects
+  a plugin folder. Validate the selected tree before reading blobs so links and submodules
+  cannot become files that the trust prompt describes. The scan and prompt treat it as unreviewed.
 - **No plugin code runs to describe a plugin** (PL20). A tool's name, description and schema are
   in `plugin.yaml`, read by the same strict parser. Do not import a plugin's module to learn its
   tools: the owner chose this so the modal can describe a plugin before anything of it runs.

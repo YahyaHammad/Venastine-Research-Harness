@@ -3,9 +3,9 @@ core/plugin_source.py
 
 ROADMAP_v3 §94 (PL11-PL14). Where a plugin comes from: the marketplace,
 which is the `plugins/` folder of a GitHub repository (`plugin_marketplace`,
-this one by default), and a folder on this computer. Neither writes
-anything: both hand back the plugin's files in memory, for the installer to
-validate and show in the trust modal before anything lands on disk.
+this one by default), a folder on this computer, or a Git repository (PL41).
+Each hands back the plugin's files in memory for validation and the trust
+modal. A Git clone is temporary and has no checkout.
 
 NO SERVING INFRASTRUCTURE (PL11). The owner has none, so the marketplace is
 read the way `scripts/install.py` reads this repository: GitHub's own API
@@ -30,9 +30,13 @@ sign-in, and §53's meters bound what the model's work pulls and pushes.
 """
 
 import hashlib
+import io
 import json
 import os
 import re
+import shutil
+import subprocess  # nosec B404 - runs Git with explicit arguments and no shell
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -69,11 +73,24 @@ _SHA = re.compile(r"[0-9a-f]{40}")
 #: does: version control and Python's bytecode caches. Skipped, and the
 #: modal says so; everything else outside the format is refused.
 _SKIPPED_DIRS = frozenset({".git", "__pycache__"})
+_GIT_PROTOCOLS = "https:ssh"
+_GIT_TIMEOUT_S = 120
+_GIT_OID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_GIT_URL = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*:(?://|:)")
+_SSH_REMOTE = re.compile(
+    r"(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9][a-zA-Z0-9_.-]*:(?!:).+")
+_WINDOWS_DRIVE = re.compile(r"[a-zA-Z]:")
+# Keep Git's user authentication and configuration, but leave repository
+# overrides (e.g. GIT_DIR from a Git hook) and credential traces behind.
+_GIT_USER_ENV = frozenset({
+    "GIT_ASKPASS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT",
+    "GIT_SSL_CAINFO", "GIT_SSL_CAPATH", "GIT_SSL_CERT", "GIT_SSL_KEY",
+})
 
 
 class FetchError(Exception):
-    """The marketplace or the folder could not supply the plugin. The
-    message is a sentence for the user."""
+    """The source could not supply the plugin. The message is for the user."""
 
 
 @dataclass(frozen=True)
@@ -399,3 +416,173 @@ def read_folder(path: str) -> Candidate:
     return Candidate(id=name, name=name, files=files,
                      source={"kind": "folder", "path": real},
                      skipped=tuple(skipped))
+
+
+# ---- an external Git repository (PL41) ------------------------------------
+
+def is_git_source(source: str) -> bool:
+    """Classify a --from argument, including a possible subfolder option."""
+    first = source.split(maxsplit=1)[0]
+    if _WINDOWS_DRIVE.match(first):
+        return False
+    # An explicit scheme takes precedence over a similarly named folder.
+    # SCP syntax can also be an ordinary path on Unix.
+    return bool(_GIT_URL.match(first) or (
+        _SSH_REMOTE.fullmatch(first) and not os.path.isdir(os.path.expanduser(source))))
+
+
+def _validate_git_url(url: str) -> None:
+    if (len(url) > 2048 or any(c.isspace() for c in url)
+            or any(c in url for c in "\\?#")
+            or any(ord(c) < 32 or ord(c) == 127 for c in urllib.parse.unquote(url))):
+        raise FetchError("use a Git remote URL without spaces, a query or a fragment")
+    if (not _GIT_URL.match(url) and not _WINDOWS_DRIVE.match(url)
+            and _SSH_REMOTE.fullmatch(url)):
+        return  # Git's user@host:path SSH form
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        raise FetchError("use a valid HTTPS or SSH Git URL") from None
+    if (parts.scheme not in ("https", "ssh") or not host
+            or urllib.parse.unquote(host).startswith("-")
+            or urllib.parse.unquote(parts.username or "").startswith("-")
+            or not parts.path.strip("/")
+            or port == 0):
+        raise FetchError("use an HTTPS or SSH Git URL")
+    if (parts.password is not None
+            or (parts.scheme == "https" and parts.username is not None)):
+        raise FetchError("leave credentials out of the URL and configure Git "
+                         "to authenticate to the repository")
+
+
+def _git_binary() -> str:
+    name = "git.exe" if os.name == "nt" else "git"
+    for directory in os.get_exec_path():
+        if os.path.isabs(directory):
+            binary = shutil.which(os.path.join(directory, name))
+            if binary:
+                return binary
+    raise FetchError("Git is needed to install from a Git URL; put Git on PATH")
+
+
+def _git_members(tree: bytes, folder: str) -> dict:
+    """Validated {path: (object id, size)} for the selected plugin."""
+    prefix = folder + "/" if folder else ""
+    members, problems = {}, []
+    for entry in tree.split(b"\0")[:-1]:
+        try:
+            meta, path_bytes = entry.split(b"\t", 1)
+            mode, kind, oid, size = meta.decode("ascii").split()
+            path = path_bytes.decode("utf-8")
+        except (UnicodeError, ValueError):
+            raise FetchError("the Git tree contains an unreadable entry") from None
+        if not path.startswith(prefix):
+            raise FetchError(f"{folder} is not a plugin folder at that commit")
+        rel = path[len(prefix):]
+        if mode == "120000":
+            problems.append(f"{rel!r}: a symbolic link, which a plugin may not hold")
+        elif kind == "commit":
+            problems.append(f"{rel!r}: a Git submodule, which a plugin may not hold")
+        elif (kind != "blob" or mode not in ("100644", "100755")
+              or not _GIT_OID.fullmatch(oid) or not size.isdecimal()
+              or rel in members):
+            problems.append(f"{rel!r}: not an ordinary Git file")
+        else:
+            members[rel] = (oid, int(size))
+    problems.extend(plugin_format.check_files(
+        {path: size for path, (_, size) in members.items()}))
+    if problems:
+        raise PluginFormatError(problems)
+    if members[MANIFEST][1] > plugin_format.MAX_MANIFEST_BYTES:
+        raise PluginFormatError([f"{MANIFEST} is over "
+                                 f"{plugin_format.MAX_MANIFEST_BYTES // 1024} KB"])
+    return members
+
+
+def read_git(url: str, folder: str = "") -> Candidate:
+    """Read committed blobs at the remote's default branch without checkout."""
+    _validate_git_url(url)
+    name = None
+    if folder:
+        parts = folder.split("/")
+        name = parts[-1].removesuffix(SUFFIX)
+        if (len(folder) > plugin_format.MAX_PATH_CHARS or not folder.endswith(SUFFIX)
+                or not plugin_format.valid_name(name)
+                or any(p.casefold() in ("", ".", "..", ".git") for p in parts)
+                or any(c in folder for c in "\\:")
+                or any(c.isspace() or ord(c) < 32 for c in folder)):
+            raise FetchError("--path needs a repository-relative <name>.plugin folder")
+
+    binary = _git_binary()
+    env = {k: v for k, v in os.environ.items()
+           if not k.upper().startswith("GIT_") or k.upper() in _GIT_USER_ENV}
+    env.update(GIT_ALLOW_PROTOCOL=_GIT_PROTOCOLS, GIT_TERMINAL_PROMPT="0")
+    try:
+        with tempfile.TemporaryDirectory(prefix="venastine-plugin-git-") as work:
+            def git(*args: str, limit: int, failure: str,
+                    input_data: Optional[bytes] = None) -> bytes:
+                # Git's output can contain credentials from a configured
+                # helper or rewritten URL. Never surface its diagnostics.
+                # Spool the tree listing to disk before reading bounded bytes.
+                with tempfile.TemporaryFile(dir=work) as stdout:
+                    try:
+                        subprocess.run(  # nosec B603 - absolute Git binary, argv, validated URL and allowed protocols
+                            [binary, *args], cwd=work, env=env,
+                            stdin=subprocess.DEVNULL if input_data is None else None,
+                            input=input_data, stdout=stdout,
+                            stderr=subprocess.DEVNULL, check=True,
+                            timeout=_GIT_TIMEOUT_S)
+                    except subprocess.TimeoutExpired:
+                        raise FetchError("Git did not finish within two minutes") from None
+                    except subprocess.CalledProcessError:
+                        raise FetchError(failure) from None
+                    stdout.seek(0)
+                    data = stdout.read(limit + 1)
+                    if len(data) > limit:
+                        raise FetchError("Git returned more data than the plugin format allows")
+                    return data
+
+            git("-c", "fetch.fsckObjects=true", "-c", "http.followRedirects=false",
+                "clone", "--quiet", "--bare", "--template=", "--depth=1",
+                "--single-branch", "--no-tags", "--", url, "source.git", limit=0,
+                failure="Git could not clone the repository; check the URL "
+                        "and your Git credentials")
+            repo = ("--git-dir=source.git", "--literal-pathspecs")
+            commit = git(*repo, "rev-parse", "--verify", "HEAD^{commit}", limit=65,
+                         failure="the remote's default branch has no commit").strip().decode("ascii")
+            if not _GIT_OID.fullmatch(commit):
+                raise FetchError("Git did not return a commit id")
+            tree = git(*repo, "ls-tree", "-rlz", commit, "--", *([folder] if folder else []),
+                       limit=MAX_TREE_BYTES, failure="Git could not read the plugin's tree")
+            if not tree and folder:
+                raise FetchError(f"no plugin folder {folder!r} at that commit")
+            members = _git_members(tree, folder)
+            requests = b"".join(f"{oid}\n".encode("ascii") for oid, _ in members.values())
+            headers = {path: f"{oid} blob {size}\n".encode("ascii")
+                       for path, (oid, size) in members.items()}
+            limit = sum(len(headers[path]) + size + 1 for path, (_, size) in members.items())
+            blobs = io.BytesIO(git(*repo, "cat-file", "--batch", input_data=requests,
+                                   limit=limit, failure="Git could not read the plugin files"))
+            files = {}
+            for path, (_, size) in members.items():
+                header = headers[path]
+                if blobs.read(len(header)) != header:
+                    raise FetchError(f"{path} did not match the Git tree")
+                data = blobs.read(size)
+                if len(data) != size or blobs.read(1) != b"\n":
+                    raise FetchError(f"{path} did not match the Git tree")
+                files[path] = data
+    except (OSError, UnicodeError):
+        raise FetchError("could not read the plugin from Git") from None
+
+    if name is None:
+        try:
+            manifest = files[MANIFEST].decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise PluginFormatError([f"{MANIFEST}: not UTF-8 text"]) from None
+        name = plugin_format.parse_manifest(manifest, None).name
+    return Candidate(id=name, name=name, files=files,
+                     source={"kind": "git", "url": url, "commit": commit,
+                             "path": folder})

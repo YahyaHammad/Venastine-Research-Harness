@@ -6202,7 +6202,7 @@ def _cmd_plugin(app: VenastineApp, args: str) -> None:
         try:
             plugin_commands.run(args, shell)
         except Exception:  # noqa: BLE001 - reported, the session survives
-            logger.exception("/plugin %s failed", args)
+            logger.exception("/plugin failed")
             app.call_from_thread(
                 app._transcript.write_error,
                 "/plugin failed. The error is in logs/app.log; the session "

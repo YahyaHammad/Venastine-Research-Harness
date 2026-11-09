@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§94. Plugins: skills, agents and settings from a reviewed marketplace** - **(NOT BUILT beyond slice 4: the format, the store, `/plugin` and its trust modal BUILT in batch 249, tools in a container per plugin, with locked dependencies, BUILT in batch 250, MCP servers written in Python BUILT in batch 251, and the marketplace's CI and the scanner BUILT in batch 252; git URLs and a first plugin to come)** (the owner asked for plugins that add tools, skills, agents, MCP servers and settings without touching a core file, pulled from this repository's nested `plugins/` folder behind a trust modal, tested only when they change, and kept out of any pull request that touches anything else. A `.plugin` folder is a plugin; its manifest is read by the strictest parser in the tree; everything it adds is prefixed with its name; installs come from one resolved commit with every file checked against git's hash, live outside the install, and stop loading if a file changes; PL1-PL40)
+- **§94. Plugins: skills, agents and settings from a reviewed marketplace** - **(NOT BUILT beyond slice 5: the format, the store, `/plugin` and its trust modal BUILT in batch 249, tools in a container per plugin, with locked dependencies, BUILT in batch 250, MCP servers written in Python BUILT in batch 251, and the marketplace's CI and the scanner BUILT in batch 252, and Git URLs BUILT in batch 253; a first plugin to come)** (the owner asked for plugins that add tools, skills, agents, MCP servers and settings without touching a core file, pulled from this repository's nested `plugins/` folder behind a trust modal, tested only when they change, and kept out of any pull request that touches anything else. A `.plugin` folder is a plugin; its manifest is read by the strictest parser in the tree; everything it adds is prefixed with its name; installs come from one resolved commit with every file checked against git's hash, live outside the install, and stop loading if a file changes; PL1-PL41)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
 - **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
@@ -3067,7 +3067,8 @@ leaked PID.
 ## §94. Plugins: skills, agents and settings from a reviewed marketplace
 
 **Added in batch 249, from the owner's request; slice 1 BUILT in batch 249, slice 2 BUILT in
-batch 250, slice 3 BUILT in batch 251, slice 4 BUILT in batch 252, slices 5-6 NOT BUILT.** A plugin adds tools (with their own dependencies), skills, agents, MCP servers and
+batch 250, slice 3 BUILT in batch 251, slice 4 BUILT in batch 252, slice 5 BUILT in batch 253,
+slice 6 NOT BUILT.** A plugin adds tools (with their own dependencies), skills, agents, MCP servers and
 settings of its own. It never touches a core file, and it cannot alter the core harness
 runtime; the harness may call into it, and nothing else. Plugins are pulled from GitHub, as the
 installers are, because the owner has no serving infrastructure. The marketplace is this
@@ -3143,7 +3144,8 @@ processes. The owner's rule was separate containers if the difference is minimal
    - Maintainers get review requests from a workflow, not CODEOWNERS, which would make every
      plugin PR touch a core file.
    - This slice edits `.github/workflows/`, so the owner pushes it.
-5. **Install from a git URL.** A private repository is cloned with the user's own credentials.
+5. **Install from a Git URL.** BUILT in batch 253. A private repository is cloned with the
+   user's own Git credentials. Install a plugin at the repository root or select its subfolder.
 6. **A first plugin in the marketplace.**
 
 ### Settled for the later slices (batch 249)
@@ -3219,9 +3221,9 @@ detail a slice needs. Ask before departing from any of them.
     CODEOWNERS, which lives outside `plugins/`.
   - **CI enforces** a version bump whenever a plugin changes, and plugin names unique across the
     marketplace.
-- **Slice 5, git URLs.** `/plugin install --from <git URL>`. A private repository is cloned with
-  the user's own git credentials, which the harness never handles. The scanner runs locally, and
-  the modal says nobody reviewed the plugin.
+- **Slice 5, Git URLs.** `/plugin install --from <git-url> [--path <name.plugin>]`. Git
+  authenticates with the user's credentials. The scanner runs locally, and the modal says
+  nobody reviewed the plugin. The owner chose subfolder selection and the default branch.
 - **Lifecycle, any slice.** `/plugin update` is manual, with no network check at startup; until it
   exists, a reinstall from the marketplace is the update (PL16).
 
@@ -3296,7 +3298,7 @@ recommendation on seven; the eighth began with a question of theirs.
   harness owns instead, and its own tests are optional, run under the same walls and never read
   as evidence of safety (PL35).
 
-### Decisions (PL1-PL40)
+### Decisions (PL1-PL41)
 
 | id | decision |
 |---|---|
@@ -3340,6 +3342,7 @@ recommendation on seven; the eighth began with a question of theirs.
 | **PL38** | **A plugin-only merge releases nothing and redeploys nothing.** `release.yml` reads the pull request's files, both names of a rename, and a merge whose every file is under `plugins/` is skipped unless a `release:patch`, `minor` or `major` label asks; a list GitHub cut short is not plugin-only. `deploy_demo.py` compares the live build with the commit, not the commit with its parent, so a core merge superseded before it deployed is still deployed by the plugin-only merge after it; anything the comparison cannot show for certain is a deploy |
 | **PL39** | **A changed plugin raises its version, and names are unique across the marketplace.** Checked in the review, against the base branch's manifest and the head's tree |
 | **PL40** | **`plugins/` is out of the harness's own lint, bandit, CodeQL and docs gates.** ruff's `extend-exclude`, bandit's and its count check's pathspec, CodeQL's `paths-ignore` (npm ships none of it) and the docs gates' walk, at the root only, so the guide's example in `docs/` stays in. A plugin's code is the scanner's to read and `plugins.yml`'s to run |
+| **PL41** | **An external Git install reads one plugin at the remote's default branch** (owner, batch 253). The root uses the manifest's name. `--path` selects a repository-relative `<name>.plugin` subfolder whose name must match the manifest. Git uses HTTPS or SSH with the user's configured authentication. The harness rejects inline credentials and reads ordinary blobs from a temporary bare shallow clone without a checkout. It applies the format limits to the selected tree and uses the external scan and unreviewed trust prompt (PL36). The registry records the URL, path and exact commit |
 
 ### Built and measured (slice 1, batch 249, 2026-11-08)
 

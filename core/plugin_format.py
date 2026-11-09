@@ -1106,9 +1106,10 @@ def load_yaml(text: str):
     return yaml.load(text, Loader=_StrictLoader)  # nosec B506 - _StrictLoader is a SafeLoader subclass
 
 
-def parse_manifest(text: str, name: str) -> Manifest:
+def parse_manifest(text: str, name: Optional[str]) -> Manifest:
     """`plugin.yaml`'s text, for the plugin whose folder is `name` +
-    SUFFIX. PluginFormatError listing every problem otherwise."""
+    SUFFIX. A Git repository root has no folder name to match, so passes
+    None. PluginFormatError listing every problem otherwise."""
     if len(text.encode("utf-8")) > MAX_MANIFEST_BYTES:
         raise PluginFormatError(
             [f"{MANIFEST} is over {MAX_MANIFEST_BYTES // 1024} KB"])
@@ -1144,7 +1145,7 @@ def parse_manifest(text: str, name: str) -> Manifest:
         if not valid_name(data["name"]):
             problems.append("name: lowercase letters, digits and single "
                             "hyphens, at most 40 characters")
-        elif data["name"] != name:
+        elif name is not None and data["name"] != name:
             problems.append(f"name: is {data['name']!r}, but the folder is "
                             f"{name + SUFFIX!r}; they must agree")
 

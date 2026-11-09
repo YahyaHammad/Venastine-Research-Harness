@@ -31781,3 +31781,23 @@ tests became optional.
     runner's rootful Docker;
   - no Podman run of `plugin_ci.py test`;
   - no TUI screenshot of the modal's scanner lines, which are the same `ConfirmScreen` text.
+
+## Batch 253 — Plugins, slice 5: install from Git (2026-11-09)
+
+The owner chose the remote's default branch and the option to select a plugin subfolder.
+`/plugin install --from <git-url> [--path <name.plugin>]` and the corresponding `info`
+command accept HTTPS and SSH clone URLs. Git uses the user's configured authentication.
+The harness rejects inline credentials and does not display Git's diagnostics.
+
+`core/plugin_source.py` reads the selected tree from a temporary bare shallow clone and
+reads the blobs without checking out the repository. The format checks names, sizes and
+file types before the blobs reach the scanner. The existing unreviewed prompt shows the
+remote, folder and full commit ID, and the registry saves that provenance on acceptance.
+
+The offline tests use real Git repositories to check default-branch selection, root and
+subfolder installs, refusal, and the exact installed bytes. They also check that symlinks,
+submodules and a Git URL rewrite to the local file transport are refused. Live private
+repository authentication was not exercised.
+
+The pinned Windows environment ran the full offline suite: 10058 passed and 98 skipped.
+Ruff, Bandit and Gitleaks passed.

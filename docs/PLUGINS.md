@@ -3,7 +3,7 @@
 A plugin adds skills, agents, tools and settings of its own to the harness, without
 touching any of the harness's files. Plugins come from the marketplace in this repository's
 [`plugins/`](../plugins/) folder, where every one is reviewed before it is merged, or
-from a folder on your own computer. `docs/ROADMAP_v3.md` §94 records why each rule
+from a folder on your own computer or a Git repository. `docs/ROADMAP_v3.md` §94 records why each rule
 below is what it is.
 
 **What this version runs:** skills, agents, settings, tools with their Python dependencies,
@@ -20,6 +20,7 @@ to a later version.
 | `/plugin info <id>` | What a plugin holds, before or after you install it |
 | `/plugin install <id>` | Install one from the marketplace, after the trust modal |
 | `/plugin install --from <folder>` | Install one from a folder on this computer |
+| `/plugin install --from <git-url> [--path <name.plugin>]` | Install one from the default branch of a Git repository |
 | `/plugin uninstall <id> [--purge]` | Remove it; `--purge` removes its settings too |
 | `/plugin disable <id>` / `enable <id>` | Turn it off, or back on, in this project only |
 | `/plugin config <id> [<key> [<value> \| --reset]]` | See or change its settings |
@@ -31,9 +32,9 @@ is installed with `/plugin install design/web-design/javascript-and-typescript`.
 typing `/plugin ` offers the subcommands, then your installed plugins, then their settings
 and values, the way `/config` does.
 
-**The trust modal** shows where the plugin comes from (a marketplace commit, or a folder
-nobody has reviewed), every skill and agent it adds under the name it will have, its
-settings, its files and the start of its README. Nothing is written until you say yes.
+**The trust modal** shows where the plugin comes from, whether it came through marketplace
+review, every skill and agent it adds under the name it will have, its settings, its files
+and the start of its README. The install takes effect when you say yes.
 Its skills and agents then load at once, in every project, until `/plugin disable` turns
 the plugin off in one.
 
@@ -42,13 +43,37 @@ and the modal lists what it found. A HIGH finding is where a reviewer would stop
 that display differently from what the model reads; code that runs code it builds, or loads
 pickled data; a path or environment variable that holds credentials; a network module in a
 plugin that said `network: false`; text telling the model to ignore its rules, turn approval
-off or send secrets somewhere; a download piped into a shell. A folder's lock is also looked up
+off or send secrets somewhere; a download piped into a shell. An external plugin's lock is also looked up
 on PyPI and OSV, for a known vulnerability, a release under 14 days old, a package with no
 wheel, or a name one letter from a popular package's. A note (another program started, native
 code, a module imported by a name made at run time, the whole environment read, an HTML
 comment, a long encoded string) is listed for you to weigh. Nothing is refused for a finding:
 the choice is yours. `python -m core.plugin_scan <folder> [--online]` runs the same scan from a
 shell.
+
+### Installing from Git
+
+Use an HTTPS or SSH clone URL. Git must be on PATH. For a private repository, set up your
+Git credential helper or SSH authentication first. Keep passwords and tokens out of the URL.
+
+```text
+/plugin install --from https://git.example.org/team/my-plugin.git
+/plugin install --from git@git.example.org:team/research.git --path plugins/analysis.plugin
+```
+
+Use the first form when the root contains `plugin.yaml`, `README.md` and the rest of the plugin
+files. The manifest's `name` is the plugin ID. Use `--path` for a `<name>.plugin` folder inside
+a larger repository, giving its path from the repository root with forward slashes. If the
+repository also contains project files such as `.gitignore`, keep them outside the plugin
+subfolder. Both forms read the default branch and record its exact commit. Use
+`/plugin info --from` with the same arguments to preview the plugin without installing it.
+
+Git makes a temporary shallow clone. The harness reads committed files from it without a
+checkout, and rejects symlinks and submodules inside the selected plugin. The scanner runs
+before the prompt, which shows the remote, the folder, the commit and the unreviewed warning.
+Run the install command again to update.
+
+### How installed plugins behave
 
 **Names.** Everything a plugin adds carries its name: the `example` plugin's skill is
 `example:checklist`, its agent `example:planner`. A plugin can never replace one of the
@@ -482,6 +507,5 @@ the code on this computer instead, without your own tests.
 
 Every plugin is also read by a person before it is merged.
 
-Plugins that cannot live in a public repository, such as some biology and security research,
-are installed from a folder with `--from`. Installing from a git URL is coming in a later
-version. The trust modal says plainly that nobody reviewed such a plugin.
+Plugins that cannot live in a public repository can be installed from a private Git remote
+or a local folder with `--from`.

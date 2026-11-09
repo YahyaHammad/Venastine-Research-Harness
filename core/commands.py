@@ -136,10 +136,11 @@ _SPECS = (
     CommandSpec("new", "start a new thread"),
     # ROADMAP_v3 §94 (PL15-PL19). Both shells: installing is a trust
     # decision, and a line terminal makes it as much as the TUI does.
-    CommandSpec("plugin", "install and manage plugins: skills and agents "
-                          "from the marketplace or a folder",
+    CommandSpec("plugin", "install and manage plugins from the marketplace, "
+                          "a folder or a Git URL",
                 "[list [category] | info <id> | install <id> | "
-                "install --from <folder> | uninstall <id> [--purge] | "
+                "install --from <folder-or-git-url> [--path <name.plugin>] | "
+                "uninstall <id> [--purge] | "
                 "disable <id> | enable <id> | config <id> [<key> <value>]]"),
     CommandSpec("quit", "exit the harness", aliases=("exit", "bye")),
     CommandSpec("ref", "reference another conversation's summary",

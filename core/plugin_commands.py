@@ -8,8 +8,8 @@ modal says the same thing in a terminal as in the app.
 
     /plugin                              what is installed
     /plugin list [category]              the marketplace, a level at a time
-    /plugin info <id> | --from <folder>  what a plugin holds
-    /plugin install <id> | --from <folder>
+    /plugin info <id> | --from <folder-or-git-url> [--path <name.plugin>]
+    /plugin install <id> | --from <folder-or-git-url> [--path <name.plugin>]
     /plugin uninstall <id> [--purge]
     /plugin disable <id> | enable <id>   in this project
     /plugin config <id> [<key> [<value> | --reset]]
@@ -50,8 +50,9 @@ from core.plugin_format import PluginFormatError
 from core.plugin_source import FetchError
 from security import hosted
 
+FROM_USAGE = "--from <folder-or-git-url> [--path <name.plugin>]"
 USAGE = ("/plugin [list [category] | info <id> | install <id> | "
-         "install --from <folder> | uninstall <id> [--purge] | "
+         f"install {FROM_USAGE} | uninstall <id> [--purge] | "
          "disable <id> | enable <id> | config <id> [<key> [<value>|--reset]] | "
          "access <id> [none|read|write | network on|off] | "
          "approval <id> [ask|auto]]")
@@ -60,7 +61,7 @@ USAGE = ("/plugin [list [category] | info <id> | install <id> | "
 SUBCOMMANDS = {
     "list": "browse the marketplace",
     "info": "what a plugin holds",
-    "install": "install from the marketplace, or --from a folder",
+    "install": "install from the marketplace, a folder or a Git URL",
     "uninstall": "remove an installed plugin",
     "disable": "turn a plugin off in this project",
     "enable": "turn it back on here",
@@ -94,7 +95,7 @@ class Shell:
 
 
 def needs_network(args: str) -> bool:
-    """Whether `args` may reach GitHub, so a shell runs it off its UI
+    """Whether `args` may use the network, so a shell runs it off its UI
     thread."""
     return args.strip().partition(" ")[0] in _NETWORK
 
@@ -165,6 +166,11 @@ def _source_phrase(record_or_source) -> str:
     source = getattr(record_or_source, "source", record_or_source)
     if source.get("kind") == "folder":
         return f"from the folder {_clean(source.get('path', ''))}"
+    if source.get("kind") == "git":
+        folder = source.get("path")
+        where = f" ({_one_line(folder)})" if folder else ""
+        return (f"from Git {_one_line(source.get('url', ''))}{where} at "
+                f"{_one_line(source.get('commit', ''))[:12]}")
     return (f"from {source.get('repo', '?')} at "
             f"{str(source.get('commit', ''))[:12]}")
 
@@ -194,26 +200,34 @@ def _installed(shell: Shell) -> None:
 # ---- fetching and previewing ---------------------------------------------
 
 def _split_from(rest: str) -> tuple:
-    """(folder, None) for `--from <folder>`, (None, id) otherwise."""
-    if rest.startswith("--from"):
-        return rest[len("--from"):].strip(), None
+    """(source, None) for `--from`, (None, id) otherwise."""
+    words = rest.split(maxsplit=1)
+    if words and words[0] == "--from":
+        return (words[1] if len(words) > 1 else ""), None
     return None, rest
 
 
 def _fetch(rest: str, shell: Shell, verb: str):
-    folder, plugin_id = _split_from(rest)
-    if not (folder or plugin_id):
-        shell.error(f"/plugin {verb} needs a plugin id or --from <folder>. "
+    source, plugin_id = _split_from(rest)
+    if not (source or plugin_id):
+        shell.error(f"/plugin {verb} needs a plugin id or {FROM_USAGE}. "
                     f"{USAGE}")
         return None
+    what = source or plugin_id
     try:
-        if folder:
-            return plugin_source.read_folder(folder)
+        if source:
+            if plugin_source.is_git_source(source):
+                what = "the Git source"
+                url, *options = source.split()
+                if options and (len(options) != 2 or options[0] != "--path"):
+                    raise FetchError("use --from <git-url> [--path <name.plugin>]")
+                return plugin_source.read_git(url, options[1] if options else "")
+            return plugin_source.read_folder(source)
         return plugin_source.fetch(plugin_id, config.PLUGIN_MARKETPLACE)
     except PluginFormatError as exc:
-        _format_problems(folder or plugin_id, exc, shell)
+        _format_problems(what, exc, shell)
     except FetchError as exc:
-        shell.error(f"/plugin {verb}: {exc}.")
+        shell.error(f"/plugin {verb}: {_one_line(exc)}.")
     return None
 
 
@@ -251,9 +265,9 @@ def _prepare(candidate, shell: Shell) -> Optional[Prepared]:
         plugin_store.discard(staging)
         _format_problems(candidate.id, PluginFormatError(problems), shell)
         return None
-    # PL36. Every install is scanned here, offline; a folder's lock is also
-    # looked up on PyPI and OSV, since no marketplace review has seen it.
-    online = candidate.source.get("kind") == "folder"
+    # PL36. Every install is scanned here. External locks are also looked
+    # up on PyPI and OSV, since no marketplace review has seen them.
+    online = candidate.source.get("kind") != "marketplace"
     if online and manifest.requirements:
         shell.out(f"Looking up its "
                   f"{_count(len(manifest.requirements), 'locked package')} "
@@ -306,16 +320,21 @@ def describe(prepared: Prepared, replacing=None) -> list:
     source = candidate.source
     lines = [f"{candidate.id}  {manifest.version}",
              _one_line(manifest.description), ""]
-    if source.get("kind") == "folder":
-        lines += ["Where it comes from: the folder " + _clean(source["path"])
-                  + " on this computer.",
-                  "NOBODY HAS REVIEWED THIS PLUGIN. Read what it adds below "
-                  "before you say yes."]
-    else:
+    if source.get("kind") == "marketplace":
         lines += [f"Where it comes from: the marketplace in {source['repo']}, "
                   f"at commit {source['commit'][:12]}.",
                   "Plugins there are reviewed before they are merged, and "
                   "every file was checked against that commit."]
+    else:
+        if source.get("kind") == "git":
+            folder = _one_line(source["path"]) if source["path"] else "repository root"
+            lines.append(f"Where it comes from: Git {_one_line(source['url'])}, "
+                         f"{folder}, at commit {source['commit']}.")
+        else:
+            lines.append("Where it comes from: the folder " + _clean(source["path"])
+                         + " on this computer.")
+        lines.append("NOBODY HAS REVIEWED THIS PLUGIN. Read what it adds below "
+                     "before you say yes.")
     people = f"By {', '.join(_one_line(a) for a in manifest.authors)}."
     if manifest.maintainers:
         people += f" Maintained by {', '.join(manifest.maintainers)}."
@@ -371,7 +390,7 @@ def scan_lines(report, manifest, source: dict) -> list:
     """The modal's account of the scanner's findings (PL36)."""
     if report is None:
         return []
-    folder = source.get("kind") == "folder"
+    reviewed = source.get("kind") == "marketplace"
     if not report.findings:
         lines = ["", "The scanner read every file and found nothing to "
                      "point out."]
@@ -384,11 +403,11 @@ def scan_lines(report, manifest, source: dict) -> list:
     if report.high:
         lines.append("A HIGH FINDING IS WHERE A REVIEWER WOULD STOP. Read "
                      "each one, and the file it names, before you say yes."
-                     if folder else
+                     if not reviewed else
                      "The marketplace's review let these through after "
                      "reading them.")
     if manifest.requirements:
-        if not folder:
+        if reviewed:
             lines.append("Its locked packages were looked up on PyPI and "
                          "OSV by the marketplace's review, not here.")
         elif report.unchecked:
@@ -527,7 +546,7 @@ def _list(rest: str, shell: Shell) -> None:
 
 
 def _info(rest: str, shell: Shell) -> None:
-    folder, plugin_id = _split_from(rest)
+    source, plugin_id = _split_from(rest)
     if plugin_id:
         record = plugin_store.find(plugin_id)
         if record is not None:
@@ -544,7 +563,7 @@ def _info(rest: str, shell: Shell) -> None:
             shell.out(line)
         shell.out("")
         shell.out(f"Not installed. /plugin install "
-                  f"{'--from ' + folder if folder else candidate.id} "
+                  f"{'--from ' + source if source else candidate.id} "
                   f"installs it.")
     finally:
         plugin_store.discard(prepared.staging)
