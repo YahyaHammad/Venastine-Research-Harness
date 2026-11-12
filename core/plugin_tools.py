@@ -151,8 +151,50 @@ def schema_for(record, tool) -> dict:
 
 def available() -> bool:
     """Whether a tool of a plugin can run here at all, so one that cannot
-    is not advertised: a container needs Docker or Podman."""
-    return isolation() == PROCESS or sandbox.is_docker_available()
+    is not advertised: a container needs Docker or Podman, running Linux
+    containers."""
+    return isolation() == PROCESS or container_problem() is None
+
+
+def container_problem() -> Optional[str]:
+    """Why no plugin container can start here, or None. The sandbox image
+    is a Linux one, and Docker Desktop on Windows can answer every probe
+    while it runs only Windows containers."""
+    if not sandbox.is_docker_available():
+        return ("neither Docker nor Podman is available. Start one, or set "
+                "plugin_tool_isolation: process in config.yaml")
+    if not sandbox.runs_linux_containers():
+        return ("Docker here runs Windows containers, and the sandbox image "
+                "is a Linux one. Switch Docker Desktop to Linux containers, "
+                "or set plugin_tool_isolation: process in config.yaml")
+    return None
+
+
+def reinstall_command(record) -> str:
+    """The `/plugin install` that fetches `record` again from where it
+    came from: a marketplace id answers from the marketplace, which for a
+    plugin from Git or a folder would be another plugin of the same name."""
+    source = record.source
+    kind = source.get("kind")
+    if kind == "folder":
+        return f"/plugin install --from {source.get('path') or '<its folder>'}"
+    if kind == "git":
+        path = source.get("path")
+        return (f"/plugin install --from {source.get('url', '<its url>')}"
+                + (f" --path {path}" if path else ""))
+    return f"/plugin install {record.id}"
+
+
+def disabled_here(record) -> Optional[str]:
+    """Why `record`'s tools are refused in this session's project, or None:
+    turned off there, by this session or another one sharing the store,
+    whose registered tools are otherwise still this session's to call."""
+    from core import config_loader
+    project = config_loader.get_project_path()
+    if project and record.name in plugin_store.disabled_in(project):
+        return (f"{record.id} is turned off in this project (/plugin enable "
+                f"{record.id} turns it back on)")
+    return None
 
 
 def _notice(plugin_name: str):
@@ -379,11 +421,10 @@ class Runner:
 
     def start(self) -> None:
         if self.isolation == CONTAINER:
-            if not sandbox.is_docker_available():
-                raise RunnerError(
-                    "plugin tools run in a container, and neither Docker nor "
-                    "Podman is available. Start one, or set "
-                    "plugin_tool_isolation: process in config.yaml")
+            problem = container_problem()
+            if problem:
+                raise RunnerError(f"plugin tools run in a container, and "
+                                  f"{problem}")
             os.makedirs(self.workspace, exist_ok=True)
             argv, cwd, env = self._container_argv(), None, None
         else:
@@ -640,11 +681,10 @@ def build_deps(name: str, manifest, staging: str, out) -> tuple:
     count = len(manifest.requirements)
     try:
         if isolation() == CONTAINER:
-            if not sandbox.is_docker_available():
-                raise BuildError(
-                    "its dependencies are built in the sandbox image, and "
-                    "neither Docker nor Podman is available. Start one, or "
-                    "set plugin_tool_isolation: process")
+            problem = container_problem()
+            if problem:
+                raise BuildError(f"its dependencies are built in the sandbox "
+                                 f"image, and {problem}")
             out(f"Installing {count} locked package"
                 f"{'' if count == 1 else 's'} into {config.SANDBOX_DOCKER_IMAGE}"
                 f", wheels only, every hash checked...")
@@ -718,10 +758,9 @@ def _runner(record, manifest, grant: dict) -> Runner:
             # holds what was checked.
             problem = deps_problem(record, manifest)
             if problem:
-                again = ("--from <its folder>" if record.local
-                         else record.id)
-                raise RunnerError(f"it cannot run: {problem}. /plugin "
-                                  f"install {again} builds them again")
+                raise RunnerError(f"it cannot run: {problem}. "
+                                  f"{reinstall_command(record)} builds them "
+                                  f"again")
             runner = Runner(record, manifest, grant, workspace)
             runner.start()
             _runners[record.name] = runner
@@ -737,6 +776,10 @@ def run_tool(plugin_name: str, tool: str, params: dict, *,
     if record is None or not plugin_store.enabled():
         return {"error": f"the plugin {plugin_name} is not installed or "
                          f"plugins are off"}
+    off = disabled_here(record)
+    if off:
+        stop(plugin_name)
+        return {"error": off}
     different = plugin_store.changes(record)
     if different:
         return {"error": f"{record.id}'s files changed since it was "

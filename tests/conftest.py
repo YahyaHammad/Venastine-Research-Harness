@@ -40,14 +40,19 @@ def linux_docker() -> str:
 
 @pytest.fixture
 def linux_plugin_runtime() -> str:
-    """Use the harness's runtime; Windows-container Docker cannot run the plugin image."""
+    """Use the harness's runtime; Windows-container Docker cannot run the
+    plugin image. Decided by a live probe through the harness's own
+    reading of `docker info` (`RuntimeProbe.linux`), so the skip and the
+    production refusal (core/plugin_tools.container_problem) are one rule."""
     from security import sandbox
 
     runtime = sandbox.container_runtime()
     if runtime is None:
         pytest.skip("needs Docker or Podman")
-    if runtime == sandbox.DOCKER and os.name == "nt" and not linux_docker():
-        pytest.skip("needs a Docker daemon running Linux containers")
+    if runtime == sandbox.DOCKER and os.name == "nt":
+        live = sandbox._probe_container_runtime()
+        if live.name != sandbox.DOCKER or not live.linux:
+            pytest.skip("needs a Docker daemon running Linux containers")
     return runtime
 
 # ---------------------------------------------------------------------------
@@ -1112,6 +1117,10 @@ PROCESS_MEMOS = (
     # §94 slice 3 (PL30): the MCP servers this process started for
     # plugins. A leftover is a live server another test calls into.
     ("core.plugin_mcp", ("_servers",), lambda module: module.reset()),
+    # Batch 255 (PL42): the staging folders this process owns, each an open
+    # descriptor holding its lock. A leftover would be a lock another
+    # test's sweep finds held, and a descriptor nobody closes.
+    ("core.plugin_store", ("_owned",), lambda module: module.reset()),
     # D15's per-tool approval defaults for dynamically named tools, through
     # the module's own function: with no arguments it drops all of them.
     ("security.permissions", ("_dynamic_approval_defaults",),

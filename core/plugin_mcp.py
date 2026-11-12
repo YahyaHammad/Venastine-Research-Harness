@@ -137,11 +137,10 @@ class Server:
         """(argv, cwd, env) for the transport to start."""
         record, grant = self.record, self.grant
         if self.isolation == plugin_tools.CONTAINER:
-            if not sandbox.is_docker_available():
-                raise ServerError(
-                    "its MCP servers run in a container, and neither Docker "
-                    "nor Podman is available. Start one, or set "
-                    "plugin_tool_isolation: process in config.yaml")
+            problem = plugin_tools.container_problem()
+            if problem:
+                raise ServerError(f"its MCP servers run in a container, and "
+                                  f"{problem}")
             os.makedirs(self.workspace, exist_ok=True)
             mounts = [(plugin_tools.RUNNER, plugin_tools.RUNNER_INSIDE, "ro"),
                       (record.root, plugin_tools.PLUGIN_INSIDE, "ro"),
@@ -324,10 +323,9 @@ def _server(record, manifest, server, grant: dict, settings: dict) -> Server:
         if running is None:
             problem = plugin_tools.deps_problem(record, manifest)
             if problem:
-                again = ("--from <its folder>" if record.local
-                         else record.id)
-                raise ServerError(f"it cannot run: {problem}. /plugin "
-                                  f"install {again} builds them again")
+                raise ServerError(f"it cannot run: {problem}. "
+                                  f"{plugin_tools.reinstall_command(record)} "
+                                  f"builds them again")
             running = Server(record, manifest, server, grant, settings)
             running.start()
             _servers[slot] = running
@@ -370,6 +368,10 @@ def call(plugin_name: str, server_name: str, tool: str, params: dict, *,
     if record is None or not plugin_store.enabled():
         return {"error": f"the plugin {plugin_name} is not installed or "
                          f"plugins are off"}
+    off = plugin_tools.disabled_here(record)
+    if off:
+        stop(plugin_name)
+        return {"error": off}
     different = plugin_store.changes(record)
     if different:
         return {"error": f"{record.id}'s files changed since it was "

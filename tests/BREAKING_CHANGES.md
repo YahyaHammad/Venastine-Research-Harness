@@ -15,6 +15,23 @@ other name.
 
 ---
 
+## Plugins, the review fixes (batch 255)
+
+| Change | Test | Fix |
+|---|---|---|
+| Delete a `.staging-*` folder without asking whether a live process holds its lock | `test_a_staging_folder_in_use_is_not_swept`, `test_another_processs_staging_survives_until_it_ends`, `test_an_interrupted_install_is_swept` | PL42: `sweep_leftovers()` and `_take_abandoned`. A test that wants a folder swept releases its lock first, as a dead process does |
+| Read, change and write `registry.json` or `projects.json` outside `plugin_store._locked()`, or let a read fail for want of it | `test_a_change_waits_for_another_process_holding_the_store` | PL42: a change raises `StoreBusy` after `LOCK_WAIT_S`; a read reads anyway |
+| Write the registry after a commit's old folders are deleted, or leave its failure out of the rollback | `test_a_replacement_whose_registry_cannot_be_written_keeps_the_old`, `test_a_first_install_whose_registry_cannot_be_written_leaves_nothing`, `test_install_over_a_registry_held_open_says_so_and_keeps_the_old` | PL42: the registry is the commit's last step |
+| Iterate a registry or project map without checking it is a mapping, or use a registry key as a path | `test_a_malformed_registry_reads_as_nothing_installed`, `test_malformed_project_choices_read_as_none` | `plugin_store._plain_name` |
+| Run a plugin tool or server tool another session turned off here | `test_a_plugin_turned_off_by_another_session_does_not_run`, `test_a_server_tool_turned_off_by_another_session_does_not_run` | PL9: `plugin_tools.disabled_here`, at every call |
+| Tell a plugin from Git or a folder to reinstall by its id | `test_a_stale_build_names_the_install_that_rebuilds_it`, `test_a_build_for_somewhere_else_is_refused` | `plugin_tools.reinstall_command` |
+| Offer plugin tools on a Docker that runs Windows containers | `test_docker_running_windows_containers_runs_no_plugin_tool`, `test_docker_running_windows_containers_is_known` | `RuntimeProbe.linux`, default True, so `RuntimeProbe("docker")` still runs Linux containers |
+| Compare a plugin's paths whole rather than folder by folder, case-folded, or accept a device name as a plugin name | `test_folders_a_case_folding_disk_cannot_hold_are_refused`, `test_one_folder_may_hold_many_files`, `test_a_windows_device_name_is_no_plugin_name` | PL1, PL3 |
+| Let a YAML error that is not a YAMLError leave the manifest or frontmatter parser | `test_yaml_the_loader_cannot_build_is_a_format_error`, `test_frontmatter_the_parser_cannot_build_is_a_problem` | `RecursionError` and `ValueError` are format problems |
+| Take the shared MCP loop apart from holding it | `test_a_held_loop_is_never_stopped_under_its_holder`, `test_connect_takes_the_loop_only_by_holding_it` | `mcp_client.client._hold` returns the loop it registered against |
+| Return from `plugin_ci.check_plugin` before the loader reads the plugin's skills and agents | `test_a_skill_every_install_refuses_fails_the_check` | the install's own `config_loader.preview_plugin` |
+| Skip `read_project_doc` inside a `.plugin` folder opened as the project itself | `test_a_plugin_opened_as_the_project_is_readable` | PL37, the owner's call: the rule guards a copy inside a project |
+
 ## Plugins, slice 4: the marketplace's CI (batch 252)
 
 | Change | Test | Fix |

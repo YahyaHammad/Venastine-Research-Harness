@@ -151,9 +151,15 @@ _loop_lock = threading.Lock()
 _holders: set = set()
 
 
-def _hold(client) -> None:
+def _hold(client) -> asyncio.AbstractEventLoop:
+    """The loop, started if need be, with `client` holding it -- in ONE
+    step under the loop's lock, so the last client letting go cannot stop
+    the loop between this client getting it and holding it, and leave it
+    waiting on a loop that no longer runs."""
     with _loop_lock:
+        loop = _ensure_loop_locked()
         _holders.add(client)
+        return loop
 
 
 def _release(client) -> None:
@@ -177,15 +183,19 @@ def _metered_mcp_client(headers=None, timeout=None, auth=None):
 
 def _ensure_loop() -> asyncio.AbstractEventLoop:
     """The one MCP event loop, created on first use."""
-    global _loop, _thread
     with _loop_lock:
-        if _loop is None:
-            _loop = asyncio.new_event_loop()
-            _thread = threading.Thread(
-                target=_loop.run_forever, name="mcp-loop", daemon=True)
-            _thread.start()
-            logger.debug("Started MCP event loop thread.")
-        return _loop
+        return _ensure_loop_locked()
+
+
+def _ensure_loop_locked() -> asyncio.AbstractEventLoop:
+    global _loop, _thread
+    if _loop is None:
+        _loop = asyncio.new_event_loop()
+        _thread = threading.Thread(
+            target=_loop.run_forever, name="mcp-loop", daemon=True)
+        _thread.start()
+        logger.debug("Started MCP event loop thread.")
+    return _loop
 
 
 def _shutdown_loop(join_timeout: float = SHUTDOWN_TIMEOUT_S) -> None:
@@ -634,8 +644,7 @@ class MCPClient:
             raise RuntimeError(
                 "connect_all() on an MCP client that is already connected; "
                 "call disconnect_all() first")
-        loop = _ensure_loop()
-        _hold(self)
+        loop = _hold(self)
 
         async def _start():
             self._ready = asyncio.Event()

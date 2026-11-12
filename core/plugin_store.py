@@ -22,6 +22,18 @@ LAYOUT
   <name>/settings.json     your values for its settings (PL6)
   <name>/approval.json     whether its tool calls ask first (PL23)
   .staging-<hex>/          an install in progress, removed on every outcome
+  .staging-<hex>.lock      held by the process whose install that is
+  .lock                    held while anything here is read or changed
+
+TWO SESSIONS SHARE THIS FOLDER, so every read and every change of the two
+JSON files, every commit and every sweep happens under `.lock`, the
+operating system's lock on an empty file (`fcntl.flock`, `msvcrt.locking`),
+which a process that dies releases -- core/chatgpt_auth.py's CG4 lock, for
+its reason: a read-modify-write by two processes at once loses one of the
+two, and on Windows a second process merely READING a file makes replacing
+it fail. A staging folder is OWNED: its process holds the lock beside it
+for as long as the folder exists, so a sweep removes only what nobody
+holds -- an install that died -- and never one waiting at its trust modal.
 
 A CHANGED FILE IS A DISABLED PLUGIN (PL8). The registry holds the hash of
 every file the modal described; `loadable()` checks them on every
@@ -42,7 +54,9 @@ import logging
 import os
 import secrets
 import shutil
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -59,14 +73,174 @@ FILES = "files"
 DEPS = "deps"
 SETTINGS = "settings.json"
 APPROVAL = "approval.json"
+LOCK = ".lock"
 _STAGING = ".staging-"
 _OLD = ".old-"
+#: How long a change waits for another process's: a commit or a sweep is a
+#: few renames and deletions, so this is far more than one ever takes.
+LOCK_WAIT_S = 30
 
 
 def store_dir() -> str:
     """`~/.config/venastine/plugins`, resolved at CALL time so a test's
     HOME is the one used."""
     return os.path.join(os.path.expanduser("~/.config/venastine"), "plugins")
+
+
+# ---- the locks -----------------------------------------------------------
+
+class StoreBusy(OSError):
+    """Another process held the store for longer than LOCK_WAIT_S. An
+    OSError, so every caller that reports a failed write reports this."""
+
+
+if os.name == "nt":
+    import msvcrt
+
+    def _try_lock(fd: int) -> bool:
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+
+    def _unlock(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _try_lock(fd: int) -> bool:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        return True
+
+    def _unlock(fd: int) -> None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+_thread_lock = threading.RLock()
+_held = threading.local()
+
+
+@contextmanager
+def _locked(reading: bool = False):
+    """The store, against every other thread and process. Re-entrant
+    within a thread: an OS lock taken twice by one process on two
+    descriptors deadlocks on POSIX, so a nested `with` only counts. A store
+    that does not exist yet has nothing to read, so nothing is created to
+    lock it until something is written; and one whose lock cannot even be
+    opened -- a read-only home -- is read without it, since nothing can
+    write there either.
+
+    A READ never fails for want of the lock: discovery reads the registry
+    at startup, and a session must start. After the wait it reads anyway,
+    which is safe because every write replaces a whole file -- it sees one
+    version or the other -- and the lock only spares the writer a Windows
+    sharing violation. A change that cannot get it raises StoreBusy."""
+    with _thread_lock:
+        depth = getattr(_held, "depth", 0)
+        if depth:
+            _held.depth = depth + 1
+            try:
+                yield
+            finally:
+                _held.depth = depth
+            return
+        root = store_dir()
+        fd = None
+        if os.path.isdir(root):
+            try:
+                fd = os.open(os.path.join(root, LOCK),
+                             os.O_RDWR | os.O_CREAT, 0o600)
+            except OSError:
+                fd = None
+        if fd is None:
+            yield
+            return
+        try:
+            deadline = time.monotonic() + LOCK_WAIT_S
+            held = _try_lock(fd)
+            while not held and time.monotonic() < deadline:
+                time.sleep(0.05)
+                held = _try_lock(fd)
+            if not held and not reading:
+                raise StoreBusy(
+                    "another Venastine process is changing the plugin "
+                    "store; try again in a moment")
+            if not held:
+                yield  # a read that waited long enough: see above
+                return
+            _held.depth = 1
+            try:
+                yield
+            finally:
+                _held.depth = 0
+                _unlock(fd)
+        finally:
+            os.close(fd)
+
+
+_owned: dict = {}            # staging folder -> the descriptor holding its lock
+_owned_lock = threading.Lock()
+
+
+def reset() -> None:
+    """No staging folder left owned: tests/conftest.py's reset of `_owned`,
+    through `_let_go`, so every descriptor is closed. The folders are left
+    to their test's temporary home."""
+    with _owned_lock:
+        paths = list(_owned)
+    for path in paths:
+        _let_go(path)
+
+
+def _claim(path: str) -> None:
+    """Make `path`'s lock and hold it, BEFORE the folder exists: a sweep
+    that sees the folder then always finds its lock held."""
+    fd = os.open(path + LOCK, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+    if not _try_lock(fd):
+        os.close(fd)
+        raise OSError(f"could not lock {path + LOCK}")
+    with _owned_lock:
+        _owned[path] = fd
+
+
+def _let_go(path: str) -> None:
+    """Release `path`'s lock and remove it, once the folder is gone or has
+    been renamed into place. Nothing when this process does not hold it."""
+    with _owned_lock:
+        fd = _owned.pop(path, None)
+    if fd is None:
+        return
+    try:
+        _unlock(fd)
+    except OSError:
+        pass  # closing the descriptor releases it as well
+    os.close(fd)
+    try:
+        os.unlink(path + LOCK)
+    except OSError:
+        pass  # a sweep removes a lock nobody holds
+
+
+def _take_abandoned(path: str) -> Optional[int]:
+    """The descriptor of `path`'s lock, now held here, when no process
+    holds it -- its install ended without cleaning up -- else None."""
+    with _owned_lock:
+        if path in _owned:
+            return None
+    try:
+        fd = os.open(path + LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return None
+    if _try_lock(fd):
+        return fd
+    os.close(fd)
+    return None
 
 
 def enabled() -> bool:
@@ -124,12 +298,30 @@ def _registry_path() -> str:
 def installed() -> dict:
     """{name: Record}. A damaged or unknown-version registry reads as
     EMPTY, and here that is the fail-closed answer: nothing loads, and a
-    reinstall writes a good one."""
-    data = read_versioned(_registry_path(), STORE_VERSION,
-                          "no plugins load until one is installed again.")
+    reinstall writes a good one. So does one whose `plugins` is not a
+    mapping, and an entry that is not a record is left out by name."""
+    with _locked(reading=True):
+        data = read_versioned(_registry_path(), STORE_VERSION,
+                              "no plugins load until one is installed again.")
+    rows = data.get("plugins")
+    if not isinstance(rows, dict):
+        if rows is not None:
+            logger.warning("Ignoring the plugin registry: its plugins are not "
+                           "a mapping. No plugins load until one is "
+                           "installed again.")
+        return {}
     out = {}
-    for name, row in (data.get("plugins") or {}).items():
+    for name, row in rows.items():
         try:
+            if not (_plain_name(name) and isinstance(row, dict)
+                    and isinstance(row["id"], str)
+                    and isinstance(row["version"], str)
+                    and isinstance(row["source"], dict)
+                    and isinstance(row["files"], dict)
+                    and all(isinstance(k, str) and isinstance(v, str)
+                            for k, v in row["files"].items())
+                    and isinstance(row.get("deps") or {}, dict)):
+                raise TypeError
             out[name] = Record(name=name, id=row["id"], version=row["version"],
                                source=dict(row["source"]),
                                files=dict(row["files"]),
@@ -139,6 +331,14 @@ def installed() -> dict:
             logger.warning("Ignoring the registry entry for plugin %r: it is "
                            "not a record this version can read.", name)
     return out
+
+
+def _plain_name(name) -> bool:
+    """A registry key is a folder in the store: one plain segment, never a
+    path, so a damaged registry cannot point the store elsewhere."""
+    return (isinstance(name, str) and name not in ("", ".", "..")
+            and not name.startswith(".") and "/" not in name
+            and "\\" not in name and ":" not in name)
 
 
 def _write_registry(records: dict) -> None:
@@ -164,48 +364,88 @@ def find(text: str) -> Optional[Record]:
 
 # ---- installing ----------------------------------------------------------
 
+def _new_owned(prefix: str) -> str:
+    """A new, empty staging folder in the store, owned by this process."""
+    os.makedirs(store_dir(), exist_ok=True)
+    path = os.path.join(store_dir(), prefix + secrets.token_hex(6))
+    _claim(path)
+    try:
+        os.makedirs(path)
+    except BaseException:
+        _let_go(path)
+        raise
+    return path
+
+
 def stage(files: dict) -> str:
     """Write `files` ({path: bytes}) to a new staging folder in the store
     and return it. Same filesystem as the destination, so the commit is a
     rename."""
-    staging = os.path.join(store_dir(), _STAGING + secrets.token_hex(6))
-    os.makedirs(staging)
-    for path, data in files.items():
-        target = os.path.join(staging, *path.split("/"))
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "xb") as handle:
-            handle.write(data)
+    staging = _new_owned(_STAGING)
+    try:
+        for path, data in files.items():
+            target = os.path.join(staging, *path.split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "xb") as handle:
+                handle.write(data)
+    except BaseException:
+        discard(staging)
+        raise
     return staging
 
 
 def discard(path: Optional[str]) -> None:
     if path and os.path.isdir(path):
         shutil.rmtree(path, ignore_errors=True)
+    if path:
+        _let_go(path)
 
 
 def sweep_leftovers() -> None:
-    """Staging and replaced folders an interrupted install left behind."""
+    """Staging and replaced folders an interrupted install left behind:
+    a staging folder only when no process holds its lock, and a replaced
+    one under the store's lock, which every commit holds while one of its
+    own exists."""
     root = store_dir()
     if not os.path.isdir(root):
         return
-    for entry in os.listdir(root):
-        if entry.startswith((_STAGING, _OLD)):
-            discard(os.path.join(root, entry))
-    for name in os.listdir(root):
-        plugin_dir = os.path.join(root, name)
-        if os.path.isdir(plugin_dir) and not name.startswith("."):
-            for entry in os.listdir(plugin_dir):
-                if entry.startswith(_OLD):
-                    discard(os.path.join(plugin_dir, entry))
+    with _locked():
+        for entry in sorted(os.listdir(root)):
+            path = os.path.join(root, entry)
+            if entry.startswith(_OLD):
+                discard(path)
+            elif entry.startswith(_STAGING):
+                base = path[:-len(LOCK)] if entry.endswith(LOCK) else path
+                if base != path and os.path.exists(base):
+                    continue  # the folder's own turn decides its lock
+                fd = _take_abandoned(base)
+                if fd is None:
+                    continue
+                try:
+                    discard(base)
+                finally:
+                    try:
+                        _unlock(fd)
+                    except OSError:
+                        pass  # closing releases it
+                    os.close(fd)
+                try:
+                    os.unlink(base + LOCK)
+                except OSError:
+                    pass  # gone already, or taken again: the next sweep's
+        for name in os.listdir(root):
+            plugin_dir = os.path.join(root, name)
+            if os.path.isdir(plugin_dir) and not name.startswith("."):
+                for entry in os.listdir(plugin_dir):
+                    if entry.startswith(_OLD):
+                        discard(os.path.join(plugin_dir, entry))
 
 
 def new_deps_dir() -> str:
     """An empty folder in the store for a dependency build (PL22), which
     `commit` renames into place. A staging name, so an interrupted build
-    is swept like an interrupted install."""
-    path = os.path.join(store_dir(), _STAGING + "deps-" + secrets.token_hex(6))
-    os.makedirs(path)
-    return path
+    is swept like an interrupted install, and owned like one."""
+    return _new_owned(_STAGING + "deps-")
 
 
 def commit(staging: str, *, name: str, plugin_id: str, version: str,
@@ -216,8 +456,30 @@ def commit(staging: str, *, name: str, plugin_id: str, version: str,
     it. The old folders are moved aside first and put back if a move in
     fails, so an install that fails half way leaves what was there.
 
+    THE REGISTRY IS PART OF THE COMMIT. Its write is the last step, and a
+    write that fails -- on Windows any other program merely reading the
+    file is enough -- puts the old folders back as a failed move does:
+    the registry still names the old files' hashes, so new files under it
+    would match neither version and nothing would load. The old folders
+    are deleted only once the registry names the new ones.
+
     An installed plugin's old dependencies go whether or not new ones
     come: what was built for another version is not this version's."""
+    with _locked():
+        try:
+            return _commit(staging, name=name, plugin_id=plugin_id,
+                           version=version, source=source, files=files,
+                           deps_dir=deps_dir, deps=deps)
+        finally:
+            # Renamed into place, or put back and removed: either way no
+            # longer a staging folder of this process's.
+            _let_go(staging)
+            if deps_dir:
+                _let_go(deps_dir)
+
+
+def _commit(staging, *, name, plugin_id, version, source, files, deps_dir,
+            deps) -> Record:
     plugin_dir = os.path.join(store_dir(), name)
     os.makedirs(plugin_dir, exist_ok=True)
     moves = ((staging, os.path.join(plugin_dir, FILES)),
@@ -232,23 +494,38 @@ def commit(staging: str, *, name: str, plugin_id: str, version: str,
             if source_dir:
                 os.rename(source_dir, target)
                 placed.append(target)
-    except OSError:
-        for target in placed:
-            discard(target)
-        for target, old in reversed(aside):
-            os.rename(old, target)
-        raise
-    record = Record(name=name, id=plugin_id, version=version, source=source,
-                    files={path: sha256(data) for path, data in files.items()},
-                    installed_at=time.time(), deps=dict(deps or {}))
-    records = installed()
-    records[name] = record
-    try:
+        record = Record(name=name, id=plugin_id, version=version,
+                        source=source,
+                        files={path: sha256(data)
+                               for path, data in files.items()},
+                        installed_at=time.time(), deps=dict(deps or {}))
+        records = installed()
+        records[name] = record
         _write_registry(records)
-    finally:
-        for _, old in aside:
-            discard(old)
+    except BaseException:
+        _put_back(placed, aside)
+        try:
+            os.rmdir(plugin_dir)  # only when a first install left it empty
+        except OSError:
+            pass  # it holds the old version, or settings kept for a reinstall
+        raise
+    for _, old in aside:
+        discard(old)
     return record
+
+
+def _put_back(placed: list, aside: list) -> None:
+    """Undo a commit's moves: what it placed goes, what it moved aside
+    returns. A folder that cannot return is named in the log rather than
+    raised over the failure that is worth reporting."""
+    for target in placed:
+        discard(target)
+    for target, old in reversed(aside):
+        try:
+            os.rename(old, target)
+        except OSError:
+            logger.error("Could not put %s back after a failed install; "
+                         "what was there is at %s.", target, old)
 
 
 def remove(name: str, *, purge: bool = False) -> None:
@@ -256,27 +533,28 @@ def remove(name: str, *, purge: bool = False) -> None:
     entry. Your settings, whether its tools ask first, and the projects it
     was turned off in or granted access to stay unless `purge` (PL9), so a
     reinstall finds them."""
-    records = installed()
-    records.pop(name, None)
-    _write_registry(records)
-    plugin_dir = os.path.join(store_dir(), name)
-    discard(os.path.join(plugin_dir, FILES))
-    discard(os.path.join(plugin_dir, DEPS))
-    if purge:
-        discard(plugin_dir)
-        data = _projects_data()
-        for project in list(data["disabled"]):
-            data["disabled"][project] = [
-                n for n in data["disabled"][project] if n != name]
-            if not data["disabled"][project]:
-                del data["disabled"][project]
-        for project in list(data["grants"]):
-            data["grants"][project].pop(name, None)
-            if not data["grants"][project]:
-                del data["grants"][project]
-        _write_projects_data(data)
-    elif os.path.isdir(plugin_dir) and not os.listdir(plugin_dir):
-        os.rmdir(plugin_dir)
+    with _locked():
+        records = installed()
+        records.pop(name, None)
+        _write_registry(records)
+        plugin_dir = os.path.join(store_dir(), name)
+        discard(os.path.join(plugin_dir, FILES))
+        discard(os.path.join(plugin_dir, DEPS))
+        if purge:
+            discard(plugin_dir)
+            data = _projects_data()
+            for project in list(data["disabled"]):
+                data["disabled"][project] = [
+                    n for n in data["disabled"][project] if n != name]
+                if not data["disabled"][project]:
+                    del data["disabled"][project]
+            for project in list(data["grants"]):
+                data["grants"][project].pop(name, None)
+                if not data["grants"][project]:
+                    del data["grants"][project]
+            _write_projects_data(data)
+        elif os.path.isdir(plugin_dir) and not os.listdir(plugin_dir):
+            os.rmdir(plugin_dir)
 
 
 # ---- what still matches the trust modal ----------------------------------
@@ -364,13 +642,18 @@ def _key(project_path: str) -> str:
 
 def _projects_data() -> dict:
     """{"disabled": {project: [names]}, "grants": {project: {name: row}}},
-    with anything malformed left out."""
-    data = read_versioned(_projects_path(), STORE_VERSION)
-    raw = data.get("disabled") or {}
+    with anything malformed left out -- either map included, when it is
+    not a mapping at all."""
+    with _locked(reading=True):
+        data = read_versioned(_projects_path(), STORE_VERSION)
+    raw = data.get("disabled")
+    raw = raw if isinstance(raw, dict) else {}
     disabled = {project: [n for n in names if isinstance(n, str)]
                 for project, names in raw.items() if isinstance(names, list)}
+    raw_grants = data.get("grants")
+    raw_grants = raw_grants if isinstance(raw_grants, dict) else {}
     grants = {}
-    for project, rows in (data.get("grants") or {}).items():
+    for project, rows in raw_grants.items():
         if isinstance(rows, dict):
             grants[project] = {name: dict(row) for name, row in rows.items()
                                if isinstance(name, str)
@@ -403,15 +686,16 @@ def disabled_in(project_path: str) -> set:
 
 
 def set_disabled(project_path: str, name: str, off: bool) -> None:
-    projects = _read_projects()
-    key = _key(project_path)
-    names = set(projects.get(key, ()))
-    names = names | {name} if off else names - {name}
-    if names:
-        projects[key] = sorted(names)
-    else:
-        projects.pop(key, None)
-    _write_projects(projects)
+    with _locked():
+        projects = _read_projects()
+        key = _key(project_path)
+        names = set(projects.get(key, ()))
+        names = names | {name} if off else names - {name}
+        if names:
+            projects[key] = sorted(names)
+        else:
+            projects.pop(key, None)
+        _write_projects(projects)
 
 
 # ---- what a plugin's tools may touch, per project (PL21) -----------------
@@ -436,10 +720,11 @@ def set_grant(project_path: str, name: str, workspace: str,
     if workspace not in WORKSPACE_LEVELS:
         raise ValueError(f"workspace access is none, read or write, not "
                          f"{workspace!r}")
-    data = _projects_data()
-    data["grants"].setdefault(_key(project_path), {})[name] = {
-        "workspace": workspace, "network": bool(network)}
-    _write_projects_data(data)
+    with _locked():
+        data = _projects_data()
+        data["grants"].setdefault(_key(project_path), {})[name] = {
+            "workspace": workspace, "network": bool(network)}
+        _write_projects_data(data)
 
 
 # ---- whether its tool calls ask first (PL23) -----------------------------

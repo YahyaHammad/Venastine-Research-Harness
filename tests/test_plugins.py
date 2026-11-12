@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess  # nosec B404 - runs local Git repositories for the install tests
+import sys
 import threading
 import time
 import types
@@ -283,6 +284,17 @@ class TestTheId:
         with pytest.raises(ValueError, match="deep"):
             plugin_format.parse_id("/".join(["a"] * (plugin_format.MAX_DEPTH + 1)))
 
+    @pytest.mark.parametrize("name", ["con", "prn", "aux", "nul", "com1",
+                                      "lpt9"])
+    def test_a_windows_device_name_is_no_plugin_name(self, name):
+        """Batch 255. A name is the plugin's folder in the store and each
+        folder of an id one in plugins/, and Windows can make neither."""
+        assert not plugin_format.valid_name(name)
+        for text in (name, f"math/{name}", f"{name}/calculus"):
+            with pytest.raises(ValueError):
+                plugin_format.parse_id(text)
+        assert plugin_format.valid_name(name + "s")
+
 
 def _manifest(extra="", **fields):
     base = {"format": "1", "name": "demo", "version": '"1.0.0"',
@@ -293,6 +305,19 @@ def _manifest(extra="", **fields):
 
 
 class TestTheManifest:
+
+    @pytest.mark.parametrize("text, said", [
+        ("[" * 5000 + "]" * 5000 + "\n", "nests too deeply"),
+        (_manifest(extra="x: " + "{a: " * 3000 + "b" + "}" * 3000 + "\n"),
+         "nests too deeply"),
+        (_manifest(extra="released: 2001-02-30\n"), "not valid YAML"),
+    ])
+    def test_yaml_the_loader_cannot_build_is_a_format_error(self, text, said):
+        """Batch 255. A date datetime refuses is a ValueError and nesting
+        past the stack a RecursionError, and neither is a YAMLError, so
+        both went past every caller's PluginFormatError handler."""
+        with pytest.raises(PluginFormatError, match=said):
+            plugin_format.parse_manifest(text, "demo")
 
     def test_a_minimal_manifest_parses(self):
         manifest = plugin_format.parse_manifest(_manifest(), "demo")
@@ -475,6 +500,26 @@ class TestTheFiles:
         problems = plugin_format.check_files(self._sizes(**{"skills/A.md": 1}))
         assert any("differ only in case" in p for p in problems)
 
+    @pytest.mark.parametrize("paths, said", [
+        (("skills/Folder/a.md", "skills/folder/b.md"), "differ only in case"),
+        (("skills/x/Deep/a.md", "skills/x/deep/b.md"), "differ only in case"),
+        (("skills/example.md", "skills/EXAMPLE.md/another.md"), "is a file"),
+        (("skills/c.md", "skills/c.md/d.md"), "is a file"),
+    ])
+    def test_folders_a_case_folding_disk_cannot_hold_are_refused(self, paths,
+                                                                said):
+        """Batch 255. Full paths were compared, so two folders one Windows
+        folder merges, or a file beside a folder of its name, passed --
+        and failed staging, or the installed tree's own integrity check."""
+        problems = plugin_format.check_files(
+            self._sizes(**{path: 1 for path in paths}))
+        assert any(said in p for p in problems), problems
+
+    def test_one_folder_may_hold_many_files(self):
+        assert plugin_format.check_files(self._sizes(**{
+            "skills/sub/a.md": 1, "skills/sub/b.md": 1,
+            "skills/sub/deeper/c.md": 1})) == []
+
     def test_the_size_limits_hold(self):
         big = plugin_format.check_files(
             self._sizes(**{"skills/big.md": plugin_format.MAX_FILE_BYTES + 1}))
@@ -642,9 +687,194 @@ class TestTheStore:
         assert plugin_store.loadable(None) == []
 
     def test_an_interrupted_install_is_swept(self, home):
+        """Interrupted: the process that staged it is gone, which is the
+        lock it held being released without the folder going."""
         staging = plugin_store.stage(plugin_files())
+        os.close(plugin_store._owned.pop(staging))
         plugin_store.sweep_leftovers()
         assert not os.path.exists(staging)
+        assert not os.path.exists(staging + plugin_store.LOCK)
+
+    def test_a_staging_folder_in_use_is_not_swept(self, home):
+        """Batch 255. Every /plugin install sweeps first -- one that finds
+        nothing too -- and used to delete a folder another install was
+        holding at its trust modal."""
+        staging = plugin_store.stage(plugin_files())
+        plugin_store.sweep_leftovers()
+        assert os.path.isdir(staging)
+        assert run("install --from " + os.path.join(str(home), "nowhere")).errors
+        assert os.path.isdir(staging)
+        plugin_store.discard(staging)
+        assert not os.path.exists(staging + plugin_store.LOCK)
+
+    def test_another_processs_staging_survives_until_it_ends(self, home):
+        """The lock is the operating system's, so it is another PROCESS
+        that is spared -- a second session -- and a dead one is not."""
+        child = _store_child(home, "stage")
+        try:
+            staging = child.stdout.readline().strip()
+            assert staging and os.path.isdir(staging), child.stderr.read()
+            plugin_store.sweep_leftovers()
+            assert os.path.isdir(staging)
+        finally:
+            child.kill()
+            child.wait(timeout=30)
+        # Windows releases a dead process's locks "depending on available
+        # system resources" (LockFileEx's documentation), not at its exit:
+        # a sweep in that moment skips the folder and a later one takes it.
+        deadline = time.monotonic() + 10
+        while os.path.exists(staging) and time.monotonic() < deadline:
+            plugin_store.sweep_leftovers()
+            time.sleep(0.05)
+        assert not os.path.exists(staging)
+        assert not os.path.exists(staging + plugin_store.LOCK)
+
+    def test_a_change_waits_for_another_process_holding_the_store(
+            self, home, tmp_path, monkeypatch):
+        """registry.json and projects.json are read, changed and written
+        whole, so two processes at once would lose one change: each waits
+        for the other, and says so rather than waiting for ever. A READ
+        waits and then reads anyway -- a session must start -- and a sweep
+        and a commit wait like any change."""
+        _install()
+        monkeypatch.setattr(plugin_store, "LOCK_WAIT_S", 0.3)
+        staging = plugin_store.stage(plugin_files())
+        child = _store_child(home, "lock")
+        try:
+            assert child.stdout.readline().strip() == "held", child.stderr.read()
+            with pytest.raises(plugin_store.StoreBusy):
+                plugin_store.set_disabled(str(tmp_path), "demo", True)
+            with pytest.raises(plugin_store.StoreBusy):
+                plugin_store.sweep_leftovers()
+            with pytest.raises(plugin_store.StoreBusy):
+                plugin_store.commit(staging, name="demo", plugin_id="demo",
+                                    version="2.0.0", source={"kind": "folder"},
+                                    files=plugin_files())
+            with pytest.raises(plugin_store.StoreBusy):
+                plugin_store.remove("demo")
+            assert list(plugin_store.installed()) == ["demo"]
+            assert plugin_store.disabled_in(str(tmp_path)) == set()
+        finally:
+            child.stdin.close()
+            child.wait(timeout=30)
+        plugin_store.discard(staging)
+        plugin_store.set_disabled(str(tmp_path), "demo", True)
+        assert plugin_store.disabled_in(str(tmp_path)) == {"demo"}
+
+    def test_a_replacement_whose_registry_cannot_be_written_keeps_the_old(
+            self, home, monkeypatch):
+        """Batch 255. The new files were moved in, the registry write failed,
+        and the old folder was deleted anyway: the registry still named the
+        old hashes, so neither version loaded."""
+        _install(files=plugin_files(skills=("old",)))
+        real = plugin_store._write_registry
+
+        def refused(records):
+            raise PermissionError(13, "registry.json is held open")
+
+        monkeypatch.setattr(plugin_store, "_write_registry", refused)
+        new = plugin_files(skills=("new",))
+        staging = plugin_store.stage(new)
+        with pytest.raises(PermissionError):
+            plugin_store.commit(staging, name="demo", plugin_id="demo",
+                                version="2.0.0", source={"kind": "folder"},
+                                files=new)
+        monkeypatch.setattr(plugin_store, "_write_registry", real)
+        record = plugin_store.installed()["demo"]
+        assert record.version == "1.0.0" and plugin_store.changes(record) == []
+        assert [r.name for r in plugin_store.loadable(None)] == ["demo"]
+        store = Path(plugin_store.store_dir())
+        left = [p.name for p in [*store.iterdir(), *(store / "demo").iterdir()]
+                if p.name.startswith((".staging-", ".old-"))]
+        assert left == []
+
+    def test_a_first_install_whose_registry_cannot_be_written_leaves_nothing(
+            self, home, monkeypatch):
+        def refused(records):
+            raise PermissionError(13, "registry.json is held open")
+
+        monkeypatch.setattr(plugin_store, "_write_registry", refused)
+        staging = plugin_store.stage(plugin_files())
+        with pytest.raises(PermissionError):
+            plugin_store.commit(staging, name="demo", plugin_id="demo",
+                                version="1.0.0", source={"kind": "folder"},
+                                files=plugin_files())
+        assert sorted(p.name for p in Path(plugin_store.store_dir()).iterdir()) \
+            == [plugin_store.LOCK]
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows refuses to replace a "
+                                                "file another handle reads")
+    def test_install_over_a_registry_held_open_says_so_and_keeps_the_old(
+            self, project, tmp_path):
+        """The reviewers' reproduction, through the command: on Windows any
+        program merely reading registry.json stops its replacement."""
+        first = write_plugin(tmp_path / "one", "demo", plugin_files())
+        assert "Installed demo" in run(f"install --from {first}", answer=True).text
+        second = write_plugin(tmp_path / "two", "demo",
+                              plugin_files(version="2.0.0", skills=("new",)))
+        with open(Path(plugin_store.store_dir(), "registry.json"), "rb"):
+            rec = run(f"install --from {second}", answer=True)
+        assert "Not installed" in rec.text and "unchanged" in rec.text
+        record = plugin_store.installed()["demo"]
+        assert record.version == "1.0.0" and plugin_store.changes(record) == []
+
+    @pytest.mark.parametrize("payload", [
+        {"version": 1, "plugins": ["demo"]},
+        {"version": 1, "plugins": "demo"},
+        {"version": 1, "plugins": {"demo": ["not", "a", "row"]}},
+        {"version": 1, "plugins": {"demo": {"id": "demo", "version": "1",
+                                             "source": [["kind", "folder"]],
+                                             "files": {}}}},
+        {"version": 1, "plugins": {"../elsewhere": {
+            "id": "x", "version": "1", "source": {}, "files": {}}}},
+    ])
+    def test_a_malformed_registry_reads_as_nothing_installed(self, home,
+                                                             payload):
+        os.makedirs(plugin_store.store_dir())
+        Path(plugin_store.store_dir(), "registry.json").write_text(
+            json.dumps(payload))
+        assert plugin_store.installed() == {}
+        assert plugin_store.loadable(None) == []
+
+    @pytest.mark.parametrize("payload", [
+        {"version": 1, "disabled": ["demo"]},
+        {"version": 1, "disabled": "demo"},
+        {"version": 1, "grants": ["demo"]},
+        {"version": 1, "grants": "demo"},
+    ])
+    def test_malformed_project_choices_read_as_none(self, home, tmp_path,
+                                                    payload):
+        os.makedirs(plugin_store.store_dir())
+        Path(plugin_store.store_dir(), "projects.json").write_text(
+            json.dumps(payload))
+        assert plugin_store.disabled_in(str(tmp_path)) == set()
+        assert plugin_store.grant(str(tmp_path), "demo") is None
+        plugin_store.set_disabled(str(tmp_path), "demo", True)
+        assert plugin_store.disabled_in(str(tmp_path)) == {"demo"}
+
+
+_STORE_CHILD = """
+import sys
+from core import plugin_store
+if sys.argv[1] == "stage":
+    print(plugin_store.stage({"plugin.yaml": b"x"}), flush=True)
+else:
+    with plugin_store._locked():
+        print("held", flush=True)
+        sys.stdin.read()
+        raise SystemExit(0)
+sys.stdin.read()
+"""
+
+
+def _store_child(home: Path, what: str) -> subprocess.Popen:
+    """Another harness process on the same store: it stages, or holds the
+    store's lock, and waits for its stdin to close."""
+    env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
+    return subprocess.Popen(  # nosec B603 - this interpreter, a fixed script
+        [sys.executable, "-c", _STORE_CHILD, what],
+        cwd=config_loader.HARNESS_ROOT, env=env, stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 # ===========================================================================
@@ -652,6 +882,22 @@ class TestTheStore:
 # ===========================================================================
 
 class TestTheLoader:
+
+    @pytest.mark.parametrize("frontmatter", [
+        "description: " + "[" * 3000 + "]" * 3000,
+        "description: x\nwhen: 2001-02-30",
+    ])
+    def test_frontmatter_the_parser_cannot_build_is_a_problem(self, tmp_path,
+                                                              frontmatter):
+        """Batch 255. Nesting deeper than the stack raised RecursionError
+        out of the modal's preview, past its every handler."""
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        (skills / "deep.md").write_text(
+            f"---\nname: deep\n{frontmatter}\n---\nBody.\n")
+        found, _, problems = config_loader.preview_plugin(str(tmp_path),
+                                                          "demo", "demo")
+        assert found == {} and problems and "skills/deep.md" in problems[0]
 
     def test_skills_and_agents_load_under_the_plugin_name(self, project):
         _install(plugin_id="math/demo")
@@ -1098,7 +1344,11 @@ class TestTheOtherSubcommands:
 
     def test_disable_and_enable_are_per_project(self, project, tmp_path):
         self._installed(tmp_path)
-        assert "is off in" in run("disable demo").text
+        said = run("disable demo").text
+        assert "is off in" in said
+        # PL9, as uninstall says it: what this session already has active
+        # stays until you switch away.
+        assert "already active in this session stays" in said
         assert "demo:method" not in config_loader.get_skills()
         assert "[off in this project]" in run("").text
         run("enable demo")

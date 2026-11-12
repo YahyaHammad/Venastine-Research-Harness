@@ -337,6 +337,7 @@ def check_plugin(folder: str, out=print) -> tuple:
     throwaway -- and checked where the harness would run it."""
     import config
     from core import (
+        config_loader,
         plugin_format,
         plugin_mcp,
         plugin_source,
@@ -354,12 +355,19 @@ def check_plugin(folder: str, out=print) -> tuple:
         return [f"format: {p}" for p in exc.problems], notes
     except FetchError as exc:
         return [str(exc)], notes
-    if not manifest.has_code:
-        notes.append("no tools or MCP servers, so nothing of it runs")
-        return problems, notes
     staging = plugin_store.stage(candidate.files)
     deps_dir, deps = None, None
     try:
+        # The install's own reading of its skills and agents, which refuses
+        # one the loader would skip: without it this check passed a plugin
+        # every /plugin install then refused.
+        _, _, unread = config_loader.preview_plugin(
+            staging, manifest.name, candidate.id)
+        if unread:
+            return [f"format: {p}" for p in unread], notes
+        if not manifest.has_code:
+            notes.append("no tools or MCP servers, so nothing of it runs")
+            return problems, notes
         if manifest.requirements:
             try:
                 deps_dir, deps = plugin_tools.build_deps(

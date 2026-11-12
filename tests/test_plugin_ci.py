@@ -28,7 +28,7 @@ import yaml
 import config
 from core import plugin_mcp, plugin_tools
 from tests.test_plugin_mcp import SERVER
-from tests.test_plugins import TEMPLATE, plugin_files, write_plugin
+from tests.test_plugins import TEMPLATE, plugin_files, run, write_plugin
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -831,6 +831,23 @@ class TestTheHarnessChecks:
         assert ci.check_plugin(str(folder), out=lambda s: None) == (
             [], ["no tools or MCP servers, so nothing of it runs"])
 
+    @pytest.mark.parametrize("skill", [
+        b"No frontmatter here.\n",
+        b"---\n- a list, not a mapping\n---\nBody.\n",
+    ])
+    def test_a_skill_every_install_refuses_fails_the_check(self, ci_home,
+                                                          tmp_path, skill):
+        """Batch 255. A plugin of skills and agents returned before the
+        loader's own reading of them, which the install runs: CI passed
+        what /plugin install then refused."""
+        files = plugin_files("words", skills=(), more={"skills/bare.md": skill})
+        folder = write_plugin(tmp_path, "words", files)
+        problems, _ = ci.check_plugin(str(folder), out=lambda s: None)
+        assert problems and all(p.startswith("format: skills/bare.md")
+                                for p in problems)
+        assert "is not a valid plugin" in run(f"install --from {folder}",
+                                               answer=True).text
+
     def test_an_invalid_one_says_why(self, ci_home, tmp_path):
         files = plugin_files("words")
         files["plugin.yaml"] = b"format: 1\n"
@@ -977,6 +994,17 @@ class TestReadProjectDocLeavesPluginsAlone:
         from tools.builtin import project_docs
 
         assert project_docs.is_readable_doc(str(tree), rel) is readable
+
+    def test_a_plugin_opened_as_the_project_is_readable(self, tree):
+        """The owner's call, batch 255: the rule guards a copy of a plugin
+        INSIDE a project. A plugin folder opened as the project itself --
+        one you are writing -- was trusted as that project, and its own
+        documents are read like any project's."""
+        from tools.builtin import project_docs
+
+        root = os.path.realpath(str(tree / "plugins" / "math.plugin"))
+        assert project_docs.is_readable_doc(root, "README.md")
+        assert project_docs.is_readable_doc(root, "skills/s.md")
 
 
 class TestTheGatesLeaveTheMarketplaceAlone:

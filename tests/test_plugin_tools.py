@@ -772,6 +772,68 @@ class TestRegistration:
         monkeypatch.setattr(config, "PLUGIN_TOOL_ISOLATION", "process")
         assert plugin_tools.available()
 
+    def test_docker_running_windows_containers_runs_no_plugin_tool(
+            self, tools_env, tmp_path, monkeypatch):
+        """Batch 255. Docker Desktop on Windows answers every probe while it
+        runs Windows containers, and the sandbox image is a Linux one: the
+        tools were offered and every call failed in `docker run`."""
+        install(tmp_path, tool_files(workspace="none"))
+        monkeypatch.setattr(config, "PLUGIN_TOOL_ISOLATION", "container")
+        monkeypatch.setattr(sandbox, "_runtime_probe",
+                            sandbox.RuntimeProbe("docker", linux=False))
+        assert sandbox.is_docker_available()
+        assert not plugin_tools.available()
+        error = call({"action": "plain"})["error"]
+        assert "Windows containers" in error
+        manifest = plugin_format.validate("words", tool_files(
+            more={"requirements.txt": SIX_LOCK.encode()}))
+        with pytest.raises(plugin_tools.BuildError, match="Windows containers"):
+            plugin_tools.build_deps("words", manifest, str(tmp_path),
+                                    lambda line: None)
+        monkeypatch.setattr(sandbox, "_runtime_probe",
+                            sandbox.RuntimeProbe("docker"))
+        assert plugin_tools.available()
+
+    def test_a_plugin_turned_off_by_another_session_does_not_run(
+            self, tools_env, project, tmp_path):
+        """Batch 255. Another session's /plugin disable changes only the
+        store; this session's registered tool used to run anyway."""
+        install(tmp_path, tool_files(workspace="none"))
+        assert call({"action": "plain"}) == {"result": 42}
+        assert plugin_tools._runners.get("words") is not None
+        plugin_store.set_disabled(str(project), "words", True)
+        result = call({"action": "plain"})
+        assert "turned off in this project" in result["error"]
+        assert plugin_tools._runners.get("words") is None
+        plugin_store.set_disabled(str(project), "words", False)
+        assert call({"action": "plain"}) == {"result": 42}
+
+    @pytest.mark.parametrize("source, said", [
+        ({"kind": "marketplace", "repo": "o/r", "commit": "c"},
+         "/plugin install words"),
+        ({"kind": "folder", "path": "C:/src/words.plugin"},
+         "/plugin install --from C:/src/words.plugin"),
+        ({"kind": "git", "url": "https://example.test/r.git", "commit": "c",
+          "path": "words.plugin"},
+         "/plugin install --from https://example.test/r.git --path words.plugin"),
+        ({"kind": "git", "url": "https://example.test/r.git", "commit": "c",
+          "path": ""},
+         "/plugin install --from https://example.test/r.git"),
+    ])
+    def test_a_stale_build_names_the_install_that_rebuilds_it(
+            self, monkeypatch, source, said):
+        """Batch 255. Anything not from a folder was told to install the
+        marketplace's plugin of its name -- for one from Git, another
+        plugin from another source."""
+        record = plugin_store.Record(name="words", id="words",
+                                     version="1.0.0", source=source)
+        assert plugin_tools.reinstall_command(record) == said
+        monkeypatch.setattr(plugin_tools, "deps_problem",
+                            lambda record, manifest: "it is stale")
+        with pytest.raises(plugin_tools.RunnerError) as caught:
+            plugin_tools._runner(record, None, dict(plugin_tools.NO_GRANT))
+        assert said + " builds them again" in str(caught.value)
+
 
 # ---------------------------------------------------------------------------
 # ---- the runner (PL24) -----------------------------------------------------

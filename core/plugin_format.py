@@ -158,8 +158,13 @@ class PluginFormatError(ValueError):
 # ---- names and ids -------------------------------------------------------
 
 def valid_name(name) -> bool:
+    """A plugin's name, or one folder of its id. Never a name Windows
+    reserves for a device: a plugin's name is its folder in the store, and
+    a folder of an id is one in plugins/, which no Windows checkout of
+    this repository could then hold."""
     return (isinstance(name, str) and len(name) <= MAX_NAME_CHARS
-            and NAME_PATTERN.fullmatch(name) is not None)
+            and NAME_PATTERN.fullmatch(name) is not None
+            and name not in _WINDOWS_RESERVED)
 
 
 def parse_id(text: str) -> tuple:
@@ -1115,7 +1120,14 @@ def parse_manifest(text: str, name: Optional[str]) -> Manifest:
             [f"{MANIFEST} is over {MAX_MANIFEST_BYTES // 1024} KB"])
     try:
         data = load_yaml(text)
-    except yaml.YAMLError as exc:
+    except RecursionError:
+        # PyYAML's composer recurses once per level: 64 KB of `[` is far
+        # deeper than Python's stack, and mcp.json's reader says the same.
+        raise PluginFormatError(
+            [f"{MANIFEST} nests too deeply to read"]) from None
+    except (yaml.YAMLError, ValueError) as exc:
+        # ValueError: SafeLoader builds a date from `2001-02-30` and lets
+        # datetime's refusal through, which is no YAMLError.
         first = str(exc).strip().splitlines()
         raise PluginFormatError(
             [f"{MANIFEST} is not valid YAML: "
@@ -1257,6 +1269,12 @@ def check_files(sizes: dict) -> list:
         problems.append(f"{total:,} bytes; a plugin holds at most "
                         f"{MAX_TOTAL_BYTES:,}")
     seen = {}
+    # Every folder on the way to a file, by its case-folded path. Windows
+    # and macOS fold case, so `skills/Folder/` and `skills/folder/` are ONE
+    # folder there, and `skills/a.md` cannot be a file beside a folder
+    # `skills/A.md/`: the first stage fails, or the installed tree is not
+    # the listed one and its integrity check fails at once.
+    folders = {}
     for path in sorted(sizes):
         parts = path.split("/")
         if (len(path) > MAX_PATH_CHARS
@@ -1273,6 +1291,18 @@ def check_files(sizes: dict) -> list:
         if folded in seen:
             problems.append(f"{path!r} and {seen[folded]!r} differ only in "
                             f"case, which one folder on Windows cannot hold")
+            continue
+        clash = None
+        for depth in range(1, len(parts)):
+            prefix = "/".join(parts[:depth])
+            spelled = folders.setdefault(prefix.casefold(), prefix)
+            if spelled != prefix:
+                clash = (f"{path!r}: the folder {prefix!r} and {spelled!r} "
+                         f"differ only in case, which Windows and macOS "
+                         f"take for one folder")
+                break
+        if clash:
+            problems.append(clash)
             continue
         seen[folded] = path
         if sizes[path] > MAX_FILE_BYTES:
@@ -1301,6 +1331,11 @@ def check_files(sizes: dict) -> list:
             # tools/'s rule, for its reason. Folders are allowed here: a
             # server is a module and may be a package.
             problems.append(f"{path!r}: {SERVERS}/ holds .py files")
+    for folded, path in sorted(seen.items()):
+        if folded in folders:
+            problems.append(f"{path!r} is a file, and {folders[folded]!r} a "
+                            f"folder of the same name (case aside), which no "
+                            f"folder can hold both of")
     for required in (MANIFEST, README):
         if required not in sizes:
             problems.append(f"no {required}")

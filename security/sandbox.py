@@ -142,6 +142,10 @@ _LIMIT_CONTROLLERS = frozenset({"cpu", "memory", "pids"})
 # that SS24's check cannot be skipped by the name alone.
 _PODMAN_INFO_MARKER = "buildahVersion"
 
+# The line Docker's `info` prints under Server for a daemon that runs
+# Windows containers; Linux is the other value it prints there.
+_WINDOWS_DAEMON = re.compile(r"^\s*OSType:\s*windows\s*$", re.MULTILINE | re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class RuntimeProbe:
@@ -151,11 +155,16 @@ class RuntimeProbe:
     is None, for the unavailable message. `refused` marks the case worth a
     WARNING: a runtime WAS there and was turned away because it cannot
     enforce the limits, which a user can fix and would not otherwise learn.
+    `linux` is False only for a Docker whose `info` says it runs Windows
+    containers (ROADMAP_v3 §94): Docker Desktop on Windows can be switched
+    to them and still answers. The shell's sandbox does not read it yet;
+    plugin tools, whose image is a Linux one, do.
     """
 
     name: Optional[str]
     reason: str = ""
     refused: bool = False
+    linux: bool = True
 
 
 _runtime_probe: Optional[RuntimeProbe] = None
@@ -227,6 +236,9 @@ def _probe_container_runtime() -> RuntimeProbe:
             if why:
                 return RuntimeProbe(None, f"`docker` is Podman here, and "
                                           f"{why}", refused=True)
+        if (isinstance(docker.stdout, str)
+                and _WINDOWS_DAEMON.search(docker.stdout)):
+            return RuntimeProbe(DOCKER, linux=False)
         return RuntimeProbe(DOCKER)
 
     docker_why = ("Docker is not installed or did not answer"
@@ -328,6 +340,13 @@ def is_docker_available() -> bool:
     module docstring. The probe behind it runs once per process.
     """
     return container_runtime() is not None
+
+
+def runs_linux_containers() -> bool:
+    """Whether the runtime runs Linux containers: Podman always does, and
+    Docker unless its `info` says Windows. From the same one probe."""
+    probe = _probe()
+    return probe.name is not None and probe.linux
 
 
 # ---------------------------------------------------------------------------

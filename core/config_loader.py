@@ -401,7 +401,11 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         # OSError, so it warns and skips below like any broken definition.
         text = read_regular_text(path)
         fm, body = _parse_frontmatter(text)
-    except (OSError, ValueError, yaml.YAMLError) as e:
+    except (OSError, ValueError, yaml.YAMLError, RecursionError) as e:
+        # RecursionError (batch 255): frontmatter nested deeper than the
+        # stack, which PyYAML's composer recurses through -- a plugin's
+        # skill is read before its trust modal, and this skips it like any
+        # broken definition instead of ending the install or a discovery.
         logger.warning("Skipping %s file %s: %s", kind, path, e)
         return None
     if not isinstance(fm, dict):

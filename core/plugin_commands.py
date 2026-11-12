@@ -732,7 +732,10 @@ def _approval(rest: str, shell: Shell) -> None:
 
 
 def _install(rest: str, shell: Shell) -> None:
-    plugin_store.sweep_leftovers()
+    try:
+        plugin_store.sweep_leftovers()
+    except OSError:
+        pass  # what an interrupted install left waits for the next sweep
     candidate = _fetch(rest, shell, "install")
     if candidate is None:
         return
@@ -778,6 +781,15 @@ def _install(rest: str, shell: Shell) -> None:
                 prepared.staging, name=manifest.name, plugin_id=candidate.id,
                 version=manifest.version, source=candidate.source,
                 files=candidate.files, deps_dir=deps_dir, deps=deps)
+        except OSError as exc:
+            # The commit put back what was there (plugin_store.commit), so
+            # this is a refusal, not a half-done install.
+            plugin_store.discard(deps_dir)
+            shell.error(f"Not installed: the plugin store could not be "
+                        f"changed ({_one_line(exc)}). "
+                        + ("What was installed is unchanged." if existing
+                           else "Nothing was installed."))
+            return
         except BaseException:
             plugin_store.discard(deps_dir)
             raise
@@ -843,9 +855,13 @@ def _toggle(rest: str, shell: Shell, off: bool) -> None:
     plugin_store.set_disabled(project, record.name, off)
     _refresh()
     if off:
+        # PL9's rule, as uninstall states it: what is already active in this
+        # session stays until you switch away; its tools stop at once, and
+        # every session refuses them here from the store.
         shell.out(f"{record.id} is off in {project}: its skills, agents and "
-                  f"tools do not load here. /plugin enable {record.id} turns "
-                  f"it back on.")
+                  f"tools do not load here. A skill or agent of it already "
+                  f"active in this session stays until you switch away. "
+                  f"/plugin enable {record.id} turns it back on.")
     else:
         shell.out(f"{record.id} is on in {project} again.")
 

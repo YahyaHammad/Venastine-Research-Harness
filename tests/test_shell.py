@@ -210,6 +210,25 @@ class TestTheContainerRuntime:
         assert not [c for c in calls if c[0] == "podman"], (
             "Podman is asked only when Docker cannot run a container")
 
+    @pytest.mark.parametrize("server, linux", [
+        (" Containers: 0\n OSType: windows\n Architecture: x86_64\n", False),
+        (" Containers: 0\n OSType: linux\n Architecture: x86_64\n", True),
+        (" Containers: 0\n", True),
+    ])
+    def test_docker_running_windows_containers_is_known(self, server, linux):
+        """ROADMAP_v3 §94, batch 255: Docker Desktop on Windows answers
+        `info` while it runs only Windows containers. The shell keeps
+        using it, as it always has; a plugin, whose image is a Linux
+        one, reads `runs_linux_containers()`, from the same one probe."""
+        from security import sandbox
+        name, _ = self._probe_with({
+            ("docker", "plain"): (0, "Client:\n Version: 28.0\nServer:\n"
+                                     + server)})
+        assert name == "docker"
+        with patch("security.sandbox.subprocess.run",
+                   side_effect=AssertionError("must not probe again")):
+            assert sandbox.runs_linux_containers() is linux
+
     def test_podman_runs_the_sandbox_when_docker_is_not_installed(self):
         name, _ = self._probe_with({
             ("podman", "plain"): self._PODMAN_PLAIN,

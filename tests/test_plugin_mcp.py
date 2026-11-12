@@ -604,6 +604,35 @@ def _client(server_script, name="s") -> MCPClient:
 
 class TestTheSharedLoop:
 
+    def test_a_held_loop_is_never_stopped_under_its_holder(self):
+        """Batch 255. `_hold` starts the loop if need be and registers its
+        holder in one step under the loop's lock."""
+        holder = object()
+        loop = client_module._hold(holder)
+        try:
+            client_module._shutdown_loop()
+            assert loop.is_running() and client_module._loop is loop
+        finally:
+            client_module._release(holder)
+            client_module._shutdown_loop()
+        assert client_module._loop is None
+
+    def test_connect_takes_the_loop_only_by_holding_it(self, server_script,
+                                                       monkeypatch):
+        """connect_all took the loop, then held it: the last client letting
+        go between the two stopped it, and the new one waited out its
+        timeout on a loop that no longer ran."""
+        real = client_module._ensure_loop
+
+        def apart():
+            raise AssertionError("the loop was taken apart from holding it")
+
+        monkeypatch.setattr(client_module, "_ensure_loop", apart)
+        client = _client(server_script)
+        monkeypatch.setattr(client_module, "_ensure_loop", real)
+        client.disconnect_all(timeout=5)
+        assert client_module._loop is None
+
     def test_one_client_leaving_keeps_the_loop_for_another(self, server_script):
         """PL30. Your servers and each plugin server's client share the one
         loop, and a plugin server stops when its plugin is turned off: the
@@ -906,7 +935,22 @@ class TestACall:
         monkeypatch.setattr(plugin_tools, "deps_problem",
                             lambda record, manifest: "it was built elsewhere")
         error = call("echo")["error"]
-        assert "it was built elsewhere" in error and "install" in error
+        assert "it was built elsewhere" in error
+        # From a folder, so the folder: the shared command, never the id.
+        record = plugin_store.installed()["notes"]
+        assert plugin_tools.reinstall_command(record) + " builds them again" \
+            in error and "--from" in error
+
+    def test_a_server_tool_turned_off_by_another_session_does_not_run(
+            self, mcp_env, tmp_path, project):
+        """Batch 255, the tools' rule for a server's: the store decides,
+        and the running server stops."""
+        install(tmp_path, mcp_files())
+        echo()
+        assert plugin_mcp.running("notes")
+        plugin_store.set_disabled(str(project), "notes", True)
+        assert "turned off in this project" in call("echo")["error"]
+        assert plugin_mcp.running("notes") == []
 
     def test_uninstall_stops_the_server(self, mcp_env, tmp_path, project):
         install(tmp_path, mcp_files())

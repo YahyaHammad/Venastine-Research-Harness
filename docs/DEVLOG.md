@@ -31811,3 +31811,74 @@ Windows images. The hosted Windows job accepts these Linux container skips; the 
 job still requires the tests to run. All three passed on Docker Desktop in Linux mode.
 With the daemon probe returning Windows mode, all three skipped with the expected reason.
 The full offline suite passed again: 10058 passed, 98 skipped.
+
+## Batch 255 -- Plugins: the two reviews' findings, reproduced and fixed (2026-11-12)
+
+Two review agents read draft PR #287 at `4083b6f`, which carries slices 1-5 and the
+integration commit. They reported eleven findings between them. Each was reproduced at that
+commit with a probe that asserted the right behaviour, and none was false. Neither review
+covered security; the next round is scoped for it. ROADMAP_v3 §94's "Review fixes
+(batch 255)" table lists each finding, how it was reproduced and the fix.
+
+**The owner's answers (AskUserQuestion, 2026-11-12):**
+- **An active plugin agent after `/plugin disable`:** PL9's rule, said. It stays until you
+  switch away, as after an uninstall, and the command now says so. Its tools stop at once.
+- **Telling live staging from leftovers:** OS locks (PL42), over a sweep by age.
+- **`read_project_doc` on a `.plugin` folder opened as the project itself:** left readable,
+  and recorded as intended in PL37. The rule guards a copy inside a project.
+
+**What changed:**
+- **The store (PL42):**
+  - Every read-modify-write of `registry.json` and `projects.json` holds `.lock`, the
+    operating system's lock and CG4's pattern. So does every commit, uninstall and sweep.
+  - A change that waits 30 s raises `StoreBusy`. A read waits and then reads anyway.
+  - Each staging folder's process holds `.staging-<hex>.lock` from before the folder exists,
+    so a sweep removes only folders no live process holds.
+  - The registry write is inside the commit's rollback, and `/plugin install` reports a failed
+    commit instead of raising it.
+  - A nested value that is not a mapping, or a registry key that is a path, reads as nothing.
+- **Disable reaches every session:** `run_tool` and `plugin_mcp.call` check the store's choice
+  for the project at every call, and stop the plugin's runner or servers when it is off.
+- **The reinstall hint:** `plugin_tools.reinstall_command` names the folder, or the Git URL
+  and `--path`, so a plugin from Git is no longer told to install the marketplace's plugin of
+  its name.
+- **Docker in Windows-container mode:** `RuntimeProbe.linux` is read from the `docker info` the
+  probe already runs. Plugin tools, dependency builds and servers refuse that mode by name, and
+  the integration fixture skips by the same reading. The shell is unchanged, and the gap
+  register says so.
+- **The format:**
+  - Every case-folded folder on a path is compared, so `skills/Folder/` beside
+    `skills/folder/`, or a file beside a folder of its name, is refused.
+  - No plugin name or id folder is a Windows device name.
+  - YAML that PyYAML cannot build (an impossible date is a ValueError, and nesting past the
+    stack a RecursionError) is a format problem. The same applies to a skill's frontmatter,
+    which the probes found raising RecursionError out of the install.
+- **The shared MCP loop:** `mcp_client.client._hold` starts the loop and registers its holder
+  in one step under the loop's lock, and `connect_all` gets its loop only from it.
+- **CI's checks:** `plugin_ci.check_plugin` runs the install's own `config_loader.preview_plugin`
+  before its early return for a plugin with no code. CI used to pass a skill without
+  frontmatter that every install refused.
+
+**Found while building:**
+- The test `test_an_interrupted_install_is_swept` was asserting the defect itself: it swept a
+  folder its own process still held. It now releases the lock first, as a dead process does.
+- A read under the store's lock had to be allowed to go ahead without it. Otherwise a process
+  holding the lock past the wait would have stopped another session's discovery at startup.
+- Windows releases a dead process's locks "depending on available system resources", not at
+  exit (LockFileEx's documentation). The cross-process test therefore sweeps until the
+  folder goes, and the gap register says so.
+
+**Verification:**
+- **Full suite:** 10104 passed and 98 skipped on Windows, with none failed, in the
+  pinned venv with `AGENT_WORKSPACE` unset. That is 10202 tests, 46 more than 10156.
+- **Breakages:** 41 of 41 deliberate breakages, each one reverting a fix, turned a named test
+  red (`scratchpad/mutate255.py`).
+- **Gates:** ruff is clean. bandit's exit is 0 with the rewritten baseline, and its count check
+  is green. gitleaks found nothing in an export of the working tree.
+- **Not run:**
+  - WSL;
+  - Docker integration;
+  - any GitHub workflow;
+  - a live marketplace;
+  - a real Windows-containers daemon. The probe's reading of `OSType: windows` was tested
+    against Docker's text output, not a switched Docker Desktop.
