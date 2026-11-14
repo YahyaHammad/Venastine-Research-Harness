@@ -2163,7 +2163,7 @@ class TestTheWindowAndTheTrigger:
             system, _ = _capture(app)
             _cmd_window(app, "")
             await pilot.pause()
-            assert any("MODEL_CONTEXT_WINDOWS" in line for line in system)
+            assert any("model_context_windows" in line for line in system)
 
             model_windows.remember_window("ANTHROPIC", "claude-sonnet-5", 400_000)
             system2, _ = _capture(app)

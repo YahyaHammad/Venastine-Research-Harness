@@ -44,7 +44,7 @@ _DEFAULT_DATEFMT = "%Y-%m-%d %H:%M:%S"
 _DEFAULT_LOG_FILE = "logs/app.log"
 _DEFAULT_LEVEL = "INFO"
 
-# Rotation defaults live here, not in config.py: this file owns the
+# Rotation defaults live here, not in config.yaml: this file owns the
 # logging concern end-to-end (mirrors how ROADMAP.md §2 keeps the whole
 # logging subsystem in one file). Bump via the function signature if
 # needed; there is no project-wide reason to surface them as config yet.

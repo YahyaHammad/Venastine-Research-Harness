@@ -386,7 +386,7 @@ def test_a_failed_query_is_warned_and_NOT_cached(caplog):
 
     assert window is None
     assert not authoritative
-    assert "MODEL_CONTEXT_WINDOWS" in caplog.text
+    assert "model_context_windows" in caplog.text
     assert ("GROQ", "m") not in client_module._context_window_cache
 
 

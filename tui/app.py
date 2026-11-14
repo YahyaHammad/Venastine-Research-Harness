@@ -944,7 +944,7 @@ class VenastineApp(App):
         self._animations = tui_settings.get("animations", True)
         # §38 (O6). Render a turn's reasoning inline, or collapse it to the
         # animated one-line indicator. Defaulted HERE rather than in
-        # config.py, following `animations` immediately above: config.py
+        # config.yaml, following `animations` immediately above: config.yaml
         # holds no TUI values and is plain-values-only. /thinking flips it
         # for the session and persists nothing, matching /effort.
         self._show_thinking = tui_settings.get("show_thinking", True)
@@ -1544,7 +1544,7 @@ class VenastineApp(App):
         from the trace.
 
         "(remembered)" marks a pair restored from the preference store
-        rather than resolved from settings.json or config.py (§43, RM3).
+        rather than resolved from settings.json or config.yaml (§43, RM3).
         #138's rule: a launch should not have to be guessed at, and a
         session silently coming up on a model no config file names is
         exactly the confusion this feature would otherwise trade for the
@@ -6128,7 +6128,7 @@ def _cmd_window(app: VenastineApp, args: str) -> None:
     # the best reason to have this command -- a gateway or a self-hosted
     # endpoint can report its own default rather than the deployment's
     # real window -- so refusing would block precisely the case it exists
-    # for. The risk is named in the same terms config.py uses for the qwen
+    # for. The risk is named in the same terms config.yaml uses for the qwen
     # entry: erring high means a hard context-limit error mid-run.
     reported = _reported_window(app)
     if reported and tokens > reported:
@@ -6297,9 +6297,10 @@ def _report_override(app: VenastineApp, key: str) -> None:
         elif _reported_window(app) is not None:
             source = f"reported by {app.provider_name}"
         elif compaction._normalized(app.model) in config.MODEL_CONTEXT_WINDOWS:
-            source = "config.MODEL_CONTEXT_WINDOWS"
+            source = "model_context_windows in config.yaml"
         else:
-            source = "config.DEFAULT_CONTEXT_WINDOW (no entry for this model)"
+            source = ("default_context_window in config.yaml "
+                      "(no entry for this model)")
         app._transcript.write_system(
             f"Context window: {effective:,} — {source}.")
         app._transcript.write_system(
@@ -6654,7 +6655,7 @@ def _clear_pipeline_role(app: VenastineApp, role: str, label: str) -> None:
     remaining = pipeline_models.resolve(role)
     if remaining:
         app._transcript.write_system(
-            f"config.py still sets {label}: {remaining['provider_name']} | "
+            f"config.yaml still sets {label}: {remaining['provider_name']} | "
             f"{remaining['model']}.")
 
 

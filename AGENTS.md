@@ -66,7 +66,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 9358 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 9461 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -827,7 +827,13 @@ contrast.** `role_styles`
   otherwise raises a short row to `min_width` and `Strip.adjust_cell_length` pads the tail with an
   UNSTYLED segment, so the background stops at the last character of the source line. The wrap is
   ours for the same reason -- Rich's soft wrap returns rows of 78, 75, 78 and 66 cells and the
-  tint stops wherever the text broke.
+  tint stops wherever the text broke. **The band follows the terminal's colour depth** (batch
+  257, X7 amended). Rich rounds every colour to what the terminal has. At 256 colours that
+  rounded dark-plain's added-line band into the page, so `styles_for` reads the depth off
+  Textual's own console (`themes.colour_depth`): the band is placed on the xterm cube at 256,
+  and the row takes the hue as its text colour at sixteen. The root `conftest.py` pins
+  `TEXTUAL_COLOR_SYSTEM=truecolor`, because Rich answers `256` on a Windows box and `standard`
+  on Linux with no `TERM`; a test about another depth sets `app.console._color_system` itself.
 
 **The sidebar SCROLLS, and two panels used to clip instead** (batch 59). Textual's `Vertical`
 is `overflow: hidden hidden`, so `#sidebar` silently dropped whatever did not fit: measured at
@@ -3438,6 +3444,8 @@ outside `with_catalogs`, so research passes and internal tasks do not inherit it
 That example is deliberately a *current* divergence, because a rule whose only evidence is stale gets read as boilerplate. The checkpoint divergence costs nothing today, because the guard is pinned against real SQLite in `test_storage_e2e.py` and the fake's `save_checkpoint` is only ever used to *arrange* a compacted view. `test_fake_storage_mirror.py` (#123) now compares the reconstruction halves directly, and `test_storage_e2e.py` drives the fake's re-derived queries -- thread order, child order, memory visibility, the failed-turn row -- beside the real ones on one set of rows (#231).
 
 **Never name a top-level file after a stdlib or installed package.** A root `logging.py` once silently shadowed stdlib `logging`; hence `logging_setup.py`.
+
+**A message names `config.yaml` and the setting's lower-case key, never `config.py` or `config.NAME`** (batch 257). `config.py` is the loader that publishes `config.yaml`'s values as upper-case attributes; it is not a file anyone edits, and `MAX_INJECTED_REFS` is a name the file a reader opens does not contain. So a log line, an exception, a help text, a transcript line or a tool result says `max_injected_refs in config.yaml`. Code, comments and docstrings keep `config.MAX_INJECTED_REFS`, which is what the code reads. `TestWhatAPersonReadsNamesConfigYaml` in `tests/test_config_edit.py` reads every production string literal that is not a docstring and fails on either spelling; in a literal with no space only the dotted form counts, because a bare name there is a `getattr` key.
 
 **Registering a tool is four steps**: import the module, `registry.register(ToolSpec(...))`, add a boolean to `config.ToolPermissions` and -- with one deliberate exception -- to `config.ToolApprovals`, and `assert_permissions_declared()` at the bottom of `tools/registry.py` enforces the third at import time (D24). The exception is `security/permissions.py`'s `APPROVAL_BY_SHELL_MODE` -- `shell` and the three session tools that START one -- whose approval lives solely in `shell_approval_mode`; a test pins that set as the sole exemption, and `_assert_shell_mode_exemption` requires each of them to carry THE GATE `_SHELL_MODE_GATES` NAMES FOR IT, by identity, so the hole cannot outlive the gate that justifies it (§49, SS16). Three of them carry `shell._shell_approval_check`; `shell_interactive` carries `shell._interactive_approval_check`, because its yes covers every line typed into the session afterwards and so cannot be a question about one command (batch 100, SS29/SS32). Skipping the declaration used to fail silently — `fetch_url` was registered, documented as working, and denied on every call for its entire life, with the schema still advertised so the model kept choosing it. It now raises `RuntimeError` on import instead. `mcp__*` names are exempt (they get `_default_for_unknown_tool`'s named default).
 

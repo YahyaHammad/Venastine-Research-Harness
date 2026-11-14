@@ -1575,7 +1575,7 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
         if levels is None:
             logger.warning(
                 "No effort levels known for %r on %s; assuming %s. Add an entry "
-                "to config.MODEL_EFFORT_LEVELS if this is wrong.",
+                "to model_effort_levels in config.yaml if this is wrong.",
                 model, provider_name, config.DEFAULT_EFFORT_LEVELS,
             )
             levels = list(config.DEFAULT_EFFORT_LEVELS)
@@ -1804,7 +1804,7 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
         giving_up = attempts >= MAX_CONTEXT_WINDOW_QUERY_ATTEMPTS
         logger.warning(
             "Could not read a context window for %r from %s (%s); "
-            "config.MODEL_CONTEXT_WINDOWS will answer instead.%s",
+            "model_context_windows in config.yaml will answer instead.%s",
             model, provider_name, e,
             " Not asking again this session." if giving_up else "")
         if giving_up:

@@ -31390,6 +31390,21 @@ re-add the ask instead of the request.
 - A `git grep` for the provider's and model's names, and for the model's own call markup, finds
   nothing in the tracked tree.
 
+**Afterwards: the owner's account, checked.** The owner shared their own account of the
+behaviour, and a later snapshot (358 turns, 37 lost calls) was measured against it. Four of its
+claims held:
+
+- **a stall every 2-10k tokens:** the median is about 4,400 output tokens between lost calls;
+- **an instruction does not help:** four more lost turns followed one in 34 minutes;
+- **any kind of work:** chat, four different research passes, and both kinds of subagent;
+- **no other model does it:** 0 of 66 on the install.
+
+Two points were corrected. The calls are in the model's own markup, not JSON. And they are not
+drafts: every one is closed and ends its generation, which also took away RO4's "not a
+commitment" reason. §95's measurements, RO4 and its gap register now say so. The owner's
+further point, that the model carries on as though its unrun calls took effect, is what the
+ask's "nothing ran" answers.
+
 **Not done here.** That provider's `echoes_reasoning` stays unset: it is the owner's file, and the
 owner asked that the key in it not be read. The ask itself is not measured against the live
 provider.
@@ -31405,3 +31420,79 @@ same guard. `main` would have failed the same way on its next run.
 
 - **Version:** the branch's beta identity, `0.3.13-b.1.reasoning-only-turns.ref49861abfcb`, so the
   merge releases the next patch.
+
+## Batch 257 -- the added-line band at 256 colours, and config.yaml as the only name people see (2026-11-14)
+
+**Asked.** The owner reported two bugs, to be checked against the code before anything was
+fixed, with anything else found on the way reported. First, on the ANSI dark theme, and maybe
+others, the `edit` tool's diff marked removed lines with a red band and added lines not at all.
+Second, harness text still referred to `config.py` instead of `config.yaml`, and `config.py`
+should be fully deprecated. The owner also said a harness instance was running in WSL. And
+§95's docs amendment (`6057959`), pushed after PR #289 had merged, rides in this PR rather
+than one of its own.
+
+**The band was not missing; Rich rounded it away.** On `ansi-dark` itself the rows were already
+green and red text. The screenshot instead matched `dark-plain`, the WSL install's saved theme,
+at 256 colours. The live harness there runs with `TERM=xterm-256color` and no `COLORTERM`
+(read from its process environment, terminal variables only), and Rich then picks 256. It
+rounds every colour on the way out: the page's `#0f1115` and the added band's `#1E2F27` both
+became `#000000`, while the removed band's `#35201F` became `#5f0000`. So the added rows had a
+band the colour of the page. The same rounding hit six of the fourteen themes (the four dark
+grid themes, ember and midnight). It gave both bands of every light theme the same grey, and
+at sixteen colours it removed both bands on most themes.
+
+**The fix, the owner's choice of two:** place the band on the xterm cube at 256 rather than
+leave it to Rich's rounding. The other option was coloured text at every depth below
+truecolour. `role_styles` takes the depth as Rich names it, and `styles_for` reads it off
+Textual's own console (`themes.colour_depth`).
+
+- **Truecolour** keeps X7's blend, unchanged.
+- **256 colours:** the band is the theme's success or error hue at one cube step out of black
+  on a dark page (`#005f00`, `#5f0000`), or two steps in from white on a light one (`#afd7af`,
+  `#d7afaf`). One step in (`#d7ffd7`, `#ffd7d7`) was measured first and stood off light-plain's
+  page at 1.06 and 1.13, under X7's 1.15. On the painted colours, all fourteen themes hold both
+  floors: text 5.5-13.2:1 on the band, band 1.28-2.64:1 against the page.
+- **Sixteen colours:** the hue as the row's text colour, the ANSI themes' rule.
+- **A collision:** a band that would land on the page's colour, or on the other band, falls back
+  to the text form. No shipped theme reaches it.
+
+X7's row in ROADMAP_v2 §41 carries the amendment.
+
+**The suite had a depth of its own.** A pilot app reported `256` on the owner's Windows box,
+and Rich answers `standard` on Linux with no `TERM`. So the root `conftest.py` sets
+`TEXTUAL_COLOR_SYSTEM=truecolor` before Textual is imported, and a test about another depth sets
+the console's depth itself.
+
+**`config.py` is the live loader, not a stale file.** It publishes `config.yaml`'s values as
+upper-case attributes to 39 production modules and 78 test files (617 uses). Removing or
+renaming it was offered; the owner chose to retire it as a name people see. So every
+production string literal that is not a docstring now names `config.yaml` and the lower-case
+key. A guard read 35 literals in 15 files at HEAD:
+
+- **Naming the file:** the CLI's "REDUCED SECURITY POSTURE -- set in config.py" banner,
+  `--no-review`'s help, the pipeline-models fallback warning, and the TUI's "config.py still
+  sets <role>" after clearing a remembered model.
+- **Naming a setting the way `config.py` spells it, a name `config.yaml` does not contain:**
+  every posture detail (`SHELL_APPROVAL_MODE is 'never'`), "Raise config.MAX_INJECTED_REFS",
+  `/window`'s "config.MODEL_CONTEXT_WINDOWS", and the shell's mode-check label, which reaches an
+  error message.
+
+README's thirteen upper-case setting names became keys too, and `critic_model`'s line now says
+where to set it. Comments that said a value is set or held in `config.py` say `config.yaml`;
+ones about the module that reads it stay. `config.py`'s docstring now opens "NOT A FILE TO
+EDIT". `TestWhatAPersonReadsNamesConfigYaml` holds the rule, and AGENTS.md's Conventions state
+it.
+
+**Found on the way, not changed here:**
+
+- **The whole TUI on that WSL install draws in 256 colours,** not only the diff: dark-plain's
+  page is pure black there, for one. The process carries no `WT_SESSION` or `COLORTERM`, so the
+  harness has no signal that the terminal can do more. Setting `COLORTERM=truecolor` in the
+  WSL shell profile shows the designed colours, if the terminal supports them.
+- **Several of Textual's own ctrl+p themes miss X7's floors at 256.** solarized-dark's text sits
+  at 1.9:1 on its band, nord's added band at 1.06:1 against the page, and gruvbox's and
+  dracula's removed band at 1.07:1. Five (tokyo-night, monokai, flexoki, gruvbox,
+  solarized-dark) have a yellow-green `success`, so their added band is olive and their added
+  text yellow at sixteen colours. Only the fourteen shipped themes are held to the floors.
+
+- **Version:** the branch's beta identity, `0.3.14-b.1.diff-colours-config-yaml.r093a5e4c72a1`.

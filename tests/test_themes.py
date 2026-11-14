@@ -26,6 +26,8 @@ Three pins, each one of the ways this file could silently regress:
     `tui.theme` value at once.
 """
 
+import types
+
 import pytest
 from rich.style import Style
 from textual.theme import BUILTIN_THEMES, Theme
@@ -717,6 +719,131 @@ def test_added_and_removed_are_told_apart_by_more_than_position(theme):
     add, delete = _tint_of(theme, "diff_add"), _tint_of(theme, "diff_del")
     assert _apart(add, delete) >= 25.0, \
         f"{theme.name}: {add} and {delete} are {_apart(add, delete):.1f} apart"
+
+
+# ---- Batch 257: the band on a terminal that is not truecolour ---------------
+#
+# Rich rounds every colour to the nearest one the terminal has, so a band
+# measured above in truecolour is not the band a 256-colour terminal
+# paints. On the owner's WSL install (TERM=xterm-256color, no COLORTERM)
+# dark-plain's added-line band rounded to #000000, the page's own colour,
+# and only the removed-line band was left. Everything below measures what
+# Rich PAINTS: a colour that is not already a cube number goes through
+# Rich's own downgrade first.
+
+def _painted_256(colour: str) -> str:
+    """`colour` as a 256-colour terminal shows it, as hex."""
+    from rich.color import EIGHT_BIT_PALETTE, Color, ColorSystem
+
+    parsed = Color.parse(colour)
+    number = (parsed.number if parsed.triplet is None
+              else parsed.downgrade(ColorSystem.EIGHT_BIT).number)
+    return EIGHT_BIT_PALETTE[number].hex
+
+
+def _band_256(theme, slot):
+    """The foreground and band of a diff row at 256 colours, painted."""
+    text, band = role_styles(theme, "256")[slot].split(" on ")
+    return _painted_256(text), _painted_256(band)
+
+
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+def test_at_256_colours_neither_band_is_the_page(theme):
+    """The defect itself. Without the cube placement this fails on six
+    of the fourteen: the four dark grid themes, ember and midnight all
+    round their added-line band to the page's black."""
+    page = _painted_256(themes._palette(theme)["background"])
+    for slot in ("diff_add", "diff_del"):
+        _text, band = _band_256(theme, slot)
+        assert band != page, (
+            f"{theme.name}.{slot}: the band paints as {band}, the page's "
+            f"own colour at 256, so the row is not marked")
+    assert _band_256(theme, "diff_add")[1] != _band_256(theme, "diff_del")[1], \
+        f"{theme.name}: added and removed rows share a band at 256"
+
+
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+@pytest.mark.parametrize("slot", ["diff_add", "diff_del"])
+def test_at_256_colours_the_band_keeps_both_x7_floors(theme, slot):
+    """X7's two floors, on the colours the terminal paints: the text
+    reads on the band, and the band stands off the page. The cube's
+    light step is two in from white, not one, because one in measured
+    1.06 and 1.13 against light-plain's page."""
+    text, band = _band_256(theme, slot)
+    page = _painted_256(themes._palette(theme)["background"])
+    assert _ratio(text, band) >= 4.5, \
+        f"{theme.name}.{slot}: text {text} on {band} at {_ratio(text, band):.2f}"
+    assert _ratio(band, page) >= 1.15, \
+        f"{theme.name}.{slot}: {band} against {page} at {_ratio(band, page):.2f}"
+
+
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+def test_at_256_colours_the_band_keeps_the_themes_hue(theme):
+    """#116's rule at the cube's resolution: the band is the theme's own
+    success and error hue, not a literal pair. Every shipped theme keeps
+    the two in the green and red families, which is what this reads."""
+    styles = role_styles(theme, "256")
+    assert styles["diff_add"].endswith(" on color(22)") or \
+        styles["diff_add"].endswith(" on color(151)"), styles["diff_add"]
+    assert styles["diff_del"].endswith(" on color(52)") or \
+        styles["diff_del"].endswith(" on color(181)"), styles["diff_del"]
+
+
+@pytest.mark.parametrize("depth", ["standard", "windows"])
+@pytest.mark.parametrize("theme", ALL_THEMES, ids=lambda t: t.name)
+def test_at_sixteen_colours_a_diff_row_is_coloured_text(theme, depth):
+    """Sixteen colours have no band to give, so the row takes the ANSI
+    themes' rule: the terminal's own green and red as the TEXT colour."""
+    styles = role_styles(theme, depth)
+    assert (styles["diff_add"], styles["diff_del"]) == ("green", "red")
+
+
+@pytest.mark.parametrize("theme", ANSI_THEMES, ids=lambda t: t.name)
+@pytest.mark.parametrize("depth", ["truecolor", "256", "standard", None])
+def test_an_ansi_theme_is_coloured_text_at_every_depth(theme, depth):
+    styles = role_styles(theme, depth)
+    assert (styles["diff_add"], styles["diff_del"]) == ("green", "red")
+
+
+def test_a_cube_band_on_the_page_falls_back_to_coloured_text():
+    """The guard for a theme ctrl+p offers and this file does not cover:
+    a page that rounds to the band's own cube colour gets text instead."""
+    theme = Theme(name="probe-cube-page", primary="#3366cc",
+                  secondary="#888888", accent="#cc9933", warning="#d9a441",
+                  error="#cf5c4a", success="#5aa86f", foreground="#e4e6eb",
+                  background="#005f00", dark=True)
+    styles = role_styles(theme, "256")
+    assert (styles["diff_add"], styles["diff_del"]) == ("green", "red")
+
+
+@pytest.mark.parametrize("depth", ["truecolor", None, "something-new"])
+def test_truecolour_and_an_unnamed_depth_keep_the_blend(depth):
+    theme = ALL_THEMES[0]
+    assert role_styles(theme, depth) == role_styles(theme)
+    assert " on #" in role_styles(theme, depth)["diff_add"]
+
+
+def test_styles_for_reads_the_depth_off_the_apps_console():
+    """`styles_for` is what every widget calls, so it is the one that has
+    to ask. A stand-in app is enough: the claim is about where the depth
+    comes from, and the strip test in test_diff_view.py drives a real
+    one."""
+    theme = ALL_THEMES[0]
+    app = types.SimpleNamespace(
+        console=types.SimpleNamespace(color_system="256"),
+        theme=theme.name, get_theme=lambda _name: theme)
+
+    assert themes.styles_for(app) == role_styles(theme, "256")
+    assert themes.colour_depth(object()) is None
+
+
+def test_the_suite_runs_at_truecolour():
+    """The root conftest pins it, because Rich answers '256' on the
+    owner's Windows box and 'standard' on Linux with no TERM. Every
+    band assertion above the batch 257 section assumes this."""
+    import textual.constants
+
+    assert textual.constants.COLOR_SYSTEM == "truecolor"
 
 
 # ---- Batch 64: the palette, the mount, and the screen -----------------------

@@ -190,7 +190,7 @@ def test_an_unknown_model_warns_about_its_assumed_window(caplog):
     with caplog.at_level("WARNING", logger="core.compaction"):
         assert compaction.context_limit("some-new-model") == config.DEFAULT_CONTEXT_WINDOW
 
-    assert "MODEL_CONTEXT_WINDOWS" in caplog.text
+    assert "model_context_windows" in caplog.text
 
 
 def test_the_unknown_model_warning_is_said_once_per_model(caplog):
@@ -203,7 +203,7 @@ def test_the_unknown_model_warning_is_said_once_per_model(caplog):
         for _ in range(5):
             compaction.context_limit("some-new-model")
 
-    assert caplog.text.count("MODEL_CONTEXT_WINDOWS") == 1
+    assert caplog.text.count("model_context_windows") == 1
 
 
 def test_a_second_unknown_model_is_still_reported(caplog):
@@ -214,7 +214,7 @@ def test_a_second_unknown_model_is_still_reported(caplog):
         compaction.context_limit("some-new-model")
         compaction.context_limit("another-new-model")
 
-    assert caplog.text.count("MODEL_CONTEXT_WINDOWS") == 2
+    assert caplog.text.count("model_context_windows") == 2
 
 
 def test_the_qwen_entry_stops_the_fallback_entirely(caplog):
@@ -222,7 +222,7 @@ def test_the_qwen_entry_stops_the_fallback_entirely(caplog):
     with caplog.at_level("WARNING", logger="core.compaction"):
         assert compaction.context_limit("qwen3.8-max-preview") == 983_616
 
-    assert "MODEL_CONTEXT_WINDOWS" not in caplog.text
+    assert "model_context_windows" not in caplog.text
 
 
 def test_the_backstop_fires_at_the_window_minus_the_margin():
@@ -288,7 +288,7 @@ def test_a_dated_model_id_resolves_to_its_table_entry(caplog):
     with caplog.at_level("WARNING", logger="core.compaction"):
         assert compaction.context_limit("claude-sonnet-5-20260724") == 1_000_000
 
-    assert "MODEL_CONTEXT_WINDOWS" not in caplog.text
+    assert "model_context_windows" not in caplog.text
 
 
 def test_every_table_key_is_already_normalized():
@@ -316,7 +316,7 @@ def test_a_queried_window_wins_over_the_table(caplog):
         assert compaction.context_limit(
             "claude-sonnet-5", "ANTHROPIC") == 250_000
 
-    assert "MODEL_CONTEXT_WINDOWS" not in caplog.text
+    assert "model_context_windows" not in caplog.text
 
 
 def test_a_queried_window_rescues_a_model_absent_from_the_table(caplog):

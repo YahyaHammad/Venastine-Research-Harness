@@ -310,7 +310,7 @@ def context_limit(model: str, provider_name: Optional[str] = None) -> int:
             logger.warning(
                 "No context window known for model %r%s; assuming %s. Set it "
                 "with /window (remembered for this model) or add it to "
-                "config.MODEL_CONTEXT_WINDOWS -- the compaction trigger, the "
+                "model_context_windows in config.yaml -- the compaction trigger, the "
                 "research backstop and the summarizer's input budget all "
                 "fire against this number.", model,
                 f" on {provider_name}" if provider_name else "",

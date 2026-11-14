@@ -538,7 +538,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         if not valid:
             logger.warning(
                 "Agent file %s: max_steps must be a positive integer, got "
-                "%r; defaulting to %s (config.MAX_ITERATIONS).",
+                "%r; defaulting to %s (max_iterations in config.yaml).",
                 path, max_steps, config_schema.current().max_iterations)
             max_steps = None
     # Booleans are VALIDATED, not coerced. bool("false") is True, so

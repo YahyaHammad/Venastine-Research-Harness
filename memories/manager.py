@@ -131,7 +131,7 @@ class MemoryManager:
         if total > cap:
             logger.warning(
                 "Injecting %s of %s memories; the oldest %s are not in this "
-                "prompt. Raise config.MAX_INJECTED_MEMORIES or prune with "
+                "prompt. Raise max_injected_memories in config.yaml or prune with "
                 "/forget.", cap, total, total - cap)
             header = (f"{header}\n\nShowing the {cap} most recent of {total}. "
                       f"Older ones exist and are not listed here.")

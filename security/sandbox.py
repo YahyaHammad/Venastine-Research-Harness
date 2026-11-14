@@ -3365,7 +3365,7 @@ def _unavailable_message(backend: str = BACKEND_CONTAINER) -> str:
     return (
         "No container runtime can run the sandbox"
         + (f" ({reason})" if reason else "")
-        + " and ALLOW_INSECURE_SANDBOX_FALLBACK is False. Install Docker or "
+        + " and allow_insecure_sandbox_fallback is false. Install Docker or "
         "Podman for strong isolation, or set "
         "allow_insecure_sandbox_fallback: true in config.yaml to use the "
         "weaker subprocess fallback (no filesystem isolation, no network "

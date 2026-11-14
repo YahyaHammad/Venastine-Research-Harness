@@ -702,7 +702,7 @@ class TestFindingsAreValidatedBeforeAnyoneIsAsked:
         make_stage(run, mocker, consent=consent)
 
         assert len(consent.asked) == config.MAX_REVIEW_FINDINGS
-        assert any("MAX_REVIEW_FINDINGS" in line for line in run.trace)
+        assert any("max_review_findings" in line for line in run.trace)
 
 
 class TestReviewHardening:

@@ -52,6 +52,9 @@ USERPROFILE pointing at a throwaway folder of its own, set here because
 this is the one file that runs before any project module is imported --
 see "A throwaway home" below, and `tests/conftest.py`'s
 `nothing_written_to_home`, which fails a test that leaves anything in it.
+
+FOURTH JOB SINCE BATCH 257: every test process sees a truecolour terminal,
+whatever TERM the machine has -- see "One colour depth" below.
 """
 
 import atexit
@@ -888,6 +891,22 @@ def _throwaway_home() -> str:
 
 
 _throwaway_home()
+
+
+# ---------------------------------------------------------------------------
+# ---- One colour depth for every test process (batch 257) -------------------
+# ---------------------------------------------------------------------------
+#
+# The transcript's diff rows read the terminal's colour depth off Textual's
+# console (`tui/themes.colour_depth`), and Rich decides that depth from the
+# process environment. Measured: a pilot app reports '256' on the owner's
+# Windows box, and Rich answers 'standard' on Linux with no TERM or with
+# TERM=xterm. So one test would draw a blended band on one machine, a cube
+# band on a second and coloured text on a third. TEXTUAL_COLOR_SYSTEM is
+# Textual's own override, read once when `textual.constants` is imported,
+# so it is set here, before any test module imports Textual. A test about
+# another depth sets the console's depth itself.
+os.environ["TEXTUAL_COLOR_SYSTEM"] = "truecolor"
 
 
 # ---------------------------------------------------------------------------

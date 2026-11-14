@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 # Country-code second-level registries that gate registration the way the
 # bare TLDs do -- `gov.uk`, `ac.uk`, `edu.au`, `mil.br`. DERIVED rather
-# than enumerated in config.py: the list is `{kind}.{cc}` across every
+# than enumerated in config.yaml: the list is `{kind}.{cc}` across every
 # ccTLD, which is several hundred rows to write and one rule to state.
 #
 # `ac` is here and NOT in the bare-TLD table on purpose: `.ac` alone is
