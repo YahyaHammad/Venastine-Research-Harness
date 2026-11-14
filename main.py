@@ -57,6 +57,8 @@ from core import ansi, config_loader, shell_sessions, workspace_trust
 from core.cancel import CancelToken
 from core.loop import (
     DEFAULT_PROVIDER,
+    HARNESS_REASONING_ONLY,
+    REASONING_ONLY_END,
     RunAgentLoop,
     advertisement_facts,
     agent_turn,
@@ -245,6 +247,10 @@ class _LiveTurn:
         # is popped out of its result and referenced by nothing else, so
         # its id could be reused by a later one.
         self._noticed: list = []
+        # ROADMAP_v3 §95 (RO5). The turn's last step already printed, ahead
+        # of the notice saying it ended the turn; `finish` then has only
+        # the notices left to print.
+        self._final_printed = False
 
     def __call__(self, event) -> None:
         try:
@@ -282,7 +288,25 @@ class _LiveTurn:
             return
         self._noticed.append(notice)
         text = notice.get("text") if isinstance(notice, dict) else None
-        if text:
+        kind = notice.get("kind") if isinstance(notice, dict) else None
+        if kind in (HARNESS_REASONING_ONLY, REASONING_ONLY_END):
+            # ROADMAP_v3 §95 (RO5). Both describe the step that just
+            # FINISHED with no tool call, so nothing else will print it:
+            # print it first, in the order a replay draws it. Only what
+            # streamed -- a turn nobody watched has nothing held, and its
+            # last step still prints at `finish`.
+            reasoning = "".join(self._reasoning).strip()
+            held_text = "".join(self._text)
+            if reasoning or held_text:
+                self._step(reasoning, held_text, [])
+                self._final_printed = kind == REASONING_ONLY_END
+        if not text:
+            return
+        if kind == HARNESS_REASONING_ONLY:
+            # The first line of the row the harness wrote, which a replay
+            # prints in this role.
+            _print_entry("wake", text)
+        else:
             print(f"— {ansi.for_display(text)} —")
 
     def finish(self, response) -> None:
@@ -295,10 +319,13 @@ class _LiveTurn:
             self._notice(notice)
         calls = [{"id": c.id, "name": c.name, "input": c.input}
                  for c in getattr(response, "tool_calls", None) or ()]
-        if any(c["id"] in self._announced for c in calls):
+        if self._final_printed or any(c["id"] in self._announced
+                                      for c in calls):
             # This step's reasoning and text printed with its first tool
             # line: the turn ran out of steps or was stopped between its
-            # tool calls, after the step itself had finished.
+            # tool calls, after the step itself had finished. Or, since
+            # §95, ahead of the notice that its reasoning-only reply ended
+            # the turn.
             reasoning, text = "", ""
         else:
             reasoning = reasoning_text(getattr(response, "thinking", None))

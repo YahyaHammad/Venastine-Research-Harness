@@ -53,9 +53,11 @@ from core.client import (
     call_model_stream,
     context_window_for,
     effort_for,
+    reasoning_not_echoed,
 )
 from core.events import LoopEvent
 from core.memory import ConversationMemory
+from core.replay import reasoning_text
 from safety.policy_enforcement import redact_diagnostic_text
 
 # §27 (T1). The loop is where a thread's kind is DECIDED -- it knows which
@@ -666,6 +668,87 @@ def _derived_compaction_mode(memory) -> str:
 def _already_said(notices, kind: str) -> bool:
     return kind in _ONCE_PER_RUN_NOTICES and any(
         n["kind"] == kind for n in notices)
+
+
+# ROADMAP_v3 §95. A REASONING-ONLY reply: the step returned readable
+# reasoning and neither text nor a tool call. Measured on an
+# OpenAI-compatible provider, 33 of its 316 turns came back this way, every
+# one right after a tool result, with the model's tool call written out in
+# its own markup INSIDE the reasoning -- the server only turns markup into a
+# call when it appears after the model's end-of-reasoning delimiter, and
+# reasoning is all this loop received. Before §95 such a step ended the turn
+# as `complete` and said nothing, to the person or to the model.
+#
+# RO2: the loop asks ONCE per run, through a harness row, and a second
+# reasoning-only reply ends the turn with a notice. The row's first line is
+# also the live notice's text, so the line a person sees while the turn
+# runs is the line its replay draws (RO5).
+HARNESS_REASONING_ONLY = "reasoning_only"
+REASONING_ONLY_END = "reasoning_only_end"
+REASONING_ONLY_HEADER = (
+    "[harness] The last reply was reasoning only: no answer and no tool "
+    "call reached the harness, so nothing ran.")
+_REASONING_ONLY_NUDGE = (
+    REASONING_ONLY_HEADER + "\n"
+    "A tool call written inside reasoning is not run. Make the call through "
+    "the tool-calling interface, or write the answer as the reply itself.")
+_REASONING_ONLY_AGAIN = (
+    "The model replied with reasoning only again after the harness asked, "
+    "so this turn ends without an answer.")
+_REASONING_ONLY_LAST_STEP = (
+    "The model replied with reasoning only on the last step this turn "
+    "allows, so it ends without an answer.")
+# (provider, model) pairs whose echo hint was logged this process (RO7).
+# Keyed like context_limit()'s warn-once set and for its reason: a session
+# that switches model must still hear about the second one.
+_reasoning_only_warned: set = set()
+
+
+def _reasoning_only(response) -> bool:
+    """RO1. Readable reasoning, no text and no tool call.
+
+    READABLE reasoning, through the replay's own reader: a Google signature
+    block or Anthropic's `redacted_thinking` carries no prose, and a step
+    that held only those had nothing in it to have gone missing. Text that
+    is only whitespace counts as none, because none of it reaches a person.
+    """
+    return (not response.tool_calls
+            and not (response.text or "").strip()
+            and bool(reasoning_text(response.thinking)))
+
+
+def _reasoning_only_reply(memory, provider_name, model, notices, *,
+                          nudge: bool, again: bool):
+    """RO2/RO5. Ask the model once more, or say why the turn ends here.
+
+    Persist before emit (#42): the harness row is written before the
+    notice that describes it is yielded. The row is a user-role entry
+    because that is the only shape the model can be handed between two
+    steps on every wire, and `mid_turn` keeps it from opening a turn (RO3):
+    the compaction floor and the reopening request both read a user row as
+    the start of one.
+    """
+    key = (provider_name, model)
+    if key not in _reasoning_only_warned and reasoning_not_echoed(
+            provider_name):
+        _reasoning_only_warned.add(key)
+        logger.warning(
+            "%s/%s replied with reasoning only: no text and no tool call. "
+            "Some models expect their earlier reasoning back during a tool "
+            "loop; if this one does, set \"echoes_reasoning\": true for %s "
+            "in providers.json.", provider_name, model, provider_name)
+    if nudge:
+        memory.add_harness_message(
+            _REASONING_ONLY_NUDGE,
+            {"kind": HARNESS_REASONING_ONLY, "mid_turn": True})
+        notice = {"kind": HARNESS_REASONING_ONLY,
+                  "text": REASONING_ONLY_HEADER}
+    else:
+        notice = {"kind": REASONING_ONLY_END,
+                  "text": (_REASONING_ONLY_AGAIN if again
+                           else _REASONING_ONLY_LAST_STEP)}
+    notices.append(notice)
+    yield LoopEvent(notice=notice)
 
 
 def _compactor_depth(context) -> int:
@@ -1894,7 +1977,12 @@ class RunAgentLoop:
             activity=activity, depth=_compactor_depth(context))
 
         response = None
-        for _ in range(max_steps):
+        # ROADMAP_v3 §95 (RO2). Whether this run has already asked the model
+        # to follow a reasoning-only reply. ONE ask per run: a model that
+        # answers the ask with reasoning only again is not going to be
+        # talked out of it by a second, and every ask is a billed step.
+        nudged = False
+        for step in range(max_steps):
             # §61 CN2, the step boundary -- and ABOVE the reset below,
             # which is the whole reason it sits here rather than at the
             # foot of the body. The response it reads is the PREVIOUS
@@ -2065,6 +2153,18 @@ class RunAgentLoop:
                 return
 
             if not response.tool_calls:
+                # ROADMAP_v3 §95. Below D20 and the budget stop, so the
+                # reasoning-only step is persisted and paid for exactly
+                # like any other, and a turn already over budget stops
+                # rather than spending a step on the ask.
+                if _reasoning_only(response):
+                    ask = not nudged and step < max_steps - 1
+                    yield from _reasoning_only_reply(
+                        memory, provider_name, model, notices,
+                        nudge=ask, again=nudged)
+                    if ask:
+                        nudged = True
+                        continue
                 response.stop_reason = "complete"
                 yield LoopEvent(
                     final_response=response, stop_reason=response.stop_reason,

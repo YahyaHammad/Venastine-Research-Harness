@@ -833,11 +833,15 @@ def compactable_span(memory, current_turn_start: Optional[int] = None,
     Reading everything from `rows` makes the mismatch unrepresentable
     rather than merely fixed.
     """
-    from storage import _ordered_rows
+    from storage import _ordered_rows, starts_turn
 
     settings = config_loader.effective_compaction(overrides)
     rows = _ordered_rows(memory.thread_id)
-    starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
+    # `starts_turn`, not `role == "user"` (ROADMAP_v3 §95, RO3): a harness
+    # row the loop wrote inside a turn would otherwise be a fold boundary,
+    # and `completed_turns()` -- which this list must agree with -- does
+    # not count it.
+    starts = [i for i, row in enumerate(rows) if starts_turn(row)]
     if not starts:
         return None
 
@@ -1084,7 +1088,7 @@ def pin_measurements(thread_id, last_n: int, model: Optional[str] = None,
     calls this from outside a run moves.
     """
     from core import config_loader
-    from storage import _ordered_rows
+    from storage import _ordered_rows, starts_turn
 
     settings = config_loader.effective_compaction()
     # THE MINIMUM, and the min() is load-bearing rather than defensive.
@@ -1114,7 +1118,9 @@ def pin_measurements(thread_id, last_n: int, model: Optional[str] = None,
     max_tokens = int(config.PIN_MAX_TRIGGER_FRACTION * trigger)
 
     rows = _ordered_rows(thread_id)
-    starts = [i for i, row in enumerate(rows) if row["role"] == "user"]
+    # The turns `pin_last` counts, so the cap measures what the pin will
+    # flag (ROADMAP_v3 §95, RO3).
+    starts = [i for i, row in enumerate(rows) if starts_turn(row)]
     bounds = starts + [len(rows)]
 
     def _tokens(lo: int) -> int:

@@ -71,6 +71,7 @@ from core.file_mentions import FileIndex, active_mention
 from core.loop import (
     DEFAULT_PROVIDER,
     DEFAULT_SYSTEM_PROMPT,
+    HARNESS_REASONING_ONLY,
     RunAgentLoop,
     advertisement_facts,
     agent_turn,
@@ -3522,6 +3523,13 @@ class VenastineApp(App):
         elif notice["kind"] in ("compaction_failed",
                                 "compaction_blocked"):
             transcript.write_error(f"— {notice['text']} —")
+        elif notice["kind"] == HARNESS_REASONING_ONLY:
+            # ROADMAP_v3 §95 (RO5). The harness wrote a row asking the
+            # model to follow its reasoning-only reply, and this notice's
+            # text IS that row's first line -- so it is drawn the way
+            # replay draws the row, and a resumed thread shows the line
+            # the live turn showed, in the same role.
+            transcript.write_role("wake", notice["text"])
         else:
             transcript.write_system(f"— {notice['text']} —")
 
