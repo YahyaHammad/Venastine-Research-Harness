@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import config
 import credentials
+from core import provider_errors
 from credentials import (
     load_provider_data,
     no_providers_message,
@@ -41,6 +42,11 @@ logger = logging.getLogger(__name__)
 # rebuild the client (and re-read the credentials file) every time.
 _client_cache: dict[str, object] = {}
 
+#: What an OpenAI-compatible provider with an empty API_KEY is sent instead
+#: (batch 258; see api_initialization). Says what it is, to anyone reading
+#: a server's log, and is not shaped like any provider's real key.
+KEYLESS = "venastine-no-key-configured"
+
 
 def api_initialization(provider_name: str):
     if provider_name in _client_cache:
@@ -70,7 +76,16 @@ def api_initialization(provider_name: str):
         client = _chatgpt_client()
     elif entry.get("is_v1_compatible", False):
         from openai import OpenAI
-        client = OpenAI(base_url=entry["API_URL"], api_key=entry["API_KEY"],
+        # BATCH 258. An EMPTY key is sent as KEYLESS. openai 3.x refuses
+        # "" while the client is being built -- "Missing credentials ...
+        # set the OPENAI_API_KEY environment variable", measured on 3.45.0
+        # -- which broke the one configuration this harness says needs no
+        # key (credentials.missing_key_message: "unless it is a local
+        # endpoint that needs none"), and said so in another vendor's
+        # words. A local server ignores the placeholder; a remote one
+        # answers 401, and launch has already warned that the key is empty.
+        client = OpenAI(base_url=entry["API_URL"],
+                        api_key=entry["API_KEY"] or KEYLESS,
                         **_metered("openai"))
     elif provider_name == "GOOGLE":
         from google import genai
@@ -1238,6 +1253,12 @@ def _messages_for_provider(provider_name: str, neutral_messages: list[dict],
 # Anthropic branch queries the API once per process rather than per call.
 _effort_levels_cache: dict[tuple[str, str], list[str]] = {}
 
+# (provider_name, model, level) whose drop effort_for has already reported.
+# Batch 258: a model that refused effort is recorded as taking none, and
+# effort_for then drops the chosen level on every turn -- said once, not
+# once per message.
+_effort_drops_said: set[tuple[str, str, str]] = set()
+
 # (provider_name, model) -> context window in tokens, or None for "asked,
 # and this provider does not report one". Same lazy, once-per-process
 # posture as the effort cache above; see context_window_for() for why None
@@ -1422,9 +1443,13 @@ def effort_for(client, provider_name: str, model: str,
             "Could not verify effort %r for %s/%s; sending it unverified.",
             requested, provider_name, model)
         return requested
-    logger.warning(
-        "Dropping effort %r: %s/%s accepts %s. Sending no effort parameter.",
-        requested, provider_name, model, levels or "no effort control")
+    said = (provider_name, model, requested)
+    if said not in _effort_drops_said:
+        _effort_drops_said.add(said)
+        logger.warning(
+            "Dropping effort %r: %s/%s accepts %s. Sending no effort "
+            "parameter.", requested, provider_name, model,
+            levels or "no effort control")
     return None
 
 
@@ -1689,7 +1714,16 @@ def _model_info(client, model):
             raise
         try:
             entries = list(listing())
-        except Exception:
+        except Exception as listing_error:
+            # BATCH 258: one exception to the rule below. `/models` is the
+            # route EVERY OpenAI-compatible server has, so a page-not-found
+            # there is not about this model -- it is the address, and the
+            # most useful thing this lookup can say (core/provider_errors.
+            # route_miss). The per-id route cannot carry that alone: some
+            # providers have no such route for ids with a slash.
+            if provider_errors.route_miss(listing_error):
+                raise provider_errors.explain_route_miss(
+                    listing_error) from None
             # The listing is not a second opinion about the retrieve; it is
             # the same question by another route. Report the FIRST failure,
             # which is the one that names the endpoint the caller asked for.
@@ -2023,11 +2057,14 @@ def _chatgpt_open(client, request: dict):
     them (CG10). A refresh that could not be made at all is a
     `ConnectionError`, which the loop retries like any dropped connection.
 
-    THE ONE RESEND THIS FILE MAKES, and it is not a retry in AGENTS.md's
-    sense, which this file does not own: nothing was wrong with the request
-    or the weather, the credential was stale, and the second attempt is made
-    with a different one. Every retry for a failure the provider might not
-    repeat is still `core/loop.py`'s, asked of `core/provider_errors.py`.
+    ONE OF THE TWO RESENDS THIS FILE MAKES, and neither is a retry in
+    AGENTS.md's sense, which this file does not own: nothing was wrong with
+    the request or the weather, the credential was stale, and the second
+    attempt is made with a different one. The other is
+    `_resend_without_effort` (batch 258), the same kind: a different
+    request, never the same one again. Every retry for a failure the
+    provider might not repeat is still `core/loop.py`'s, asked of
+    `core/provider_errors.py`.
     """
     from core import chatgpt_auth
 
@@ -2191,6 +2228,50 @@ def _chatgpt_stream(client, model: str, items: list, system_prompt: str,
 # ============================================================================
 # ---- Streaming call + helpers -----------------------------------------------
 # ============================================================================
+
+def _resend_without_effort(client, provider_name: str, model: str,
+                           kwargs: dict, thinking: dict, sampling: dict,
+                           temperature, effort: Optional[str], refusal):
+    """Send an OpenAI-compatible request once more, without the reasoning
+    effort a model refused, and return its stream (batch 258).
+
+    THE SECOND RESEND THIS FILE MAKES, and it is CG10's kind, not a retry:
+    the request was wrong for this model, and the second attempt is a
+    different request. `default_effort: high` ships, and a model with no
+    `model_effort_levels` entry is assumed to take every level, so a local
+    model that cannot reason was sent `reasoning_effort` on its first turn
+    and refused it -- a local Ollama: `"llama3.2:3b" does not support
+    thinking`, a 400 (measured). The owner chose to drop it and resend.
+
+    BELIEVED ONLY IF THE RESEND SUCCEEDS. `provider_errors.refuses_effort`
+    matches widely, because no two servers word this alike; what makes
+    that safe is here. A resend that fails too means the effort was not
+    the cause, so the FIRST refusal is raised -- it is about the request
+    the user's settings made -- and nothing is recorded. A resend that
+    succeeds records the model as taking no effort for the life of the
+    process (`_effort_levels`' cache), so effort_for drops the level from
+    then on and the picker stops offering one.
+
+    `sampling` is rebuilt for no effort: on OPENAI the effort decides
+    whether a temperature may be sent at all (`_sampling_kwargs`).
+    """
+    resend = {key: value for key, value in kwargs.items()
+              if key not in thinking and key not in sampling}
+    resend.update(_sampling_kwargs(provider_name, model, temperature, None))
+    try:
+        stream = client.chat.completions.create(**resend)
+    except Exception:
+        raise refusal from None
+    _effort_levels_cache[(provider_name, model)] = []
+    logger.warning(
+        "%s/%s refused reasoning effort %r (%s). Sent again without it, "
+        "which it accepted, so no effort is sent to this model again this "
+        "session. To make that permanent, add %r: [] under "
+        "model_effort_levels in config.yaml.",
+        provider_name, model, effort, provider_errors.describe(refusal),
+        model)
+    return stream
+
 
 def call_model_stream(
     client,
@@ -2450,7 +2531,17 @@ def call_model_stream(
     usage = {"input_tokens": None, "output_tokens": None}
 
     finish_reason = None
-    for chunk in client.chat.completions.create(**openai_kwargs):
+    try:
+        stream = client.chat.completions.create(**openai_kwargs)
+    except Exception as refusal:
+        if not (thinking and provider_errors.refuses_effort(refusal)):
+            # Batch 258: a page-not-found names the address, not a model.
+            provider_errors.explain_route_miss(refusal)
+            raise
+        stream = _resend_without_effort(
+            client, provider_name, model, openai_kwargs, thinking, sampling,
+            temperature, effort, refusal)
+    for chunk in stream:
         if chunk.choices:
             # W4 (#37): free -- chunk.choices[0] is already read here. The
             # provider sets this on the last content chunk, and `or

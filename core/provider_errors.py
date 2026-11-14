@@ -57,9 +57,11 @@ which says nothing true. So both questions this module answers walk
 worth another attempt, and its own sentence is the description.
 """
 
+import json
 from random import random
 from time import sleep
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 #: Beside any 5xx. The same set the openai and anthropic SDKs retry.
 RETRYABLE_STATUSES = frozenset({408, 409, 429})
@@ -75,6 +77,11 @@ JITTER = 0.25
 #: A transcript line, not a traceback. Long enough for a provider's own
 #: sentence and the error object google-genai folds into its message.
 DESCRIBE_LIMIT = 500
+
+#: The words `explain_route_miss` adds before the address (batch 258), and
+#: how it knows an exception already carries them -- the lookup and the
+#: call can both reach the same one, and saying it twice says nothing more.
+ROUTE_MISS_MARK = "nothing answers at"
 
 _CONNECTION_NAMES = frozenset({
     "APIConnectionError", "APITimeoutError",   # openai, anthropic
@@ -272,3 +279,98 @@ def describe(exc: BaseException) -> str:
         text = text[:DESCRIBE_LIMIT - 1].rstrip() + "…"
     name = type(exc).__name__
     return f"{name}: {text}" if text else name
+
+
+def _bare_address(url: str) -> str:
+    """Scheme, host, port and path -- never a query, a fragment or a
+    user:password, which an address can carry and a message must not."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def route_miss(exc: BaseException) -> Optional[str]:
+    """The address a request was sent to that the server has NO ROUTE for,
+    or None when `exc` is anything else (batch 258).
+
+    A 404 whose body is not JSON. An OpenAI-compatible server answers in
+    JSON for everything it understands -- a model it does not have, a model
+    without tools, a model that cannot reason -- so a plain body is the
+    server's own page-not-found, sent before any model was looked at.
+    Measured on a real local Ollama: `/models` and `/chat/completions`
+    answer `404 text/plain` "404 page not found", while `/v1/...` answers a
+    missing model with a JSON 404 naming it. The openai SDK keeps a body it
+    could not parse as the STRING it was (`body`), and the request it sent
+    (`request.url`), which is all this reads -- no SDK import, for this
+    module's reason.
+    """
+    if _as_status(getattr(exc, "status_code", None)) != 404:
+        return None
+    if not isinstance(getattr(exc, "body", None), str):
+        return None
+    url = getattr(getattr(exc, "request", None), "url", None)
+    if url is None:
+        return None
+    return _bare_address(str(url))
+
+
+def explain_route_miss(exc: BaseException) -> BaseException:
+    """Add what a route miss MEANS to `exc`'s own message, in place, and
+    return it (batch 258).
+
+    "404 page not found" -- or, on openai 3.x, "Error code: 404" -- was the
+    whole report, and a reader took it for the model: missing tool support,
+    a bad Modelfile. It is the address. The words go ON THE EXCEPTION
+    because every surface prints the exception -- the transcript's error
+    line, the CLI's, the worker log, `describe` and the context-window
+    warning -- and five call sites each adding a hint is five chances to
+    miss one. In place, so the type, status and body that `is_transient`
+    and every caller read are the ones the SDK set.
+    """
+    url = route_miss(exc)
+    if url is None or ROUTE_MISS_MARK in str(exc):
+        return exc
+    # Imported here, so this module's own imports stay the standard
+    # library's, and read through the module so a test's monkeypatch of
+    # LLM_PROVIDERS_FILE is seen.
+    import credentials
+
+    text = (f"{exc} -- {ROUTE_MISS_MARK} {url}. That is the server's "
+            f"page-not-found, sent before any model was asked, so the "
+            f"address is wrong rather than the model: API_URL in "
+            f"{credentials.LLM_PROVIDERS_FILE} is not where this server's "
+            f"API is. An OpenAI-compatible server's API_URL usually ends in "
+            f"/v1, as a local Ollama's does (http://localhost:11434/v1).")
+    exc.args = (text,)
+    if hasattr(exc, "message"):
+        exc.message = text
+    return exc
+
+
+def refuses_effort(exc: BaseException) -> bool:
+    """Whether a refusal MIGHT be about the reasoning effort a request
+    carried (batch 258).
+
+    A 400 or 422 whose message or error object says "reasoning" or
+    "thinking". Wide on purpose, and safe because of what it decides: the
+    caller sends the request once more WITHOUT the effort and believes the
+    answer only if that resend succeeds. A wrong match costs one request and
+    changes nothing. A narrow match costs the user a turn that fails: there
+    is no standard wording -- a local Ollama says `"llama3.2:3b" does not
+    support thinking` (measured), OpenAI-compatible routers name the
+    `reasoning_effort` parameter.
+    """
+    if _as_status(getattr(exc, "status_code", None)) not in (400, 422):
+        return False
+    body = getattr(exc, "body", None)
+    words = str(exc)
+    if isinstance(body, (dict, list)):
+        words += " " + json.dumps(body, default=str)
+    elif isinstance(body, str):
+        words += " " + body
+    words = words.lower()
+    return "reasoning" in words or "thinking" in words

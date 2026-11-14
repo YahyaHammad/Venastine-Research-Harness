@@ -31496,3 +31496,91 @@ it.
   text yellow at sixteen colours. Only the fourteen shipped themes are held to the floors.
 
 - **Version:** the branch's beta identity, `0.3.14-b.1.diff-colours-config-yaml.r093a5e4c72a1`.
+
+## Batch 258 -- finished background sessions stay in the sidebar, and a local server's 404 names its address (2026-11-14)
+
+**Asked.** The owner reported two bugs, to be checked against the code before any fix. First,
+a background shell appeared in the sidebar and was gone a few seconds later, because (the
+report said) the model reasoning again or calling another tool counted as a new turn. So
+nobody could tell which sessions had finished without opening each one. Second, a user running
+`llama3.2:3b` on a local Ollama got `404 page not found` on every turn, and the owner guessed
+the model's Modelfile lacked tool support. The second was to be fixed only if its cause could
+be traced.
+
+**The panel was not tied to turns; it showed live sessions only.** Nothing in `tui/` or
+`core/shell_sessions.py` hides the panel on a turn. It is fed by the manager's sink and
+filtered by state alone, as SS14 decided. Measured with the real app, a scripted model and a
+session that never ends: the row stayed through two more model calls, a further tool call and
+the wait after the turn, and left only when the session was killed. What the owner saw is
+SS14 itself. A session leaves the panel the moment it ENDS, and its end is the wake that
+starts the agent's next turn, so the two arrive together. **The fix, the owner's choice of
+three:** every running session, then the five most recent finished ones, newest first by when
+each ended. Each is marked with the research panel's three marks: `☑` for exit 0, `☒` for
+anything else, with the code, `killed`, `timed out` or `failed` after the command. The outcome
+is fitted first and the command gives way to it. A click opens a finished row as it opens a
+running one, since the manager keeps twenty. `SessionRow` gains `finished_mono` for the
+order. SS14's row in ROADMAP_v3 §49 carries the amendment. The other choices were finished rows
+until the user's next message, and every finished session up to the manager's twenty.
+
+**The 404 was the address, not the model.** The SDK keeps a body it cannot parse as the
+string it was, and a JSON body becomes `Error code: 404 - <message>`. So a bare
+`404 page not found` is a plain-text body. Measured read-only on a real Ollama 0.32.15 (the
+owner's own server):
+
+- `GET /models` and `POST /chat/completions` answer `404 text/plain` "404 page not found".
+- With `/v1` in front, both routes work, and a missing model is a JSON 404 naming it.
+- A model without tools or without thinking is a JSON 400 naming the missing capability,
+  checked before the server loads anything. Tried on a model that has neither: nothing was
+  loaded before or after.
+
+So the reporter's `API_URL` lacked `/v1`. The context-window lookup tried `/models/<id>` and
+then `/models`, and the turn tried `/chat/completions`; all three missed. A Modelfile without
+tool support gives a 400 that says so. **The fix, the owner's choice:** say it.
+`provider_errors.route_miss` recognises a 404 whose body is not JSON, and
+`explain_route_miss` adds to the exception's own message, in place and once:
+
+- the address it was sent to, with no query, fragment or `user:password`;
+- that the address is wrong rather than the model;
+- that an OpenAI-compatible server's `API_URL` usually ends in `/v1`.
+
+Every surface prints the exception, so all of them say it: the transcript's error line, the
+CLI's, the worker log, `describe` and the context-window warning. `_model_info` explains a
+route miss on `/models`, the route every OpenAI-compatible server has, and keeps reporting the
+first failure otherwise. README's `API_URL` row gives the local example. The pinned
+openai 3.45.0 would print only `Error code: 404`, which says even less than the screenshot.
+
+**Found on the way, and fixed here at the owner's choice.**
+
+- **The wall after `/v1`.** `default_effort: high` ships, and a model with no
+  `model_effort_levels` entry is assumed to take every level. So `llama3.2:3b` would be sent
+  `reasoning_effort: "high"` and refuse it with a 400, which was measured as above. Now a 400
+  or 422 naming reasoning or thinking on a request that carried effort is sent once more
+  without it (`_resend_without_effort`). If that succeeds, the model is recorded as taking no
+  effort for the session, and a WARNING names the `model_effort_levels` entry that makes it
+  permanent. The match is wide because no two servers word it alike. That is safe only
+  because a resend that fails too raises the FIRST refusal and records nothing. It is
+  `core/client.py`'s second resend and CG10's kind: a different request, never the same one
+  again. AGENTS.md's ownership row says so. The drop that follows on later turns is now warned
+  once per model and level rather than once per message.
+- **An empty key.** openai 3.x refuses `api_key=""` while building the client ("Missing
+  credentials ... set the OPENAI_API_KEY environment variable"), measured on 3.45.0. That
+  broke the keyless local server `missing_key_message` has always allowed, and said so in
+  another vendor's words. An empty key on an `is_v1_compatible` entry is now sent as
+  `KEYLESS`. A remote provider answers 401, and launch has already warned that the key is
+  empty. **This amends batch 234's "an OpenAI-compatible entry's SDK still decides"**,
+  which the suite held in `test_an_empty_key_elsewhere_still_reaches_its_sdk`. The SDK now
+  decides by refusing. The refusal itself stays ANTHROPIC's alone, and the test is renamed
+  for the new rule.
+- **README's effort table was stale.** It said `low`, `medium`, `high` are assumed for an
+  unlisted OpenAI-compatible model. `default_effort_levels` ships six, `low` through `ultra`.
+
+**Verified.** The full suite on Windows: 9422 passed, 88 skipped (9510). The changed
+files outside the conformance file pass in WSL with `TERM` unset (337). The conformance
+file's new tests drive the pinned openai 3.45.0, which WSL's user site lacks (2.45.0 there
+fails 14 of the file's older tests too). 21 of 21 mutations killed, each reverting one piece
+of the fix: the finished rows, their order, cap and marks, the outcome's room, the route-miss
+rule and both its call sites, the resend and its failed-resend rule, the placeholder and the
+once-only drop warning. ruff, bandit (no new findings, no baseline count grew) and gitleaks on a
+clean export are clean; the requirements files are unchanged, so pip-audit was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.15-b.1.session-panel-ollama-404.r52f9026d5cb0`.

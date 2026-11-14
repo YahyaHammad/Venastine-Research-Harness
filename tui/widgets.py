@@ -1197,14 +1197,23 @@ class AgentPanel(Static):
         self.update(as_content(body))
 
 class SessionPanel(Static):
-    """What is running in the background, and nothing else (§49, SS14).
+    """What is running in the background, and what just finished (§49,
+    SS14 as amended in batch 258).
 
-    LIVE SESSIONS ONLY, which is the decision rather than a consequence
-    of how it is fed. A finished session is still readable -- SS14 puts
-    that on the tool-call line that started it, resolved at press time
-    the way §47 resolves a spawn -- so listing finished ones here would
-    spend contested sidebar rows on a second route to the same pane,
-    and would grow without bound in a session that starts many.
+    RUNNING FIRST, THEN THE FIVE MOST RECENT FINISHED, marked. This was
+    "live sessions only", and that was measured wrong in use: a session
+    left the panel the moment it ended, and its end is also what wakes
+    the agent, so the row vanished just as a new turn began. It read as
+    the turn hiding it, and nobody could tell which sessions had finished
+    without opening each one. The tool-call line still opens a session
+    of any age; this is the glance, and five keeps it bounded in a
+    session that starts many. The cap is app.py's, with the filter.
+
+    A ROW SAYS HOW IT ENDED in the research panel's three marks (E14):
+    `▸` running, `☑` exited 0, `☒` anything else -- a non-zero code,
+    killed, timed out, or failed to start -- with the outcome after the
+    command. The outcome is fitted FIRST and the command gives way to
+    it, because the outcome is the half a finished row exists to show.
 
     PROCESS-WIDE, like AgentPanel above it and like ctrl+b's picker.
     SS11 scopes the five TOOLS to the caller's own thread, which is a
@@ -1220,13 +1229,18 @@ class SessionPanel(Static):
     surface only through check_output_policy, and keeping that call in
     app.py means this file never holds an unredacted one.
 
-    Hidden when nothing is running, GoalBanner-style, which is almost
-    always -- the sidebar is twenty columns wide and its rows are
-    contested.
+    Hidden until a session has started, GoalBanner-style -- the sidebar
+    is twenty columns wide and its rows are contested.
     """
 
     #: AgentPanel's, measured the same way and for the same box.
     WIDTH = 18
+
+    #: `status` -> (mark, style role). The research panel's pass marks
+    #: and roles, so the sidebar's two progress lists read as one family.
+    STATUS = {"running": (MARK_RUNNING, "tool"),
+              "done": (MARK_DONE, "pass_done"),
+              "failed": (MARK_FAILED, "error")}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -1243,8 +1257,11 @@ class SessionPanel(Static):
         return themes.styles_for(app)
 
     def show(self, rows) -> None:
-        """Draw the live sessions. `rows` is [{"id", "label"}], already
-        redacted, in the order they started.
+        """Draw the sessions. `rows` is [{"id", "label", "status",
+        "outcome"}], already redacted and in the order to draw: the
+        running ones as they started, then the finished, newest first.
+        `status` is a key of STATUS and defaults to running; `outcome` is
+        empty while a session runs.
 
         An empty list hides the widget, which is how the panel closes
         without a second method meaning the same thing (ThreadCrumb's
@@ -1279,10 +1296,19 @@ class SessionPanel(Static):
         body = Text()
         body.append("sessions\n\n")
         for row in self._rows:
-            label = AgentPanel._fit(row.get("label", ""), self.WIDTH - 2)
+            mark, role = self.STATUS.get(row.get("status", "running"),
+                                         self.STATUS["running"])
+            outcome = row.get("outcome", "")
+            room = self.WIDTH - 2
+            if outcome:
+                # The outcome is never cut: a row is the mark, a space,
+                # and sixteen cells, and the command takes what is left.
+                room -= cell_len(outcome) + 1
+            label = AgentPanel._fit(row.get("label", ""), room)
+            text = f"{label} {outcome}" if outcome else label
             body.append(
-                f"{MARK_RUNNING} {label}\n",
-                meta_style(styles.get("tool", ""), "session", row.get("id")))
+                f"{mark} {text}\n",
+                meta_style(styles.get(role, ""), "session", row.get("id")))
         # AgentPanel's note: the nowrap/clip rule lives on the widget in
         # app.tcss, because `Content` carries neither flag.
         self.display = True

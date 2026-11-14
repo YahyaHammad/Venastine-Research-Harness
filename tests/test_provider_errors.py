@@ -224,3 +224,119 @@ class TestDescribe:
         text = provider_errors.describe(ValueError("x" * 2000))
         assert text.endswith("…")
         assert len(text) <= len("ValueError: ") + provider_errors.DESCRIBE_LIMIT
+
+
+# -- batch 258: a route miss, and a refused effort ----------------------------
+#
+# The real SDK's side of both is held in test_sdk_conformance.py, against
+# the installed openai on a MockTransport. These are the rules themselves,
+# on lookalikes carrying the two attributes that file pins: an unparsed body
+# stays the STRING it was, and the request rides on the exception.
+
+
+def route_error(status=404, body="404 page not found",
+                url="http://localhost:11434/chat/completions",
+                message="404 page not found"):
+    error = status_error(status, message=message, body=body)
+    error.message = message
+    error.request = SimpleNamespace(url=url)
+    return error
+
+
+class TestARouteMiss:
+
+    def test_a_plain_404_is_a_route_miss_at_its_address(self):
+        assert provider_errors.route_miss(route_error()) == \
+            "http://localhost:11434/chat/completions"
+
+    def test_a_json_404_is_the_server_answering(self):
+        """A missing model, said in JSON. The address was right."""
+        assert provider_errors.route_miss(route_error(
+            body={"message": "model 'x' not found"})) is None
+
+    @pytest.mark.parametrize("status", [400, 401, 405, 500])
+    def test_only_a_404(self, status):
+        assert provider_errors.route_miss(route_error(status=status)) is None
+
+    def test_no_request_no_address(self):
+        error = route_error()
+        del error.request
+        assert provider_errors.route_miss(error) is None
+
+    def test_the_address_never_carries_a_secret(self):
+        """A query, a fragment or a user:password can ride in an address;
+        none of them belongs in a message."""
+        assert provider_errors.route_miss(route_error(
+            url="https://me:pw@host.example:8443/api/models?key=abc#x")) == \
+            "https://host.example:8443/api/models"
+
+    def test_an_ipv6_host_keeps_its_brackets(self):
+        assert provider_errors.route_miss(route_error(
+            url="http://[::1]:11434/models")) == "http://[::1]:11434/models"
+
+    def test_the_explanation_names_the_address_and_the_fix(self):
+        error = provider_errors.explain_route_miss(route_error())
+        text = str(error)
+        assert text.startswith("404 page not found -- ")
+        assert "nothing answers at http://localhost:11434/chat/completions" \
+            in text
+        assert "API_URL" in text and "/v1" in text
+        assert error.message == text, "the SDK's own field says it too"
+
+    def test_it_changes_the_words_and_nothing_else(self):
+        """In place: the type, status and body are what `is_transient`
+        and every caller read, and they are the SDK's."""
+        error = route_error()
+        same = provider_errors.explain_route_miss(error)
+        assert same is error
+        assert (type(same).__name__, same.status_code, same.body) == (
+            "APIStatusError", 404, "404 page not found")
+        assert provider_errors.is_transient(same) is False
+
+    def test_it_is_said_once(self):
+        error = provider_errors.explain_route_miss(route_error())
+        once = str(error)
+        assert str(provider_errors.explain_route_miss(error)) == once
+
+    def test_anything_else_is_left_alone(self):
+        error = route_error(body={"message": "model 'x' not found"},
+                            message="model not found")
+        assert str(provider_errors.explain_route_miss(error)) == \
+            "model not found"
+
+    def test_it_names_the_providers_file_in_use(self, monkeypatch):
+        import credentials
+        monkeypatch.setattr(credentials, "LLM_PROVIDERS_FILE",
+                            "/elsewhere/keys.json")
+        text = str(provider_errors.explain_route_miss(route_error()))
+        assert "/elsewhere/keys.json" in text
+
+
+class TestARefusedEffort:
+
+    @pytest.mark.parametrize("message, body", [
+        ('"llama3.2:3b" does not support thinking', None),
+        ("Error code: 400", {"message": "Unsupported parameter: "
+                                        "'reasoning_effort'"}),
+        ("bad request", "reasoning is not available for this model"),
+    ], ids=["message", "json-body", "text-body"])
+    def test_a_400_naming_reasoning_or_thinking(self, message, body):
+        assert provider_errors.refuses_effort(
+            status_error(400, message=message, body=body))
+
+    def test_a_422_too(self):
+        assert provider_errors.refuses_effort(
+            status_error(422, message="thinking is not supported"))
+
+    def test_a_400_about_something_else_is_not(self):
+        assert not provider_errors.refuses_effort(
+            status_error(400, message="context length exceeded"))
+
+    @pytest.mark.parametrize("status", [404, 429, 500])
+    def test_not_another_status(self, status):
+        assert not provider_errors.refuses_effort(
+            status_error(status, message="does not support thinking"))
+
+    def test_not_an_exception_with_no_status(self):
+        assert not provider_errors.refuses_effort(
+            ValueError("does not support thinking"))

@@ -487,8 +487,9 @@ class SessionRowsChanged(Message):
     sink runs on the manager's threads and the handler on the UI thread,
     so a delta would have the panel reassembling an order it never saw.
 
-    FILTERED ON THE UI SIDE, not here. The panel shows live sessions
-    only (SS14), and doing that in the handler keeps this message a
+    FILTERED ON THE UI SIDE, not here. The panel shows the running
+    sessions and the five most recent finished ones (SS14, amended in
+    batch 258), and doing that in the handler keeps this message a
     faithful copy of what the manager said rather than a view of it --
     which is what lets a second reader be added without the first one's
     filter being in the way.
@@ -656,14 +657,45 @@ def _redacted_command(row) -> str:
     return check_output_policy(tool, {"command": row.command})["command"]
 
 
+#: How many finished sessions the sidebar keeps under the running ones
+#: (SS14 as amended in batch 258; the owner's choice of five). The
+#: manager keeps twenty (`_FINISHED_KEPT`), so this is a view of what it
+#: holds and never a reason for it to hold more.
+PANEL_FINISHED_SHOWN = 5
+
+
+def _panel_outcome(row) -> tuple[str, str]:
+    """A session's `(status, outcome)` for the panel: how it ended, in as
+    few cells as say it.
+
+    `done` is an exit of 0 and nothing else. A non-zero code, a kill, a
+    timeout and a start that failed are all `failed`, and the outcome
+    text tells them apart -- the code itself where there is one, because
+    `2` and `137` are what a person would go and look up.
+    """
+    if row.state in shell_sessions.LIVE_STATES:
+        return "running", ""
+    if row.state == shell_sessions.EXITED:
+        if row.return_code is None:
+            return "failed", "exited"
+        return ("done" if row.return_code == 0 else "failed",
+                str(row.return_code))
+    return "failed", {shell_sessions.KILLED: "killed",
+                      shell_sessions.TIMED_OUT: "timed out",
+                      shell_sessions.FAILED: "failed"}.get(row.state,
+                                                           row.state)
+
+
 def _panel_rows(rows) -> list[dict]:
-    """`SessionRow`s as the session panel's `{id, label}` pairs (SS14).
+    """`SessionRow`s as the session panel's rows (SS14).
 
     EIGHTEEN COLUMNS, so the label is the id and as much of the command
     as fits -- the widget elides, and what it elides from has to be the
     part that identifies the session rather than a prefix of `docker`.
     A monitor's match count rides along when there is one, because "it
     has matched something" is the whole reason a monitor is on screen.
+    A finished row adds its `status` and `outcome` (`_panel_outcome`),
+    which the widget fits before the command.
 
     Module-level beside `_kill_rows`, for its reason.
     """
@@ -671,8 +703,10 @@ def _panel_rows(rows) -> list[dict]:
     for row in rows:
         matches = (f" {row.match_count}✓"
                    if row.kind == "monitor" and row.match_count else "")
+        status, outcome = _panel_outcome(row)
         out.append({"id": row.id,
-                    "label": f"{row.id}{matches} {_redacted_command(row)}"})
+                    "label": f"{row.id}{matches} {_redacted_command(row)}",
+                    "status": status, "outcome": outcome})
     return out
 
 
@@ -2439,13 +2473,15 @@ class VenastineApp(App):
         self.open_session(str(message.session_id))
 
     def open_session(self, session_id: str) -> None:
-        """Show a LIVE session, read-only (SS14).
+        """Show a session this process holds, read-only (SS14).
 
         The panel's route, and the only one that starts from a session
         id: the panel draws what the manager holds, so by definition
-        this process has the session. A row that has finished between
-        the draw and the click is the one race, and it is answered the
-        way a missing thread is -- said, not ignored.
+        this process has the session -- running, or one of the finished
+        rows the panel keeps since batch 258, whose output the manager
+        still has. A row that aged out of the manager between the draw
+        and the click is the one race, and it is answered the way a
+        missing thread is -- said, not ignored.
         """
         row = shell_sessions.sessions.row(session_id)
         if row is None:
@@ -3651,9 +3687,9 @@ class VenastineApp(App):
     def on_session_rows_changed(self, message: SessionRowsChanged) -> None:
         """The session sink spoke. Runs on the UI thread (§49, SS14)."""
         self.refresh_session_panel(message.rows)
-        # SS14: the panel shows live sessions only, so a session that
-        # just finished leaves it -- and the view of it, if one is open,
-        # is now showing a state that has moved. Repainted here because
+        # SS14: a session that just finished changes its row's mark --
+        # and the view of it, if one is open, is now showing a state
+        # that has moved. Repainted here because
         # this is the only signal: the poll stops the moment the session
         # stops being live, so without this the view would keep the last
         # tick's "running" header for good.
@@ -3675,13 +3711,23 @@ class VenastineApp(App):
         `refresh_agent_panel`'s reason: two writers of one widget is how
         the two come to draw it differently.
 
-        THE FILTER IS HERE, which is SS14's "live sessions only" -- the
-        message carries everything the manager holds, so this is the one
-        place that decides what a reader sees.
+        THE FILTER IS HERE, which is SS14's -- the message carries
+        everything the manager holds, so this is the one place that
+        decides what a reader sees. Since batch 258 that is every running
+        session as it started, then the PANEL_FINISHED_SHOWN most recent
+        finished ones, newest first. It was running only, and a session
+        then left the panel at the moment it ended -- which is also the
+        moment its wake starts the agent's next turn, so the row seemed
+        to be taken by the turn.
         """
         live = [row for row in rows
                 if row.state in shell_sessions.LIVE_STATES]
-        self._session_panel.show(_panel_rows(live))
+        finished = sorted(
+            (row for row in rows
+             if row.state not in shell_sessions.LIVE_STATES),
+            key=lambda row: row.finished_mono or 0.0,
+            reverse=True)[:PANEL_FINISHED_SHOWN]
+        self._session_panel.show(_panel_rows(live) + _panel_rows(finished))
 
     @property
     def _session_panel(self) -> SessionPanel:

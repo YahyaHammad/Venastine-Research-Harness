@@ -66,7 +66,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 9461 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 9510 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -450,8 +450,8 @@ That qualifier is load-bearing, not pedantry (audit #128). This file used to say
 | `core/memory.py` | Active in-run state, provider-neutral, write-through | SQL, table classes, provider shapes |
 | `core/session.py` | The ephemeral `/trigger` override, and what clears it | Resolving that number; persisting anything, ever |
 | `core/model_windows.py` | The remembered context window per `(provider, model)` | Deciding whether a number is a sensible window |
-| `core/client.py` | One call + provider format translation, and the one resend a stale ChatGPT plan token needs (§83, CG10) | Looping, retry, tool dispatch, bookkeeping |
-| `core/provider_errors.py` | Which provider failures are transient, the retry backoff, the one-line description of a failure | The attempt itself (`core/loop.py`); importing any SDK |
+| `core/client.py` | One call + provider format translation, and two resends that are a different request rather than the same one again: a stale ChatGPT plan token's (§83, CG10), and a request without the reasoning effort a model refused, believed only if it succeeds (batch 258) | Looping, retry, tool dispatch, bookkeeping |
+| `core/provider_errors.py` | Which provider failures are transient, the retry backoff, the one-line description of a failure, and what a failure means where the SDK does not say: a 404 with no JSON body is the ADDRESS, never the model, and a 400 naming reasoning or thinking may be the effort (batch 258) | The attempt itself (`core/loop.py`); importing any SDK |
 | `core/loop.py` | Call-dispatch-repeat control flow | Provider formats, tool policy, pipeline state |
 | `security/permissions.py` | Policy (`is_tool_allowed`, `requires_approval`) | Dispatch mechanics |
 | `safety/policy_enforcement.py` | Post-call content policy (secret redaction, blocked domains) | Access control |

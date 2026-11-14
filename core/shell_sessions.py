@@ -479,6 +479,13 @@ class SessionRow:
     ran_on: str
     tier: str
     return_code: Optional[int]
+    # BATCH 258. When the session ended, on the manager's monotonic clock,
+    # and None while it runs. The sidebar keeps the five most recent
+    # finished sessions under the running ones (SS14, amended), and
+    # "most recent" is an order by THIS -- the start order the rows
+    # arrive in is not the order they end in. Last and defaulted, so a
+    # row built by keyword elsewhere is still a whole row.
+    finished_mono: Optional[float] = None
 
 
 @dataclass
@@ -530,7 +537,8 @@ class _Session:
             call_id=self.call_id, state=self.state,
             started_wall=self.started_wall, timeout_s=self.timeout_s,
             match_count=self.match_count, output_chars=self.output.total,
-            ran_on=self.ran_on, tier=self.tier, return_code=self.return_code)
+            ran_on=self.ran_on, tier=self.tier, return_code=self.return_code,
+            finished_mono=self.finished_mono)
 
 
 @dataclass
