@@ -31394,5 +31394,14 @@ re-add the ask instead of the request.
 owner asked that the key in it not be read. The ask itself is not measured against the live
 provider.
 
+**CI's first run: the integration job, and not this batch's code.** Both `integration` checks
+failed at the teardown of `test_the_image_holds_exactly_the_bundles_files`, which passed: the
+home guard found 4,740 entries under `~/.local/share/uv/python`. `ubuntu-latest` had moved from
+24.04, where the last green run was on 2026-11-09, to 26.04, which ships no Python 3.12. The
+bundle's locks are compiled for 3.12, so uv 0.13.4 downloaded one into the home. Reproduced in
+WSL by hiding 3.12 from PATH: the same 4,740 entries, and none with `UV_PYTHON_INSTALL_DIR`
+set. The test now sends that folder to `tmp_path` beside uv's cache, batch 243's fix for the
+same guard. `main` would have failed the same way on its next run.
+
 - **Version:** the branch's beta identity, `0.3.13-b.1.reasoning-only-turns.ref49861abfcb`, so the
   merge releases the next patch.

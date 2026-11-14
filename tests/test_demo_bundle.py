@@ -566,13 +566,21 @@ def test_the_image_holds_exactly_the_bundles_files(tmp_path, monkeypatch):
     run wrote 338 files there and failed `nothing_written_to_home`. The cache
     goes to `tmp_path`, as `test_installers.py`'s real-uv tests already
     send it; uv runs on an empty cache, where rustup and Docker need their
-    real homes."""
+    real homes.
+
+    AND SO DOES ANY PYTHON IT FETCHES (batch 256). The locks are compiled
+    for Python 3.12, and a uv that finds no 3.12 on PATH downloads one into
+    `~/.local/share/uv/python`. `ubuntu-latest` moved to 26.04, which ships
+    none, and CI's first run there wrote 4,740 entries into the home;
+    reproduced in WSL by hiding 3.12 from PATH. On a machine that has a
+    3.12, nothing is downloaded and the folder stays empty."""
     docker = _docker()
     if not docker:
         pytest.skip("no Docker daemon running Linux containers answers")
     if shutil.which("git") is None:
         pytest.skip("git is not installed")
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(tmp_path / "uv-python"))
     out = tmp_path / "bundle"
     written = bundle.build("modelscope", out, root=ROOT)
     planted = {
