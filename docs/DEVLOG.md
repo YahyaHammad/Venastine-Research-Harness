@@ -31390,6 +31390,21 @@ re-add the ask instead of the request.
 - A `git grep` for the provider's and model's names, and for the model's own call markup, finds
   nothing in the tracked tree.
 
+**Afterwards: the owner's account, checked.** The owner shared their own account of the
+behaviour, and a later snapshot (358 turns, 37 lost calls) was measured against it. Four of its
+claims held:
+
+- **a stall every 2-10k tokens:** the median is about 4,400 output tokens between lost calls;
+- **an instruction does not help:** four more lost turns followed one in 34 minutes;
+- **any kind of work:** chat, four different research passes, and both kinds of subagent;
+- **no other model does it:** 0 of 66 on the install.
+
+Two points were corrected. The calls are in the model's own markup, not JSON. And they are not
+drafts: every one is closed and ends its generation, which also took away RO4's "not a
+commitment" reason. §95's measurements, RO4 and its gap register now say so. The owner's
+further point, that the model carries on as though its unrun calls took effect, is what the
+ask's "nothing ran" answers.
+
 **Not done here.** That provider's `echoes_reasoning` stays unset: it is the owner's file, and the
 owner asked that the key in it not be read. The ask itself is not measured against the live
 provider.

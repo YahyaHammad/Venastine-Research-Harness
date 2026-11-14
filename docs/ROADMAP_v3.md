@@ -3100,6 +3100,24 @@ install's `app.db` and `app.log`, and fixed in a pull request if it was the harn
   cost 46 calls, 510,768 input tokens and 7,743 output tokens. The installed code rebuilt the
   system prompt rather than reading it from the run, so the replay matches the recorded requests
   in their messages and tools, and only approximately in their prompts.
+- **The owner's account of the behaviour, checked against a later snapshot** (2026-11-14,
+  03:49 UTC: 358 turns on that provider, 37 lost calls, every one after a tool result). Four
+  of its claims held:
+  - **Frequency.** A lost call came every few thousand output tokens: median about 4,400,
+    middle half 2,200-9,600, estimated from stored characters at four per token.
+  - **Instruction.** A plain instruction does not stop it. Told in one session not to put
+    tool calls in its thinking, the model lost four more turns that way in the next 34
+    minutes.
+  - **Domain.** It is not tied to one kind of work: it happened in chat sessions, in four
+    different research passes, and in both kinds of subagent.
+  - **Other models.** The other reasoning model used on the install had 0 such turns in 66.
+
+  Two were corrected. The calls are written in the model's own markup, not as JSON. And they
+  are not drafts: every call is closed, each generation ends at the close of its last call
+  with nothing after it, and a turn with several calls holds them back to back. The owner also
+  reports a cost beyond the pause: the model carries on as though its unrun writes and
+  commands took effect, then spends calls finding out what did. That is the belief the
+  ask's first line, "nothing ran", corrects.
 
 ### Decisions (RO1-RO8)
 
@@ -3108,7 +3126,7 @@ install's `app.db` and `app.log`, and fixed in a pull request if it was the harn
 | **RO1** | **A reasoning-only reply** is readable reasoning, through replay's own reader, with no text (whitespace counts as none) and no tool call. A step whose record holds only `redacted_thinking` or a signature lost nothing anyone could read, and completes exactly as before |
 | **RO2** | **The loop asks once per run** (owner: a notice and one nudge). A harness row says nothing ran and that a call written inside reasoning is not run, and the next step runs. A second reasoning-only reply, or one on the last step `max_steps` allows, ends the turn as `complete` with a notice. The ask is a billed step and counts against `max_steps`; the budget stop stays above it, so an exhausted turn is not asked |
 | **RO3** | **The ask is a user row that opens no turn.** Its harness record carries `mid_turn: true`, and `storage.starts_turn` is the one rule for which user rows open a turn. Six readers had spelled it `role == "user"`, and each now calls it: the turn list behind `completed_turns`, `compactable_span`'s fold boundaries, the pin cap, the request a cut turn reopens with, and the row a failure is recorded on, in storage and in memory. Read as a turn start, the ask moves the current-turn floor past the turn's own earlier steps while the turn runs -- the floor the mid-turn compaction valve calls safe by construction -- and a cut turn would reopen with the ask instead of the request |
-| **RO4** | **Nothing is parsed out of reasoning.** Call markup there is not run, and `</thinking>` is not split at. Reasoning is not a commitment, the markup is each model's own, and a call run from it would be one the model never made through the interface. Measured, the split would not have run the call anyway |
+| **RO4** | **Nothing is parsed out of reasoning.** Call markup there is not run, and `</thinking>` is not split at. The markup is each model's own, and a call the harness lifted from text would be one the model never made through the interface. The provider's own parser, which knows the markup, is the place to recover such a call. This decision first also said reasoning is not a commitment, and the later snapshot showed that was wrong here: the lost calls were complete and ended their generations, so they were calls, not drafts. Measured, the split would not have run the call anyway |
 | **RO5** | **Shown where it happened, the way replay shows it.** The ask's first line is the live notice's text: the TUI draws it in the `wake` role and the CLI prints it as `Harness:`, which is how replay draws the row. The CLI prints the step the notice describes first, and `finish` does not print it again. The end notice is an ordinary system line and, like every notice, is not replayed |
 | **RO6** | **The research JSON retry calls an empty reply empty.** It says there was no text at all, that reasoning is not part of the response, and that a call written there is not run, instead of quoting nothing under "Start of your failed output" |
 | **RO7** | **`echoes_reasoning` stays opt-in per provider**, so §44 WS4 is unchanged. On an OpenAI-compatible provider that does not echo, the first reasoning-only reply logs one WARNING per (provider, model) naming the flag. The flag is read with the truthiness the request itself gives it |
@@ -3147,7 +3165,9 @@ which a sibling test caught first, was re-run against its own test and killed th
 - **The replay's system prompt was rebuilt, not recorded**, and a research pass's steps were not
   replayed.
 - **The ask's effect on the live provider is not measured.** The replay measured echoing, not the
-  ask; the tests drive a scripted provider.
+  ask; the tests drive a scripted provider. A plain instruction did not stop the behaviour (four
+  more lost turns in 34 minutes), so the ask is expected to recover each occurrence, not to
+  prevent the next.
 - **A reasoning-only reply cut off by the token limit is asked about the same way.**
   `ModelResponse` carries no provider finish reason, and a step cut off mid-reasoning gets the
   same ask, which is still a reasonable thing to ask.
