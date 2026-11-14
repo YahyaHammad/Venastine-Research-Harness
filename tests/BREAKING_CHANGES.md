@@ -15,6 +15,19 @@ other name.
 
 ---
 
+## GitHub's stateless tokens (batch 260)
+
+| Change | Test | Fix |
+|---|---|---|
+| Drop the stateless GitHub pattern, or narrow its prefix to `ghs_` | `test_a_stateless_token_is_redacted_whole`, `test_a_stateless_token_refuses_an_input`, `test_every_case_is_matched_by_something` | Keep all four `gh[ousr]_` prefixes, on both sides (the owner's choice) |
+| Move it below the classic `gh[ousr]_` + 36 pattern | `test_a_classic_run_inside_a_segment_does_not_split_the_token` | It runs first, because the classic pattern would cut a 36-character run out of a segment and leave the rest standing |
+| Let a dot into the runs, lower the 20-character floor, or stop requiring both dots | `test_a_token_goes_and_what_surrounds_it_stays`, `test_code_and_prose_that_name_the_prefix_survive` | A sentence keeps its final period, and code that names a `ghs_` variable is neither redacted nor refused |
+| Drop the escape alternatives from the lookbehind | `test_a_token_goes_and_what_surrounds_it_stays` | A URL-encoded or JSON-escaped token is still a token, and the classic pattern always caught those |
+| Drop the lookbehind, or loosen an escape to its second half | `test_the_stateless_shape_is_linear_on_a_megabyte` | Without it, every `ghs_` inside one run is a start that scans to the run's end: 99 s on a megabyte |
+| Take the `_` out of that test's long run | `test_the_stateless_shape_is_linear_on_a_megabyte`, at about 441 s | Leave it in. The input side's URL scan is quadratic on one alphanumeric run (TECHNICAL_DEBT 117), and that is not this pattern's cost |
+
+---
+
 ## The `classified` shell approval mode (batch 248)
 
 | Change | Test | Fix |

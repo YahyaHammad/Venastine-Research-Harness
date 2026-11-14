@@ -31584,3 +31584,118 @@ once-only drop warning. ruff, bandit (no new findings, no baseline count grew) a
 clean export are clean; the requirements files are unchanged, so pip-audit was not re-run.
 
 - **Version:** the branch's beta identity, `0.3.15-b.1.session-panel-ollama-404.r52f9026d5cb0`.
+
+## Batch 260 -- GitHub's stateless tokens are redacted and refused (2026-11-14)
+
+**Asked.** Batch 259 evaluated a GitHub persona for the harness's commits, which the
+owner then scrapped. On the way it measured a gap that stands on its own: the redactor's
+GitHub pattern, `gh[ousr]_[A-Za-z0-9]{36}`, is the classic 40-character shape, and
+GitHub's installation tokens no longer have it. So a user who pastes an installation
+token, or a tool result that carries one, reaches the model and the log unredacted. The
+brief was to re-read GitHub's documentation first, measure the shape, cover it without
+redacting ordinary text, and ask the owner whether to cover `ghu_` and `ghr_` too.
+
+**What GitHub says, read on 2026-11-14.** The docs page "Generating an installation
+access token for a GitHub App" carries a note. Since 2026-04-27, a staged rollout has
+given newly minted installation tokens a stateless format, `ghs_APPID_JWT`. Three
+changelog posts say more:
+
+- **2026-04-24, the notice.** About 520 characters, varying with the data inside. A
+  GitHub-internal issuer signs the JWT, and clients must not depend on its contents. The
+  prefixes do not change. The change covers installation tokens only, Actions'
+  `GITHUB_TOKEN` included. Format changes for user-to-server tokens are planned but
+  "not in scope yet".
+- **2026-05-15, a per-request header.** A stateless token has two dots after the prefix,
+  and the classic token has none. The post suggests `ghs_[A-Za-z0-9\.\-_]{36,}` for
+  matching both.
+- **2026-10-02, the rollout is complete.** Every newly minted installation token is
+  stateless, and the header is no longer respected after 2026-11-30.
+
+No page gives an example token, defines APPID or names the JWT's algorithm. No later post
+on these pages' related lists changes the format of another prefix.
+
+**Measured before the fix.** The fake was built to that shape: an app id, the standard
+RS256 header, then a payload and a signature in base64url. It took twelve variants, 332
+to 705 characters long. Each passed `redact_output_text` whole, and `check_input_policy`
+let each through. The classic 40-character `ghs_` was redacted and refused. The classic
+pattern stops at the underscore after the app id. The structural JWT shape misses the
+token too, because its `\b` before `eyJ` fails after an underscore.
+
+**The owner's two choices.**
+
+- **The pattern.** Three candidates were measured against the twelve fakes, five settings
+  around a token, eight lines of code and prose that name `ghs_`, and five hostile
+  megabytes. GitHub's suggestion took every fake whole. It also took three of the eight
+  lines: a variable named `ghs_installation_access_token_for_the_release_job`, a method
+  call and a file name. Since the vendor list refuses inputs, a `write` carrying any of
+  them would be refused. It also took a sentence's final period. A strict JWT shape,
+  with a numeric app id and `eyJ` on the header and the payload, was as clean, but it
+  depends on the contents GitHub says not to rely on. **The owner chose the two-dot
+  structural pattern**: three base64url runs of at least 20 characters joined by two
+  dots, and nothing about what the JWT holds.
+- **The prefixes.** **All four `gh[ousr]_`**, the set the classic pattern covers. The
+  two-dot tail is what anchors the match, so the wider prefix costs nothing on ordinary
+  text, and GitHub says user-to-server tokens are next. The other choices were `ghs_`
+  alone, and `ghs_` with `ghu_`.
+
+**Found while building it.**
+
+- **Linearity needs a lookbehind.** Without one, every `ghs_` inside one long run of token
+  characters is a start that scans to the end of the run. That took 99 s on a megabyte of
+  `ghs_1_eyJ` repeated, against 0.03 s with `(?<![A-Za-z0-9_-])` in front. Possessive
+  quantifiers changed nothing measurable, so they were left out.
+- **A plain lookbehind misses escaped tokens.** A URL-encoded token (`%3Dghs_...`), and a
+  JSON-escaped one after `\n`, have a token character before the prefix. The classic
+  pattern has always caught those. So the lookbehind also lets a token character through
+  when it closes `%XX`, `\n`, `\r` or `\t`. Each such start sits two characters after a
+  `%` or a `\`, which ends every run, so the scan stays linear: 0.03 s on each hostile
+  megabyte, including one built to defeat an escape loosened to its second half.
+- **Order matters.** The segments are base64url, so `ghs_` and 36 alphanumerics can sit
+  inside one, and the classic pattern has no lookbehind. If the classic pattern ran first,
+  it would cut that piece out of the payload, and the rest would be too short to match.
+  So the stateless pattern runs first.
+
+**Found, not fixed: TECHNICAL_DEBT 117.** The linearity test first sent one alphanumeric
+megabyte through `check_input_policy` too, and took 441 s. This pattern is not the cause:
+`redact_output_text` takes 0.008 s on 100 KB of the same text. `_input_leaf`'s URL scan,
+`_URL_RE.findall`, is quadratic on any long run of letters and digits, and takes 4.8 s at
+100 KB. Item 117 records it, with a shape measured standalone: bound the scheme to 32
+characters. That finds every URL the scan finds today and takes 0.05 s on a megabyte.
+The test's long run now carries a `_`, so it measures this pattern alone.
+
+**Found, not changed: the repository's own secret scan has the same gap.** gitleaks
+8.30.1, the version CI pins, was run with its default rules on two scratch files. It
+flagged the classic `ghs_` as `github-app-token`, and found nothing in the stateless
+fake: its JWT rule also needs a word boundary before `eyJ`. So CI would not catch a
+stateless token committed to this repository. A custom rule in `.github/gitleaks.toml`
+would close that, and whether to add one is the owner's call.
+
+**Tests.** `TestTheStatelessGitHubTokenShape` drives the real `redact_output_text` and
+`check_input_policy`, with nothing patched:
+
+- the exact output for each of the four prefixes;
+- the refusal, with the token absent from its reason;
+- six settings around a token: a sentence's end, URL userinfo, JSON, an env line,
+  URL-encoded and JSON-escaped;
+- seven lines of code and prose that name the prefix, which survive on both sides;
+- a classic run inside a segment;
+- five hostile megabytes.
+
+`tests/conftest.py` gains `fake_stateless_github_token()` and a `REDACTION_CASES` row,
+whose needle is the signature, the part a partial match would leave. So the log sinks and
+the derivation check cover the pattern as well. The fake is built from pieces like every
+value in that list, so `.gitleaksignore` stays empty, as it has since #238.
+TECHNICAL_DEBT 52's closure listed `ghs_` among the formats it covered, and it now says
+how that went stale and how batch 260 covers it again.
+
+**Verified.** The full suite on Windows, with `AGENT_WORKSPACE` unset: 9451 passed, 88
+skipped (9539). The pattern is plain `re` with no platform branch, so no WSL run was made.
+10 of 10 mutations were killed, each by the test written for it: the pattern deleted,
+the lookbehind dropped, the escapes refused, the prefix narrowed to `ghs_`, the floor
+lowered to one, a dot let into the runs, the dots no longer required, the classic
+pattern moved first, and each escape loosened to its second half. ruff is clean. bandit
+1.9.4 reports no finding the baseline lacks, and no baseline count grew. gitleaks 8.30.1
+on an export of the tracked files finds nothing. The requirements files are unchanged,
+so pip-audit was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.stateless-ghs-redaction.r1e297c60e5bb`.
