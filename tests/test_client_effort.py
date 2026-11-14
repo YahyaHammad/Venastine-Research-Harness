@@ -369,6 +369,20 @@ def test_effort_for_drops_an_unsupported_level(caplog):
     assert any("Dropping effort" in r.getMessage() for r in caplog.records)
 
 
+def test_a_drop_is_said_once_not_once_per_turn(caplog):
+    """Batch 258. effort_for runs once per turn, and a model that refused
+    effort is then recorded as taking none -- so without this every
+    message to it would end in the same warning. Still said for another
+    level or another model."""
+    client = _capable_client("low", "high")
+    with caplog.at_level(logging.WARNING, logger="core.client"):
+        for _ in range(3):
+            client_module.effort_for(client, "ANTHROPIC", "m", "xhigh")
+        client_module.effort_for(client, "ANTHROPIC", "m", "max")
+    drops = [r for r in caplog.records if "Dropping effort" in r.getMessage()]
+    assert len(drops) == 2
+
+
 def test_effort_for_drops_everything_when_the_model_has_no_effort_control():
     client = _capable_client()
     assert client_module.effort_for(client, "ANTHROPIC", "m", "high") is None

@@ -43,6 +43,7 @@ from tui.app import (
     _VIEW_CALL,
     _VIEW_LIVE,
     _VIEW_STORED,
+    PANEL_FINISHED_SHOWN,
     SessionRowsChanged,
     TuiSessions,
     VenastineApp,
@@ -385,20 +386,23 @@ class TestThePanelRows:
             [dataclasses.replace(row, match_count=3)])[0]["label"]
         assert "3✓" in with_matches
 
-    def test_the_panel_shows_live_sessions_only(self, manager):
-        """SS14. A finished session is reachable from the line that
-        started it, so listing it here would spend contested sidebar rows
-        on a second route to one pane."""
+    def test_a_finished_session_stays_under_the_running_ones(self, manager):
+        """SS14 AS AMENDED IN BATCH 258. This asserted the opposite -- a
+        finished row dropped -- and that was the owner's bug: the row left
+        at the moment its end woke the agent, so it seemed the next turn
+        had taken it, and nothing on screen said which had finished."""
         app = _bare_app()
         _start(manager, command="pytest -q")
         rows = manager.rows()
         import dataclasses
-        rows.append(dataclasses.replace(rows[0], id="s99", state=ss.EXITED))
+        rows.append(dataclasses.replace(rows[0], id="s99", state=ss.EXITED,
+                                        return_code=0, finished_mono=1.0))
 
         app.refresh_session_panel(rows)
 
         shown = app._session_panel_widget.show.call_args[0][0]
-        assert [r["id"] for r in shown] == ["s1"]
+        assert [r["id"] for r in shown] == ["s1", "s99"]
+        assert [r["status"] for r in shown] == ["running", "done"]
 
 
 class TestThePanelWidget:
@@ -435,6 +439,152 @@ class TestThePanelWidget:
         """Metadata crosses as text, so the message does too."""
         assert SessionSelected("s1").session_id == "s1"
         assert CallSelected("session", "c1").kind == "session"
+
+
+# ---------------------------------------------------------------------------
+# ---- batch 258: what finished, and how -------------------------------------
+# ---------------------------------------------------------------------------
+
+
+def _drawn(panel) -> list[str]:
+    """The panel's rows as drawn, before the compositor crops them --
+    test_tui.py's `_panel_rows(panel)`, for its reason: a row that is too
+    wide must come back too wide."""
+    return panel.render().plain.split("\n")
+
+
+class TestTheFinishedRows:
+    """SS14 as amended in batch 258: every running session, then the five
+    most recent finished ones, newest first, each saying how it ended.
+
+    The owner's report was that a background session left the panel "on
+    the next turn". Measured with the real app and a scripted model, it
+    stayed through two more model calls, a tool call and the wait after
+    the turn; it left when it ENDED, which SS14 then said it should -- and
+    its end is the wake that starts the next turn, so the two arrived
+    together. The fault was the rule, so the rule is what changed.
+    """
+
+    def test_the_cap_is_the_owners_five(self):
+        assert PANEL_FINISHED_SHOWN == 5
+
+    def test_the_five_most_recent_show_newest_first(self, manager):
+        """By when each ENDED, not by id: start order is the order the
+        rows arrive in, and it is not the order sessions finish in."""
+        import dataclasses
+        app = _bare_app()
+        _start(manager)
+        running = manager.rows()[0]
+        ends = {"s2": 5.0, "s3": 1.0, "s4": 7.0, "s5": 2.0, "s6": 6.0,
+                "s7": 3.0, "s8": 4.0}
+        rows = [running] + [
+            dataclasses.replace(running, id=sid, state=ss.EXITED,
+                                return_code=0, finished_mono=end)
+            for sid, end in ends.items()]
+
+        app.refresh_session_panel(rows)
+
+        shown = app._session_panel_widget.show.call_args[0][0]
+        assert [r["id"] for r in shown] == ["s1", "s4", "s6", "s2", "s8",
+                                            "s7"]
+
+    def test_a_running_session_is_never_capped(self, manager):
+        """The cap is on FINISHED rows. What is running is what ctrl+b can
+        stop, and a panel that hid one would disagree with its picker."""
+        import dataclasses
+        app = _bare_app()
+        _start(manager)
+        running = manager.rows()[0]
+        rows = [dataclasses.replace(running, id=f"s{n}") for n in range(1, 8)]
+
+        app.refresh_session_panel(rows)
+
+        assert len(app._session_panel_widget.show.call_args[0][0]) == 7
+
+    @pytest.mark.parametrize("state, code, status, outcome", [
+        (ss.RUNNING, None, "running", ""),
+        (ss.STARTING, None, "running", ""),
+        (ss.EXITED, 0, "done", "0"),
+        (ss.EXITED, 2, "failed", "2"),
+        (ss.EXITED, None, "failed", "exited"),
+        (ss.KILLED, 137, "failed", "killed"),
+        (ss.TIMED_OUT, 137, "failed", "timed out"),
+        (ss.FAILED, None, "failed", "failed"),
+    ])
+    def test_each_ending_reads_as_itself(self, manager, state, code, status,
+                                         outcome):
+        """`done` is an exit of 0 and nothing else; the outcome tells the
+        failures apart, with the code itself where there is one."""
+        import dataclasses
+        _start(manager)
+        row = dataclasses.replace(manager.rows()[0], state=state,
+                                  return_code=code)
+        drawn = _panel_rows([row])[0]
+        assert (drawn["status"], drawn["outcome"]) == (status, outcome)
+
+    def test_a_row_records_when_its_session_ended(self, manager,
+                                                  session_starter):
+        """The order above is by `finished_mono`, so the manager has to
+        put it on the row -- None while running, set once it ends."""
+        import time
+        _start(manager)
+        assert manager.rows()[0].finished_mono is None
+        session_starter.started[-1]["process"].exit(0)
+        deadline = time.monotonic() + 5
+        while manager.rows()[0].state in ss.LIVE_STATES:
+            assert time.monotonic() < deadline, "the session never ended"
+            time.sleep(0.01)
+        assert manager.rows()[0].finished_mono is not None
+
+    def test_the_widget_draws_the_three_marks(self):
+        """The research panel's marks and roles (E14), so the sidebar's
+        two progress lists read as one family. A row with no status is a
+        running one, which is every row a pre-258 caller sends."""
+        panel = SessionPanel()
+        panel.show([{"id": "s1", "label": "s1 a", "status": "running"},
+                    {"id": "s2", "label": "s2 b", "status": "done",
+                     "outcome": "0"},
+                    {"id": "s3", "label": "s3 c", "status": "failed",
+                     "outcome": "2"},
+                    {"id": "s4", "label": "s4 d"}])
+        marks = [line[0] for line in _drawn(panel)[2:6]]
+        assert marks == ["▸", "☑", "☒", "▸"]
+
+    @pytest.mark.parametrize("outcome", ["0", "137", "killed", "timed out"])
+    def test_the_outcome_is_never_cut(self, outcome):
+        """The outcome is the half a finished row exists to show, so the
+        command gives way to it -- and the row still fits the box."""
+        from rich.cells import cell_len
+        panel = SessionPanel()
+        panel.show([{"id": "s12",
+                     "label": "s12 docker compose up --build --wait",
+                     "status": "failed", "outcome": outcome}])
+        row = _drawn(panel)[2]
+        assert row.endswith(f" {outcome}")
+        assert row.startswith("☒ s12")
+        assert cell_len(row) <= SessionPanel.WIDTH
+
+    @pytest.mark.asyncio
+    async def test_a_session_that_ends_stays_on_the_panel(
+            self, manager, session_starter):
+        """The owner's report, end to end: the real sink, the real
+        handler, the real widget. A session that ends is still on screen
+        afterwards, now saying it is done."""
+        from tests.conftest import settle
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            _start(manager, command="npm ci")
+            assert await settle(pilot, lambda: app._session_panel.display)
+            assert _drawn(app._session_panel)[2].startswith("▸ s1")
+
+            session_starter.started[-1]["process"].exit(0)
+            assert await settle(
+                pilot,
+                lambda: _drawn(app._session_panel)[2].startswith("☑")), \
+                "the finished session left the panel"
+            assert app._session_panel.display is True
+            assert _drawn(app._session_panel)[2] == "☑ s1 npm ci 0"
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +627,11 @@ class TestTheSink:
 
         assert app.posted[-1].rows, "the dead row was dropped before the UI"
         app.on_session_rows_changed(app.posted[-1])
-        assert app._session_panel_widget.show.call_args[0][0] == []
+        # Batch 258: the handler keeps a finished row now, MARKED -- it
+        # is still the one deciding what the panel shows.
+        shown = app._session_panel_widget.show.call_args[0][0]
+        assert [(r["id"], r["status"], r["outcome"]) for r in shown] == [
+            ("s1", "failed", "killed")]
 
     @pytest.mark.asyncio
     async def test_mounting_registers_it_and_unmounting_drops_it(self,

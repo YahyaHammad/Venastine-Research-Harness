@@ -351,10 +351,14 @@ def test_an_empty_anthropic_key_is_refused_before_a_client_exists(
     assert built == [{"api_key": "sk-test-not-real"}]
 
 
-def test_an_empty_key_elsewhere_still_reaches_its_sdk(_in_tmp, monkeypatch):
-    """The refusal is ANTHROPIC's alone, the owner's choice in batch 234:
-    an OpenAI-compatible entry with no key is handed to its SDK unchanged,
-    which decides, as before."""
+def test_an_empty_key_elsewhere_is_sent_as_the_placeholder(_in_tmp,
+                                                           monkeypatch):
+    """The REFUSAL is still ANTHROPIC's alone (batch 234). What changed in
+    batch 258, the owner's choice: an OpenAI-compatible entry with no key
+    used to be handed to its SDK unchanged, "which decides" -- and openai
+    3.x decides by refusing "" while the client is built, which broke the
+    keyless local server. It is sent KEYLESS now; the real SDK's half is
+    `test_an_empty_key_builds_a_REAL_client_for_a_local_server`."""
     import sys
 
     from core import client as client_module
@@ -367,7 +371,8 @@ def test_an_empty_key_elsewhere_still_reaches_its_sdk(_in_tmp, monkeypatch):
                    "is_v1_compatible": True}}), encoding="utf-8")
 
     client_module.api_initialization("LOCAL")
-    assert built == [{"base_url": "http://127.0.0.1:1/v1", "api_key": ""}]
+    assert built == [{"base_url": "http://127.0.0.1:1/v1",
+                      "api_key": client_module.KEYLESS}]
 
 
 # ---------------------------------------------------------------------------

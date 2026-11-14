@@ -113,6 +113,7 @@ RESET_ELSEWHERE = {
     ("core/client.py", "_context_window_cache"): "clear_client_cache",
     ("core/client.py", "_context_window_failures"): "clear_client_cache",
     ("core/client.py", "_effort_levels_cache"): "clear_client_cache",
+    ("core/client.py", "_effort_drops_said"): "clear_client_cache",
     ("core/session.py", "_overrides"): "clear_client_cache",
     ("core/config_loader.py", "_state"): "clear_config_loader_state",
     ("core/reasoning/scholar.py", "_cache"): "clear_scholar_cache",

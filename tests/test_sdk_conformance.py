@@ -1178,3 +1178,223 @@ def test_the_plan_mock_runs_on_the_http_stack_production_uses(monkeypatch):
 
         mocked, production = stack(sdk), stack(default)
     assert mocked == production, (mocked, production)
+
+
+# ---------------------------------------------------------------------------
+# ---- batch 258: an OpenAI-compatible server, on the REAL sdk ---------------
+# ---------------------------------------------------------------------------
+#
+# The owner's report: llama3.2:3b on a local Ollama answered every turn
+# "404 page not found", and the reporter suspected the model's tool support.
+# Measured on a real Ollama 0.32.15, the address was missing /v1 -- the
+# server's page-not-found is PLAIN TEXT, while everything it says about a
+# model (missing, no tools, no thinking) is JSON. What the harness reads off
+# that difference is the openai SDK's own `body` and `request`, so it is
+# held here against the real package, with httpx2's MockTransport standing
+# in for the server: no network, no credential.
+
+_LOCAL = "LOCAL"
+_LOCAL_MODEL = "llama3.2:3b"
+_NO_ROUTE = b"404 page not found"
+_NO_THINKING = {"error": {
+    "message": '"llama3.2:3b" does not support thinking',
+    "type": "invalid_request_error", "param": None, "code": None}}
+
+
+def _chat_sse(text="hello") -> bytes:
+    """A Chat Completions stream as an OpenAI-compatible server sends it."""
+    chunks = [
+        {"id": "c1", "object": "chat.completion.chunk", "created": 0,
+         "model": _LOCAL_MODEL, "choices": [{
+             "index": 0, "delta": {"role": "assistant", "content": text},
+             "finish_reason": None}]},
+        {"id": "c1", "object": "chat.completion.chunk", "created": 0,
+         "model": _LOCAL_MODEL, "choices": [{
+             "index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    return ("".join(f"data: {json.dumps(c)}\n\n" for c in chunks)
+            + "data: [DONE]\n\n").encode()
+
+
+@contextlib.contextmanager
+def _real_v1(monkeypatch, answer, base_url="http://localhost:11434"):
+    """The REAL openai SDK as `api_initialization` builds it for an
+    is_v1_compatible entry, against a transport that calls `answer(request)`
+    for each request. Yields (sdk, seen requests, core.client)."""
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {
+        _LOCAL: {"is_v1_compatible": True, "supports_stream_usage": False}})
+    with real_package("openai", "httpx"):
+        import httpx2
+        import openai
+
+        import core.client as client
+
+        seen = []
+
+        def handler(request):
+            seen.append(request)
+            status, content = answer(request)
+            if isinstance(content, dict):
+                return httpx2.Response(status, json=content)
+            headers = ({"content-type": "text/event-stream"}
+                       if status == 200 else {"content-type": "text/plain"})
+            return httpx2.Response(status, content=content, headers=headers)
+
+        sdk = openai.OpenAI(
+            base_url=base_url, api_key="unused", max_retries=0,
+            http_client=httpx2.Client(transport=httpx2.MockTransport(handler)))
+        yield sdk, seen, client
+
+
+def _local_turn(client, sdk, effort=None):
+    tokens = list(client.call_model_stream(
+        sdk, _LOCAL, _LOCAL_MODEL, [{"role": "user", "content": "hello"}],
+        "sys", [], effort=effort))
+    return tokens[-1].final_response
+
+
+def test_a_route_miss_on_the_REAL_sdk_says_it_is_the_address(monkeypatch):
+    """The screenshot's error, reproduced: an API_URL without /v1. The
+    message keeps what the SDK said and adds where it went and what that
+    means -- because every surface prints this exception as it is."""
+    from core import provider_errors
+
+    with _real_v1(monkeypatch, lambda r: (404, _NO_ROUTE)) as (sdk, seen,
+                                                              client):
+        with pytest.raises(Exception) as info:
+            _local_turn(client, sdk)
+    exc = info.value
+    assert type(exc).__name__ == "NotFoundError"
+    assert exc.status_code == 404, "the status classification reads"
+    assert exc.body == "404 page not found", \
+        "the SDK no longer keeps an unparsed body as the string it was"
+    text = str(exc)
+    assert "nothing answers at http://localhost:11434/chat/completions" \
+        in text
+    assert "/v1" in text and "API_URL" in text
+    assert len(seen) == 1, "a route miss is not resent"
+    assert provider_errors.route_miss(exc) == \
+        "http://localhost:11434/chat/completions"
+
+
+def test_a_missing_model_on_the_REAL_sdk_is_left_as_it_was(monkeypatch):
+    """The other 404: the address is right and the server says, in JSON,
+    that it has no such model. That sentence is already the answer, and
+    telling the user their address is wrong would be false."""
+    missing = {"error": {"message": "model 'llama3.2:3b' not found",
+                         "type": "not_found_error", "param": None,
+                         "code": None}}
+    with _real_v1(monkeypatch, lambda r: (404, missing),
+                  base_url="http://localhost:11434/v1") as (sdk, _, client):
+        with pytest.raises(Exception) as info:
+            _local_turn(client, sdk)
+    assert "not found" in str(info.value)
+    assert "nothing answers" not in str(info.value)
+
+
+def test_the_window_lookup_names_the_address_when_models_is_missing(
+        monkeypatch, caplog):
+    """The screenshot's FIRST line. Both routes the lookup tries answered
+    page-not-found; `/models` is the one every OpenAI-compatible server
+    has, so the warning says the address."""
+    import logging
+
+    with _real_v1(monkeypatch, lambda r: (404, _NO_ROUTE)) as (sdk, seen,
+                                                              client):
+        with caplog.at_level(logging.WARNING, logger="core.client"):
+            window, authoritative = client.context_window_for(
+                sdk, _LOCAL, _LOCAL_MODEL)
+    assert (window, authoritative) == (None, False)
+    assert [r.url.path for r in seen] == ["/models/llama3.2:3b", "/models"]
+    said = " ".join(r.getMessage() for r in caplog.records)
+    assert "nothing answers at http://localhost:11434/models" in said
+
+
+def test_a_refused_effort_is_dropped_and_the_turn_answers(monkeypatch,
+                                                         caplog):
+    """The wall after /v1 (owner's choice: drop it and resend once). A
+    model that cannot reason refuses `reasoning_effort` with a 400; the
+    same request without it is sent once, the turn answers, and the model
+    is recorded as taking no effort so the next turn sends none."""
+    import logging
+
+    def answer(request):
+        sent = json.loads(request.content)
+        return ((400, _NO_THINKING) if "reasoning_effort" in sent
+                else (200, _chat_sse("hi there")))
+
+    with _real_v1(monkeypatch, answer,
+                  base_url="http://localhost:11434/v1") as (sdk, seen,
+                                                            client):
+        with caplog.at_level(logging.WARNING, logger="core.client"):
+            response = _local_turn(client, sdk, effort="high")
+            levels = client._effort_levels_cache.get((_LOCAL, _LOCAL_MODEL))
+    sent = [json.loads(r.content) for r in seen]
+    assert [s.get("reasoning_effort") for s in sent] == ["high", None]
+    assert sent[0]["messages"] == sent[1]["messages"], \
+        "the resend is the same request, less the effort"
+    assert response.text == "hi there"
+    assert levels == [], "the next turn would send the effort again"
+    said = " ".join(r.getMessage() for r in caplog.records)
+    assert "refused reasoning effort 'high'" in said
+    assert "model_effort_levels" in said
+
+
+def test_a_resend_that_fails_too_reports_the_first_refusal(monkeypatch):
+    """`refuses_effort` matches widely, and this is what makes that safe: a
+    resend that ALSO fails means the effort was not the cause, so nothing
+    is recorded and the user sees the refusal their settings produced."""
+    def answer(request):
+        sent = json.loads(request.content)
+        if "reasoning_effort" in sent:
+            return 400, _NO_THINKING
+        return 400, {"error": {"message": "context too long",
+                               "type": "invalid_request_error"}}
+
+    with _real_v1(monkeypatch, answer,
+                  base_url="http://localhost:11434/v1") as (sdk, seen,
+                                                            client):
+        with pytest.raises(Exception) as info:
+            _local_turn(client, sdk, effort="high")
+        levels = client._effort_levels_cache.get((_LOCAL, _LOCAL_MODEL))
+    assert "does not support thinking" in str(info.value)
+    assert len(seen) == 2
+    assert levels is None, "a failed resend proved nothing about effort"
+
+
+def test_a_request_with_no_effort_is_never_resent(monkeypatch):
+    """The resend is about the effort the request CARRIED. Without one, a
+    400 that mentions reasoning is the provider's answer and stands."""
+    with _real_v1(monkeypatch, lambda r: (400, _NO_THINKING),
+                  base_url="http://localhost:11434/v1") as (sdk, seen,
+                                                            client):
+        with pytest.raises(Exception):
+            _local_turn(client, sdk)
+    assert len(seen) == 1
+
+
+def test_an_empty_key_builds_a_REAL_client_for_a_local_server(monkeypatch):
+    """openai 3.x refuses an empty api_key while the client is BUILT --
+    "Missing credentials ... OPENAI_API_KEY" -- which broke the keyless
+    local server this harness says needs no key. `api_initialization`
+    sends a placeholder instead, and only for an empty key."""
+    monkeypatch.setattr("core.client.load_provider_data", lambda: {
+        _LOCAL: {"is_v1_compatible": True, "API_KEY": "",
+                 "API_URL": "http://localhost:11434/v1"},
+        "KEYED": {"is_v1_compatible": True, "API_KEY": "sk-test-not-real",
+                  "API_URL": "http://localhost:11434/v1"}})
+    with real_package("openai", "httpx"):
+        import openai
+
+        import core.client as client
+
+        with pytest.raises(openai.OpenAIError):
+            openai.OpenAI(base_url="http://localhost:11434/v1", api_key="")
+        client._client_cache.clear()
+        try:
+            keyless = client.api_initialization(_LOCAL)
+            keyed = client.api_initialization("KEYED")
+        finally:
+            client._client_cache.clear()
+    assert keyless.api_key == client.KEYLESS
+    assert keyed.api_key == "sk-test-not-real", "a real key is untouched"
