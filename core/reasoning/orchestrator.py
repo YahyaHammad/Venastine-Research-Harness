@@ -225,7 +225,10 @@ def _translate(pass_id: str, stream, corpus=None):
                                 second rendering of a question already on
                                 screen is not observability.
       notice                    a pass's compaction notices, forwarded as
-                                trace LINES. M6 makes these backstop-only,
+                                trace LINES -- and since §95 its
+                                reasoning-only notices, labelled `notice`
+                                rather than `compaction` (RO8). M6 makes
+                                the compaction ones backstop-only,
                                 but "rare" is not "silent" -- §21's rule
                                 has no exception for the pipeline, and a
                                 backstop fold rewrites what the REST of
@@ -266,9 +269,15 @@ def _translate(pass_id: str, stream, corpus=None):
                 yield PipelineEvent(kind="pass_activity", pass_id=pass_id,
                                     chars=streamed)
         if event.notice:
+            # ROADMAP_v3 §95 (RO8). Labelled by what the notice IS: the loop
+            # emits a reasoning-only notice inside a pass too, and the trace
+            # called every notice a compaction.
+            what = ("compaction"
+                    if str(event.notice.get("kind", "")).startswith(
+                        "compaction") else "notice")
             yield PipelineEvent(
                 kind="trace_line",
-                text=f"compaction during {pass_id}: {event.notice['text']}")
+                text=f"{what} during {pass_id}: {event.notice['text']}")
         if event.tool_call_start:
             name = event.tool_call_start.get("name")
             names[event.tool_call_start.get("id")] = name

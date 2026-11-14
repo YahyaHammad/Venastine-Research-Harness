@@ -660,6 +660,36 @@ def _decode_harness(raw):
     return value if isinstance(value, dict) and value.get("kind") else None
 
 
+def starts_turn(row: dict) -> bool:
+    """Whether this row OPENS a turn: a user row, unless the harness wrote it
+    inside one (ROADMAP_v3 §95, RO3).
+
+    A turn starts at a user message -- the wrapper adds one, then the loop
+    appends assistant and tool rows until it stops -- and six readers were
+    written on that rule: the turn list behind `completed_turns`, the fold
+    boundaries and the pin cap in core/compaction.py, the request a
+    mid-turn watermark re-adds, and the row a failure is recorded on, here
+    and in core/memory.py. Since §95 the loop can write a user row
+    INSIDE a turn, to ask the model to follow a reasoning-only reply, and
+    such a row carries `mid_turn: true` in its harness record. Read as a
+    turn start, it would move the current-turn floor past the turn's own
+    earlier steps while the turn is still running -- the floor the mid-turn
+    compaction valve calls safe by construction -- and a mid-turn
+    watermark would re-add it in place of the person's request.
+
+    Takes either shape: an `_ordered_rows` dict, whose `harness` is the
+    stored JSON string, or a neutral message, whose `harness` is decoded.
+    `is True`, A29's rule: a record carrying a quoted "true" still opens a
+    turn, as every harness row did before §95.
+    """
+    if row.get("role") != "user":
+        return False
+    harness = row.get("harness")
+    if isinstance(harness, str):
+        harness = _decode_harness(harness)
+    return not (isinstance(harness, dict) and harness.get("mid_turn") is True)
+
+
 def _decode_images(raw):
     """A tool row's stored images (ROADMAP_v3 §81, IM2), or None.
 
@@ -874,10 +904,10 @@ def _turn_opener_index(rows: list[dict], span: list[dict]) -> list[int]:
     """
     if not span or len(span) >= len(rows):
         return []
-    if rows[len(span)]["role"] == "user":
+    if starts_turn(rows[len(span)]):
         return []
     for index in range(len(span) - 1, -1, -1):
-        if span[index]["role"] == "user":
+        if starts_turn(span[index]):
             return [index]
     return []
 
@@ -995,13 +1025,14 @@ def turn_start_ids(thread_id: UUID) -> list[UUID]:
     """Ids of the rows that BEGIN each turn, oldest first.
 
     A turn starts at a user message: the wrapper adds one, then the loop
-    appends assistant and tool rows until it stops. §21's M4 needs this
+    appends assistant and tool rows until it stops. `starts_turn` says
+    which user rows, since §95 wrote one inside a turn. §21's M4 needs this
     because a fold boundary that lands anywhere else can separate an
     assistant message from its tool results, and a tool_result with no
     preceding tool_use is an HTTP 400 on Anthropic -- a hard wire error,
     not a degraded answer. M5's "keep the last N turns" needs it too.
     """
-    return [m["id"] for m in _ordered_rows(thread_id) if m["role"] == "user"]
+    return [m["id"] for m in _ordered_rows(thread_id) if starts_turn(m)]
 
 
 def message_ids_from(thread_id: UUID, message_id: UUID) -> list[UUID]:
@@ -1047,6 +1078,10 @@ def mark_turn_failed(thread_id: UUID, error: str) -> bool:
 
     Returns False for a thread with no user row. Does not stamp
     last_activity_at the way save_message does: a failure is not a message.
+
+    The newest row that STARTS a turn (ROADMAP_v3 §95, RO3), which skips a
+    harness row the loop wrote inside the run -- the run did not start
+    there, and replay draws the failure under the request that did.
     """
     with Session(engine) as session:
         statement = (
@@ -1055,7 +1090,9 @@ def mark_turn_failed(thread_id: UUID, error: str) -> bool:
             .where(MessageLog.role == "user")
             .order_by(MessageLog.created_at.desc(), MessageLog.id.desc())
         )
-        row = session.exec(statement).first()
+        row = next((candidate for candidate in session.exec(statement)
+                    if starts_turn({"role": candidate.role,
+                                    "harness": candidate.harness})), None)
         if row is None:
             return False
         row.error = error

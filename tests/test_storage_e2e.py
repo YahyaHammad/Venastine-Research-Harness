@@ -701,6 +701,36 @@ def test_marking_a_thread_with_no_user_row_changes_nothing(real_storage):
     assert storage.mark_turn_failed(uuid4(), "x") is False
 
 
+def test_an_ask_inside_a_turn_opens_no_turn(real_storage):
+    """ROADMAP_v3 §95 (RO3), on real SQLite, where the harness record is the
+    JSON text its column holds rather than the fake's dict. The loop's ask
+    is a user row INSIDE a turn: the turn list skips it, so completed_turns
+    stays where the turn began, and a failure lands on the request that
+    started the run, not on the ask."""
+    import storage
+    from core.memory import ConversationMemory
+
+    ask = {"kind": "reasoning_only", "mid_turn": True}
+    memory = ConversationMemory()
+    memory.add_user_message("first")
+    memory.add_user_message("second")
+    memory.add_harness_message("[harness] ask", ask)
+    rows = storage._ordered_rows(memory.thread_id)
+
+    assert storage.turn_start_ids(memory.thread_id) == [rows[0]["id"],
+                                                        rows[1]["id"]]
+    assert memory.completed_turns() == 1
+
+    memory.mark_turn_failed("boom")
+    history = storage.archive_history(memory.thread_id)
+    assert history == [
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second", "error": "boom"},
+        {"role": "user", "content": "[harness] ask", "harness": ask},
+    ]
+    assert ConversationMemory(thread_id=memory.thread_id).messages == history
+
+
 def test_a_migrated_column_matches_the_fresh_schema_exactly(real_storage,
                                                             tmp_path):
     """#26's acceptance criterion: a column added by ensure_columns() on a

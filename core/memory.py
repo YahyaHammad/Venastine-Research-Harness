@@ -57,6 +57,7 @@ from storage import (
     pinned_through,
     save_message,
     set_pinned,
+    starts_turn,
     turn_start_ids,
     update_thread_extra,
 )
@@ -366,7 +367,9 @@ class ConversationMemory:
         """
         mark_turn_failed(self.thread_id, error)
         for entry in reversed(self._messages):
-            if entry.get("role") == "user":
+            # The row storage chose (ROADMAP_v3 §95, RO3): a harness row
+            # the loop wrote inside the run did not start it.
+            if starts_turn(entry):
                 entry["error"] = error
                 break
 

@@ -31319,3 +31319,80 @@ in `core/replay.py`.
 
 - **Version:** the branch's beta identity, `0.3.12-b.1.decision-classifier.r221ab7fae163`, so the
   merge releases the next patch.
+
+## Batch 256 -- A reply that was all reasoning: asked about once, in a row that opens no turn (2026-11-14)
+
+**Asked.** The owner reported that on a WSL install one model kept showing tool calls inside its
+thinking spans, and that one span held a bare `</thinking>` which seemed to have gone unparsed.
+The owner asked for the issue to be verified and diagnosed from that install's `app.db` and
+`app.log`, and fixed in a pull request if it was the harness's. Mid-task the owner narrowed it to
+one provider, asked that its API key be neither read nor copied anywhere, and asked that the
+provider and model be named in no tracked file: the report for the provider is kept apart from
+this repository.
+
+**Measured first.** All of it is recorded in ROADMAP_v3 §95's "What was measured".
+
+- **The database** (0.3.13 at `5f695dd`, snapshotted through SQLite's backup API, so the live
+  WAL was never touched). 33 of the provider's 316 turns came back with empty `content`, no
+  `tool_calls`, and the call written in the model's markup inside `reasoning_content`. All 33
+  followed a tool result: 33 of 266 such turns, against 0 of 50 after a person's message. Both
+  screenshots match rows. The `</thinking>` turn is one of the 33, with an answer and a call after
+  the tag, all of it in reasoning.
+- **The harness is faithful to the wire.** Its OpenAI-compatible branch puts only
+  `reasoning_content`/`reasoning` into the record and parses no delimiter. The server splits at the
+  template's own delimiter, which appears in no stored record, so `</thinking>` was the model
+  closing with the wrong tag. Splitting there would have shown the call as text and still not run
+  it.
+- **The harness's part was the silence.** Such a turn ended as `complete`, saying nothing. In a
+  research pass, the JSON retry quoted an empty output, and one recorded model read that as its
+  reasoning being at fault.
+- **The replay, approved by the owner.** The installed client sent two of the smallest failing
+  steps 23 times each way, with HOME redirected and `providers.json` read in place through
+  `AGENT_PROVIDERS_FILE`. Without echoed reasoning, 8 of 23 replies were reasoning-only; with
+  `echoes_reasoning` on, 0 of 23 were. The run cost 510,768 input and 7,743 output tokens, a
+  little over the 300-500k quoted when the owner approved it.
+
+**The owner's decisions**, through the question tool:
+
+- **Run the replay.** If echoing had not fixed it, the deliverable would have been a write-up.
+- **A notice and one ask (RO2, RO5).** Make it visible, ask the model once to make the call
+  properly, and have the research retry say plainly that the reply had reasoning only.
+
+RO1, RO3, RO4 and RO6-RO8 are adopted defaults, recorded as such.
+
+**Built.** Everything is listed under ROADMAP_v3 §95's "Built"; in short:
+
+- the per-run ask and the end notices in `core/loop.py`;
+- `storage.starts_turn` at all six readers that took a user row for a turn start;
+- the CLI and TUI drawing the ask as replay draws it;
+- the empty-reply corrective;
+- the trace label;
+- `reasoning_not_echoed` and its once-per-model WARNING.
+
+**What the turn-start rule caught.** A first sketch wrote the ask as an ordinary harness row.
+Reading the mid-turn compaction valve showed that `completed_turns()` is asked lazily and relies
+on no new user row arriving mid-turn. An ask counted as a turn start would have made the turn's
+own earlier steps foldable while it ran. The same reading found that `_turn_opener_index` would
+re-add the ask instead of the request.
+
+**Verified.**
+
+- 47 tests in `tests/test_reasoning_only.py`, plus one on real SQLite in
+  `tests/test_storage_e2e.py`.
+- The mutation pass: 24 of 24 killed against a green control, with the tree verified clean
+  after each row. M5 (persist before emit) was caught first by a sibling test, so it was re-run
+  against its own pin and killed there too.
+- Full suite in the pinned venv with `AGENT_WORKSPACE` unset: 9270 passed, 88 skipped (9358
+  collected). The first run's two failures were the documentation map missing the RO family, and
+  the known CRLF `config.yaml` left by the branch switch, which is local only.
+- `ruff` clean, `bandit` 0 new against the baseline with no pair grown, `pip-audit` clean on both
+  requirement files, and `gitleaks` clean on an export of the tracked files.
+- A `git grep` for the provider's and model's names, and for the model's own call markup, finds
+  nothing in the tracked tree.
+
+**Not done here.** That provider's `echoes_reasoning` stays unset: it is the owner's file, and the
+owner asked that the key in it not be read. The ask itself is not measured against the live
+provider.
+
+- **Version:** the branch's beta identity, `0.3.13-b.1.reasoning-only-turns.ref49861abfcb`, so the
+  merge releases the next patch.

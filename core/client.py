@@ -198,6 +198,25 @@ def accepts_images(provider_name: str) -> bool:
     return isinstance(entry, dict) and entry.get("accepts_images") is True
 
 
+def reasoning_not_echoed(provider_name: str) -> bool:
+    """ROADMAP_v3 §95 (RO7). Whether this is an OpenAI-compatible provider
+    whose reasoning does NOT go back to it on the next request.
+
+    The question a reasoning-only reply raises: on that wire `echoes_reasoning`
+    is opt-in (§44 WS4), and measured on one provider, a model that never saw
+    its earlier reasoning wrote its tool call inside its reasoning on 8 of 23
+    replays of a tool-loop step, against 0 of 23 with the reasoning sent back.
+    Read with the same truthiness `call_model_stream` gives both flags, so
+    this answers what the request will actually do, not what the file
+    should have said. Every other provider sends its own reasoning back by
+    its own route, and answers False.
+    """
+    entry = load_provider_data().get(provider_name, {})
+    return (isinstance(entry, dict)
+            and bool(entry.get("is_v1_compatible", False))
+            and not entry.get("echoes_reasoning", False))
+
+
 # ============================================================================
 # ---- Normalized response shape ---------------------------------------------
 # ============================================================================

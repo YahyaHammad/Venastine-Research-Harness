@@ -204,6 +204,21 @@ def _check(raw_text: str, validate: Optional[Callable]) -> None:
 
 
 def _parse_corrective(error: ValueError, raw_text: str) -> str:
+    if not raw_text.strip():
+        # ROADMAP_v3 §95 (RO6). Nothing to quote, and quoting nothing under
+        # "Start of your failed output" was measured to mislead: a model
+        # whose whole reply had arrived as reasoning read the empty quote
+        # as its reasoning being the invalid output, and resolved to stop
+        # reasoning. Say what the harness actually received.
+        return (
+            "Your last response contained no text at all, so there was no "
+            "JSON to parse. Anything written only in your reasoning is not "
+            "part of the response, and a tool call written there is not "
+            "run.\n\n"
+            "Respond again with ONLY valid JSON -- no preamble, no prose, "
+            "no code fence, just the JSON your original instructions "
+            "asked for."
+        )
     return (
         f"Your last response did not parse as valid JSON.\n\n"
         f"Parse error:\n{error}\n\n"

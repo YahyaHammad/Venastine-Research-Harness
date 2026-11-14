@@ -1037,9 +1037,12 @@ PROCESS_MEMOS = (
                          "_read_warned", "_yield_logged"),
      _clear("_context_window_warned", "_floor_warned", "_read_warned",
             "_yield_logged")),
-    # The headless and image notices, deduplicated on what they report.
-    ("core.loop", ("_headless_notices_shown", "_image_notices_shown"),
-     _clear("_headless_notices_shown", "_image_notices_shown")),
+    # The headless and image notices, deduplicated on what they report, and
+    # §95's echo hint, logged once per (provider, model).
+    ("core.loop", ("_headless_notices_shown", "_image_notices_shown",
+                   "_reasoning_only_warned"),
+     _clear("_headless_notices_shown", "_image_notices_shown",
+            "_reasoning_only_warned")),
     # What register_all() recorded so unregister_all() removes exactly that.
     ("mcp_client.registration", ("_registered",), _clear("_registered")),
     # D15's per-tool approval defaults for dynamically named tools, through
@@ -1420,6 +1423,7 @@ class FakeMemory:
         # this class is for is the add_* path the loop took.
         self.lineage = lineage
         self.user_messages = []
+        self.harness_messages = []  # list of (text, harness record)
         self.assistant_messages = []
         self.tool_results = []  # list of (tool_call_id, result)
         self.attached_images = []  # list of (tool_call_id, media_type, data)
@@ -1442,6 +1446,13 @@ class FakeMemory:
 
     def add_user_message(self, text):
         self.user_messages.append(text)
+
+    def add_harness_message(self, text, harness):
+        """ROADMAP_v3 §95 (RO2): the loop writes one inside a turn to ask
+        the model to follow a reasoning-only reply. Recorded beside the
+        person's messages rather than among them, as the real row is marked
+        apart from them."""
+        self.harness_messages.append((text, harness))
 
     def mark_turn_failed(self, error):
         self.failures.append(error)
@@ -1773,8 +1784,12 @@ class FakeStorage:
             [r for r in rows[start:end] if not r["pinned"]])
 
     def turn_start_ids(self, thread_id):
+        """Mirrors storage.turn_start_ids, through production's own
+        `starts_turn` (ROADMAP_v3 §95, RO3) -- a pure function that reads
+        this side's decoded harness dict as it reads production's string."""
+        from storage import starts_turn
         return [r["id"] for r in self._messages_by_thread.get(thread_id, [])
-                if r["role"] == "user"]
+                if starts_turn(r)]
 
     def message_ids_from(self, thread_id, message_id):
         rows = self._messages_by_thread.get(thread_id, [])
@@ -1795,9 +1810,10 @@ class FakeStorage:
 
     def mark_turn_failed(self, thread_id, error):
         """Mirrors storage.mark_turn_failed (batch 91): the thread's NEWEST
-        user row, and False when it has none."""
+        row that starts a turn (§95, RO3), and False when it has none."""
+        from storage import starts_turn
         for row in reversed(self._messages_by_thread.get(thread_id, [])):
-            if row["role"] == "user":
+            if starts_turn(row):
                 row["error"] = error
                 return True
         return False

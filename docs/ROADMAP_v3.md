@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
 - **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
@@ -3061,6 +3062,96 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §95. A reply that was all reasoning
+
+**Added and built in batch 256, from the owner's report** (2026-11-14). On a WSL install, one
+model served through an OpenAI-compatible provider kept showing tool calls inside its thinking
+spans, and one span held a bare `</thinking>` the owner read as a tag the
+harness had failed to parse. The owner asked for the issue to be verified and diagnosed from the
+install's `app.db` and `app.log`, and fixed in a pull request if it was the harness's.
+
+### What was measured (2026-11-14)
+
+- **The install's own database** (0.3.13, `5f695dd`). 316 assistant turns ran on that provider. 33
+  came back with empty `content`, no `tool_calls`, and the model's tool call written out in its
+  own call markup inside `reasoning_content`. Every one followed a tool result: 33 of the 266 turns that did, against 0
+  of the 50 that followed a person's message. The owner's `</thinking>` turn is one of the 33: the
+  model closed its reasoning with that tag, then wrote an answer and a call, and all of it arrived
+  as reasoning. `app.log` holds nothing past the HTTP 200s.
+- **The harness reads the wire's fields and nothing else.** `call_model_stream`'s
+  OpenAI-compatible branch appends `delta.reasoning_content` (or `delta.reasoning`) to the
+  reasoning and `delta.content` to the text, and parses no delimiter. The server splits the
+  model's output at the delimiter its template uses -- `</think>` appears in none of the 316
+  stored records, so the server removes it -- and turns call markup into `tool_calls` only after
+  it. `</thinking>` is not that delimiter. Splitting at it would have made the call visible text,
+  and the call still would not have run.
+- **What the loop did with such a turn.** D20 persisted it, `if not response.tool_calls` ended
+  the turn as `complete`, and nothing was said to the person or the model. In chat the person saw
+  a thinking span and then the turn's footer. In a research pass, the JSON retry quoted an empty
+  "Start of your failed output". In one recorded turn the model read that quote as its reasoning
+  being the invalid output, and resolved to stop reasoning.
+- **A live replay, with the owner's approval.** It used the installed 0.3.13's own client, with
+  the owner's key read in place and never copied or printed. Two of the smallest failing steps
+  were each sent 23 times each way: a subagent's at 10 messages and another subagent's at 9.
+  Without the model's earlier reasoning echoed back, 8 of 23 replies were reasoning-only, in the
+  recorded shape. With `echoes_reasoning` on, 0 of 23 were (one-sided Fisher p = 0.002). The run
+  cost 46 calls, 510,768 input tokens and 7,743 output tokens. The installed code rebuilt the
+  system prompt rather than reading it from the run, so the replay matches the recorded requests
+  in their messages and tools, and only approximately in their prompts.
+
+### Decisions (RO1-RO8)
+
+| # | Decision |
+|---|---|
+| **RO1** | **A reasoning-only reply** is readable reasoning, through replay's own reader, with no text (whitespace counts as none) and no tool call. A step whose record holds only `redacted_thinking` or a signature lost nothing anyone could read, and completes exactly as before |
+| **RO2** | **The loop asks once per run** (owner: a notice and one nudge). A harness row says nothing ran and that a call written inside reasoning is not run, and the next step runs. A second reasoning-only reply, or one on the last step `max_steps` allows, ends the turn as `complete` with a notice. The ask is a billed step and counts against `max_steps`; the budget stop stays above it, so an exhausted turn is not asked |
+| **RO3** | **The ask is a user row that opens no turn.** Its harness record carries `mid_turn: true`, and `storage.starts_turn` is the one rule for which user rows open a turn. Six readers had spelled it `role == "user"`, and each now calls it: the turn list behind `completed_turns`, `compactable_span`'s fold boundaries, the pin cap, the request a cut turn reopens with, and the row a failure is recorded on, in storage and in memory. Read as a turn start, the ask moves the current-turn floor past the turn's own earlier steps while the turn runs -- the floor the mid-turn compaction valve calls safe by construction -- and a cut turn would reopen with the ask instead of the request |
+| **RO4** | **Nothing is parsed out of reasoning.** Call markup there is not run, and `</thinking>` is not split at. Reasoning is not a commitment, the markup is each model's own, and a call run from it would be one the model never made through the interface. Measured, the split would not have run the call anyway |
+| **RO5** | **Shown where it happened, the way replay shows it.** The ask's first line is the live notice's text: the TUI draws it in the `wake` role and the CLI prints it as `Harness:`, which is how replay draws the row. The CLI prints the step the notice describes first, and `finish` does not print it again. The end notice is an ordinary system line and, like every notice, is not replayed |
+| **RO6** | **The research JSON retry calls an empty reply empty.** It says there was no text at all, that reasoning is not part of the response, and that a call written there is not run, instead of quoting nothing under "Start of your failed output" |
+| **RO7** | **`echoes_reasoning` stays opt-in per provider**, so §44 WS4 is unchanged. On an OpenAI-compatible provider that does not echo, the first reasoning-only reply logs one WARNING per (provider, model) naming the flag. The flag is read with the truthiness the request itself gives it |
+| **RO8** | **The pipeline trace labels a notice by what it is.** A compaction notice keeps `compaction during <pass>`, and every other notice reads `notice during <pass>`. Before, every notice was called a compaction, `todo_write`'s and `approval_reused` included |
+
+RO1, RO3, RO4 and RO6-RO8 are adopted defaults the owner may overturn. RO2 and RO5's shape is the
+owner's choice, and RO7's measurement is the replay the owner approved.
+
+### Built (batch 256)
+
+- **`core/loop.py`**: `_reasoning_only`, `_reasoning_only_reply`, the per-run `nudged` flag at
+  the no-tool-calls branch, and the warn-once set `_reasoning_only_warned`, which is registered in
+  the suite's process-memo census.
+- **`storage.py`**: `starts_turn`, read by `turn_start_ids`, `_turn_opener_index` and
+  `mark_turn_failed`. **`core/compaction.py`** reads it at `compactable_span` and
+  `pin_measurements`, and **`core/memory.py`** at `mark_turn_failed`.
+- **`core/client.py`**: `reasoning_not_echoed`.
+- **`main.py`**: `_LiveTurn` flushes the held step before either notice and prints the ask as
+  `Harness:`. **`tui/app.py`**: `_render_notice` draws it in the `wake` role.
+- **`core/reasoning/json_retry.py`**: the empty-reply corrective. **`core/reasoning/orchestrator.py`**:
+  the trace label.
+
+47 tests in `tests/test_reasoning_only.py` and one in `tests/test_storage_e2e.py`, on real SQLite.
+The shared doubles changed: `FakeStorage.turn_start_ids` and `mark_turn_failed` call production's
+`starts_turn`, and `FakeMemory` gained `add_harness_message`. A mutation pass made 24 mutations,
+one per claim, and all 24 were killed against a green control. The persist-before-emit row,
+which a sibling test caught first, was re-run against its own test and killed there too.
+
+### Gap register
+
+- **That provider's flag is the owner's to set.** Nothing here writes a `providers.json` entry;
+  the WARNING names the flag.
+- **The provider documents nothing found on passing reasoning back.** The replay is the
+  evidence, on two steps of one model. The model's behaviour is reported to the provider
+  separately, outside this repository.
+- **The replay's system prompt was rebuilt, not recorded**, and a research pass's steps were not
+  replayed.
+- **The ask's effect on the live provider is not measured.** The replay measured echoing, not the
+  ask; the tests drive a scripted provider.
+- **A reasoning-only reply cut off by the token limit is asked about the same way.**
+  `ModelResponse` carries no provider finish reason, and a step cut off mid-reasoning gets the
+  same ask, which is still a reasonable thing to ask.
+
 ---
 
 ## §93. uv where pip was slow: CI, and the installers when it is there
