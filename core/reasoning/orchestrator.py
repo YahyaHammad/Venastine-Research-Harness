@@ -355,7 +355,7 @@ def _check_not_truncated(pass_id: str, response, trace: list[str] | None):
             f"condition returns the last response as it stands, so a pass "
             f"cut off mid-tool-call yields an empty string -- and every "
             f"later pass would be working from nothing. "
-            f"(config.MAX_ITERATIONS and a configured settings.json "
+            f"(max_iterations in config.yaml and a configured settings.json "
             f"max_token_budget spend cap are the two ceilings that "
             f"produce this.)"
         )
@@ -1183,8 +1183,8 @@ def stream_deep_research_pipeline(
     # §45 (SQ7): through pipeline_models.resolve rather than
     # config.CRITIC_MODEL directly, so a `/critic` choice reaches the CLI,
     # the TUI and a spawned run alike. That function owns the precedence —
-    # the user-tier store outranks config.py — and owning it in one place
-    # is the point: §11 gave this routing to config.py alone, which meant
+    # the user-tier store outranks config.yaml — and owning it in one place
+    # is the point: §11 gave this routing to the harness config alone, which meant
     # the methodology's own "a model must not check its own output" was
     # available only to whoever could edit the checkout.
     critic = pipeline_models.resolve("critic")

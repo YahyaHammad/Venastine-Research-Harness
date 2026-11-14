@@ -395,7 +395,7 @@ def _announce_posture() -> None:
     app.log and, on the CLI, to stderr through the root handler -- it is
     the record a bug report is triaged against. The stderr banner is for
     the human at the terminal, who may have set one of these months ago
-    and forgotten, or may have inherited a config.py from somewhere.
+    and forgotten, or may have inherited a config.yaml from somewhere.
 
     Silent when the posture is shipped, so this costs nothing in the case
     that needs nothing said. That is also why it reads `unsafe_reasons()`
@@ -408,7 +408,7 @@ def _announce_posture() -> None:
     if not reasons:
         return
     print("", file=sys.stderr)
-    print("  !! REDUCED SECURITY POSTURE -- set in config.py", file=sys.stderr)
+    print("  !! REDUCED SECURITY POSTURE -- set in config.yaml", file=sys.stderr)
     for _label, detail in reasons:
         logger.warning("Reduced security posture: %s", detail)
         print(f"   - {detail}", file=sys.stderr)
@@ -2233,7 +2233,7 @@ def run_research(
     """Run the full deep-research pipeline, write artifacts to disk,
     and print the results. ensemble_mode/ensemble_n come from
     settings.json (§14); None means the pipeline falls back to the
-    config.py defaults. authorization (§25) comes from
+    config.yaml defaults. authorization (§25) comes from
     build_research_authorization(); None means no gated tool is reachable,
     which is the behaviour every research run had before §25.
 
@@ -2394,7 +2394,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # Defaults are None so that after parsing we can tell an explicit
     # CLI choice from argparse fill-in; resolution happens in main via
-    # resolve_runtime_defaults (CLI > settings.json > config.py).
+    # resolve_runtime_defaults (CLI > settings.json > config.yaml).
     parser.add_argument(
         "--provider",
         default=None,
@@ -2420,7 +2420,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="LEVEL",
         help="Reasoning effort for chat AND research (typically "
              "low|medium|high; 'auto' sends none). Default: settings.json "
-             "'effort' key, else config.DEFAULT_EFFORT.",
+             "'effort' key, else default_effort in config.yaml.",
     )
     # ROADMAP_v2 §25. TWO flags onto ONE dest, in a mutually exclusive
     # group, rather than a single nargs="?" flag with an optional value.
@@ -2457,7 +2457,7 @@ def build_parser() -> argparse.ArgumentParser:
              "Never persisted.",
     )
     # R9/R12. Default None so settings.json can supply it and an explicit
-    # flag still wins (§14's CLI > settings.json > config.py precedence,
+    # flag still wins (§14's CLI > settings.json > config.yaml precedence,
     # which only works because argparse defaults stay None).
     #
     # The MODE is persistable where the grant list is not, and the
@@ -2496,7 +2496,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_const",
         const=False,
         help="Research mode: skip the post-pipeline review even if "
-             "settings.json or config.py turns it on.",
+             "settings.json or config.yaml turns it on.",
     )
     parser.add_argument(
         "--tui",
@@ -2546,7 +2546,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="THREAD",
         action="append",
         help="Attach another thread's summary to this session as context. "
-             "Repeatable, up to config.MAX_INJECTED_REFS.",
+             "Repeatable, up to max_injected_refs in config.yaml.",
     )
     # ROADMAP_v2 §24. A flag for M21's reason, and the two kind flags exist
     # so a piped run can skip the question rather than being refused.
@@ -2584,7 +2584,7 @@ def build_parser() -> argparse.ArgumentParser:
 def resolve_runtime_defaults(args, settings: dict) -> tuple[str, str]:
     """Provider/model precedence: explicit CLI flag > settings.json
     (trusted project tier already beat user tier inside the loader) >
-    config.py constants."""
+    config.yaml's values."""
     provider = args.provider or settings.get("default_provider") or DEFAULT_PROVIDER
     model = args.model or settings.get("default_model") or config.MODEL_NAME
     return provider, model

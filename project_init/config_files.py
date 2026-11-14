@@ -106,9 +106,9 @@ OMITTED = {
         "disagreement routes a claim to be checked and subtracts nothing, "
         "and the loader warns when this is set",
     "ensemble_mode":
-        "resolved as `config.ENSEMBLE_MODE if value is None`, so writing "
-        "`false` is not a restatement of the default but a decision to "
-        "outrank whatever config.py says later",
+        "an unset value defers to config.yaml's own ensemble_mode, so "
+        "writing `false` is not a restatement of the default but a "
+        "decision to outrank whatever config.yaml says later",
     "compaction.trigger_tokens":
         "_trigger_is_configured() is a PRESENCE test: the window-derived "
         "trigger only applies while no human has named a number. Writing "
@@ -117,7 +117,7 @@ OMITTED = {
         "much earlier fold with nothing on screen to explain it",
     "research.subagent_review":
         "same `is not None` shape as ensemble_mode: an explicit false "
-        "beats config.SUBAGENT_REVIEW rather than deferring to it",
+        "beats config.yaml's subagent_review rather than deferring to it",
     "tui.theme":
         "no shipped default to write -- absent, _startup_theme() resolves "
         "one -- and an invented value would outrank a theme the user "

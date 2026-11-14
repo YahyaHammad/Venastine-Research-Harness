@@ -388,7 +388,7 @@ where *nothing* matched is treated as a failure. Every number in `04_confidence.
 
 ### Different models can check each other
 
-Set `CRITIC_MODEL` and passes 3a, 3b and 6c run on a *different* provider and model from the one that wrote the answer. A model checking its own output brings its own blind spots to the inspection.
+Set `critic_model` in `config.yaml`, or pick one with `/critic` in the TUI, and passes 3a, 3b and 6c run on a *different* provider and model from the one that wrote the answer. A model checking its own output brings its own blind spots to the inspection.
 
 **Ensemble mode** extends the same idea to the answer itself. List `{provider_name, model}` pairs under `ensemble_models` in `config.yaml` (a settings.json key is deliberately absent — choosing providers multiplies spend, so it stays in the harness's own file) and Pass 1 runs once per entry, each candidate on its own provider and model. Fewer than two *distinct* pairs is refused: N copies of one model agree most confidently on that model's systematic errors, which is exactly where agreement has to mean something. Claims extracted from all candidates are pooled. A factual claim no more than half the candidates asserted is *contested*: it keeps the score its evidence earns and goes through the revise-and-revalidate passes to be checked, with the count in its feedback. Since batch 232; it used to be marked down instead, which no revision could undo. A candidate that fails mid-run is named and skipped; if only one survives, the run degrades to the ordinary single-response path rather than scoring an "ensemble of one". Artifacts come out as `01_candidate_1.md`, `01_candidate_2.md`, … numbered to match each claim's `asserted_by_candidates` tags.
 
@@ -537,8 +537,8 @@ now **closed** under `shlex`, which consumes exactly whitespace, `'`, `"` and `\
 tokens and the executor's are provably the same list. On Windows this costs a backslash path such
 as `cat sub\dir\notes.txt`, which moves to the container and fails there — use forward slashes.
 
-**These settings are read once, at startup.** Since batch 40 `SHELL_APPROVAL_MODE`, both fallback
-flags and `REDACT_TOOL_OUTPUTS` are bound into a frozen posture (`security/posture.py`) rather than
+**These settings are read once, at startup.** Since batch 40 `shell_approval_mode`, both fallback
+flags and `redact_tool_outputs` are bound into a frozen posture (`security/posture.py`) rather than
 consulted at each decision, so nothing running in-process can move them mid-session. If any of them
 is set to something weaker than the shipped default, the harness says so at launch — on stderr, in
 `app.log`, and as a badge in the TUI sidebar for as long as the session lasts.
@@ -702,7 +702,7 @@ Agent frontmatter fields:
 | `approval_overrides` | mapping | `{}` | Can only ever *add* prompts, never remove one |
 | `use_project_context` | bool | `false` | Inject the project's root `AGENTS.md` into the system prompt |
 | `use_memory` | bool | `true` | Inject durable memories (plain chat counts as opted in) |
-| `max_steps` | int ≥ 1 | caller's ceiling | **Replaces** the caller's ceiling rather than narrowing it — a value above `MAX_ITERATIONS` raises it, making this the one frontmatter field that can widen anything; an invalid value is repaired to the default with a warning naming what it read |
+| `max_steps` | int ≥ 1 | caller's ceiling | **Replaces** the caller's ceiling rather than narrowing it — a value above `max_iterations` raises it, making this the one frontmatter field that can widen anything; an invalid value is repaired to the default with a warning naming what it read |
 | `spawnable` | bool | `false` for your files | Whether `spawn_subagent` may feed this agent |
 | `spawn_targets` | list | any spawnable agent | Which agents this one may spawn. It only ever narrows, and narrows again for anything it spawns in turn, as described above |
 
@@ -840,7 +840,7 @@ and letting it fall through would approve the next call on the strength of it. T
 answer to the prompt about to appear, and the terminal has been buffering it for you.
 
 **A deadline belongs to a run, not to a question.** An approval asked during an attended research run
-expires after `ATTENDED_APPROVAL_TIMEOUT_S` (600s) and denies that call, because there is a run
+expires after `attended_approval_timeout_s` (600s) and denies that call, because there is a run
 waiting on the answer and it has to keep moving. `--init`'s prompts have no run behind them, so they
 wait as long as you need — and they do not print a `(600s)` they would not honour.
 
@@ -894,14 +894,14 @@ Everything `python main.py` accepts. Wherever a value can come from more than on
 
 Effort asks a reasoning model how long to think before answering. It rides every chat turn, every research pass, every JSON-retry correction, the reviewer and its re-synthesis — a retry is the same pass continuing, so it inherits the level rather than dropping it.
 
-Where a level comes from, in order: `--effort` > top-level `effort` in `settings.json` > `config.DEFAULT_EFFORT` (shipped `"high"`). Inside the TUI, `tui.effort` persists separately and wins there. `auto` is the off switch at either layer — with the default now high, `--effort auto` restores send-nothing behaviour.
+Where a level comes from, in order: `--effort` > top-level `effort` in `settings.json` > `default_effort` in `config.yaml` (shipped `"high"`). Inside the TUI, `tui.effort` persists separately and wins there. `auto` is the off switch at either layer — with the default now high, `--effort auto` restores send-nothing behaviour.
 
 A level is validated against the model that will **receive** it, not the one it was chosen for:
 
 | Provider | Levels | Where the set comes from |
 |---|---|---|
 | Anthropic | `low`, `medium`, `high`, `xhigh`, `max` — whichever the model reports supported | Queried live from the Models API, so newly released Anthropic models need no entry anywhere |
-| OpenAI-compatible | `low`, `medium`, `high` assumed for unknown models | Static table (`config.MODEL_EFFORT_LEVELS`). Known non-reasoning models — gpt-4o family, gpt-3.5 — ship with *empty* lists, meaning "takes no effort parameter": a requested level is dropped cleanly instead of 400ing every call. An unlisted model gets the assumption plus a WARNING naming it |
+| OpenAI-compatible | `low`, `medium`, `high` assumed for unknown models | Static table (`model_effort_levels` in `config.yaml`). Known non-reasoning models — gpt-4o family, gpt-3.5 — ship with *empty* lists, meaning "takes no effort parameter": a requested level is dropped cleanly instead of 400ing every call. An unlisted model gets the assumption plus a WARNING naming it |
 | Google | Levels map to integer thinking budgets, `low`→2,048 through `max`→dynamic | Mapped at the boundary and sent as `thinking_budget`. On since batch 172, when the `google-genai` pin moved to 2.29.0; an unlisted Gemini model gets the default level set plus a WARNING, like any other unlisted model |
 
 **Seeing the thinking is separate from doing it.** Effort is what makes the model reason; whether the API hands those thoughts back to the client is a different question, and the answer varies by provider. Reasoning streams into the transcript on **Anthropic** and on OpenAI-compatible providers that send it — DeepSeek, Qwen, Z.AI, OpenRouter. It is absent on **OpenAI**, whose Chat Completions endpoint returns no reasoning text at all, and on **Google**, whose request deliberately does not ask for thought summaries: those would be billed as extra output for something the model produces either way. On those two the turn still thinks; you just do not see it. `tui.show_thinking` and `/thinking` control the display, never the reasoning.
@@ -922,9 +922,9 @@ Three things can end a turn or pass early:
 
 The CLI names the figures behind an early stop — billed this turn, and the thread's measured context size — rather than a bare reason, because "budget exceeded" invites exactly the misreading that there is a size problem.
 
-Other ceilings worth knowing: the six maths tools run in killable subprocesses under a 20-second wall clock (`tool_compute_timeout_s`) and are told which tool and which limit stopped them; pre-granted tool calls cap at 150 per research run (`MAX_GRANTED_TOOL_CALLS`), degrading to asking when exhausted; subagent nesting stops at depth 2 (`SUBAGENT_MAX_DEPTH`) and at most three subagents of one turn run at once (`SUBAGENT_MAX_PARALLEL`), with anything beyond that running in waves; attended prompts expire after 600 seconds (`ATTENDED_APPROVAL_TIMEOUT_S`), denying that one call while the run continues.
+Other ceilings worth knowing: the six maths tools run in killable subprocesses under a 20-second wall clock (`tool_compute_timeout_s`) and are told which tool and which limit stopped them; pre-granted tool calls cap at 150 per research run (`max_granted_tool_calls`), degrading to asking when exhausted; subagent nesting stops at depth 2 (`subagent_max_depth`) and at most three subagents of one turn run at once (`subagent_max_parallel`), with anything beyond that running in waves; attended prompts expire after 600 seconds (`attended_approval_timeout_s`), denying that one call while the run continues.
 
-Subagents spawned in one model response run **concurrently**, up to `SUBAGENT_MAX_PARALLEL`. Their answers come back to the model in the order it asked for them however they finish, one approval question reaches you at a time, and the sidebar draws them as a tree rather than a chain. The database runs in SQLite's WAL mode to keep their writes from contending, which means `app.db` is accompanied by `app.db-wal` and `app.db-shm` while the harness is open — both are gitignored, and excluded from `git archive`, because a WAL file holds recently written messages.
+Subagents spawned in one model response run **concurrently**, up to `subagent_max_parallel`. Their answers come back to the model in the order it asked for them however they finish, one approval question reaches you at a time, and the sidebar draws them as a tree rather than a chain. The database runs in SQLite's WAL mode to keep their writes from contending, which means `app.db` is accompanied by `app.db-wal` and `app.db-shm` while the harness is open — both are gitignored, and excluded from `git archive`, because a WAL file holds recently written messages.
 
 **Network limits are off by default.** For a metered connection, `config.yaml` can cap what the harness pulls and pushes over a rolling window, 24 hours unless you change it, with a separate ceiling in decimal megabytes for each of three kinds of traffic: the network tools, the model provider's API, and MCP servers reached over HTTP. A local Ollama or a local MCP server need not count against an allowance, so each is switched on by its own ceiling. A call that would pass its ceiling is refused with a reason that says when room returns; one already running is never cut off, so a meter can end up over by one response. Counts are kept in `~/.config/venastine/network.db`, shared by every harness process, written at most once a minute, and pruned as they leave the window. Shell commands, `stdio` MCP servers, sign-in traffic and TLS overhead are not counted, and `web_search`'s figure is an estimate (its client cannot be counted). `/network` shows the meters, and the sidebar shows them while any is on.
 
@@ -1027,7 +1027,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 
 | Variable | Default | Controls |
 |---|---|---|
-| `AGENT_MODEL` | `claude-sonnet-5` | Built-in default model (`config.MODEL_NAME`) — still loses to settings.json and `--model` |
+| `AGENT_MODEL` | `claude-sonnet-5` | Built-in default model (`model_name` in `config.yaml`) — still loses to settings.json and `--model` |
 | `AGENT_PROVIDERS_FILE` | `providers.json` | Credential-file location |
 | `APP_DB_PATH` | `app.db` | SQLite database path |
 | `AGENT_OUTPUT_DIR` | `./output` | Research artifacts root |
@@ -1077,7 +1077,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 9358 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
+Run the test suite with `pytest` — 9461 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
 
 ## Documentation
 

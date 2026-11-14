@@ -218,7 +218,7 @@ def run_review(run, model: str, provider_name: str, authorization=None,
         # claim from "it found sixty and you saw the worst twenty-five".
         run.log(
             f"Review: {len(findings)} finding(s) returned, showing the first "
-            f"{config.MAX_REVIEW_FINDINGS} (config.MAX_REVIEW_FINDINGS).")
+            f"{config.MAX_REVIEW_FINDINGS} (max_review_findings in config.yaml).")
         findings = findings[:config.MAX_REVIEW_FINDINGS]
 
     return findings, response.thread_id

@@ -70,7 +70,7 @@ SHUTDOWN_TIMEOUT_S = 15.0
 # F6 (#64): the WHOLE teardown -- polite close, force-cancel, loop-thread
 # join -- shares this one wall-clock budget, instead of three sequential
 # SHUTDOWN_TIMEOUT_S waits whose worst case hung a quitting harness ~45s.
-# Master value lives in config.py beside the other harness bounds; the
+# Master value lives in config.yaml beside the other harness bounds; the
 # re-export here keeps it beside its sibling timeouts and gives tests a
 # single name to shrink.
 TEARDOWN_BUDGET_S = _harness_config.TEARDOWN_BUDGET_S

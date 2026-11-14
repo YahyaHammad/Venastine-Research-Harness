@@ -214,7 +214,7 @@ def test_non_positive_max_steps_raises_named_valueerror_not_attributeerror(
             ))
         message = str(excinfo.value)
         assert f"got {bad!r}" in message
-        assert "MAX_ITERATIONS" in message, (
+        assert "max_iterations in config.yaml" in message, (
             "the belt names the default the loader would have used, so a "
             "reader can tell why loaded agents kept working")
     # A bool is an int subclass; `max_steps=True` would otherwise mean 1.

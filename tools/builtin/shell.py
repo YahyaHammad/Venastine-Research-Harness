@@ -144,7 +144,7 @@ logger = logging.getLogger(__name__)
 # read the posture at import time**, pinned by
 # test_posture.py::test_no_module_reads_the_posture_at_import.
 capability.validate_mode(config.SHELL_APPROVAL_MODE,
-                         "config.SHELL_APPROVAL_MODE")
+                         "shell_approval_mode in config.yaml")
 
 # Compute the shell name once at import time to avoid blocking on
 # subprocess probes every time the schema is accessed. On Windows this
@@ -625,7 +625,7 @@ def _shell_approval_check(tool_name: str, params: dict) -> bool:
     """
     active = posture.current()
     mode = capability.validate_mode(active.shell_approval_mode,
-                                    "config.SHELL_APPROVAL_MODE")
+                                    "shell_approval_mode in config.yaml")
     if mode == capability.ALWAYS:
         return True
     if mode == capability.NEVER:
@@ -878,7 +878,7 @@ def _interactive_approval_check(tool_name: str, params: dict) -> bool:
     """
     active = posture.current()
     mode = capability.validate_mode(active.shell_approval_mode,
-                                    "config.SHELL_APPROVAL_MODE")
+                                    "shell_approval_mode in config.yaml")
     if mode == capability.ALWAYS:
         return True
     if mode == capability.NEVER:
@@ -1055,8 +1055,8 @@ def fallback_changed_refusal(command: str, docker_up: bool) -> str | None:
     if active.allow_insecure_fallback and not active.auto_approve_fallback:
         return ("Docker became unavailable after the approval check. "
                 "The insecure subprocess fallback requires explicit "
-                "per-run approval (AUTO_APPROVE_SANDBOX_FALLBACK is "
-                "False). Please retry — the approval prompt will "
+                "per-run approval (auto_approve_sandbox_fallback is "
+                "false in config.yaml). Please retry — the approval prompt will "
                 "appear this time.")
     return None
 

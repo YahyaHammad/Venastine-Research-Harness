@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 # parking, so what is left unbounded is a UI thread that is alive and
 # wedged, where nothing else in the shell answers either.
 # A deadline here would need this leaf module to know a number that
-# belongs to config.py, and the failure it would prevent is one no shell
+# belongs to config.yaml, and the failure it would prevent is one no shell
 # can currently produce. Shutdown does not wait either: the TUI's release
 # unblocks the holder, and every queued worker then finds `_shutting_down`
 # already true and returns its declining default without pushing a screen.

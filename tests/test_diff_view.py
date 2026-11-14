@@ -319,6 +319,54 @@ async def test_an_added_and_a_removed_row_do_not_share_a_background():
     assert _bg("+") and _bg("-") and _bg("+") != _bg("-")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("theme", ["dark-plain", "light-plain"])
+async def test_on_a_256_colour_terminal_the_added_row_keeps_a_band(theme):
+    """Batch 257, the owner's report: on WSL the removed rows were red
+    and the added rows were not marked at all. The terminal there is
+    256 colours, Rich rounded dark-plain's added-line band to the page's
+    black, and the strips said nothing about it, because the strip still
+    carried the truecolour band Rich would round on the way out.
+
+    So this sets the console's depth the way Rich would on that terminal
+    and asks what the strip carries, which is now a cube colour that is
+    painted as itself: one that is not the page, and not the other row's.
+    """
+    from rich.color import ColorSystem
+
+    from tui import themes
+    from tui.app import VenastineApp
+
+    app = VenastineApp("ANTHROPIC", "test-model", {})
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pump(pilot, 2)
+        app.console._color_system = ColorSystem.EIGHT_BIT
+        app.theme = theme
+        await pilot.pause()
+        transcript = app._transcript
+        transcript.reset()
+        transcript.write_role("diff",
+                              diffs.build_block("f.py", "old", "new"))
+        await pilot.pause()
+        rows = _rows_of(transcript)
+        page = themes._as_256(themes._palette(app.current_theme)["background"])
+
+    def _bands(sign):
+        for text, bgs in rows:
+            if text.lstrip().startswith(sign):
+                return {b for b in bgs if b is not None}
+        return set()
+
+    added, removed = _bands("+"), _bands("-")
+    assert len(added) == 1 and len(removed) == 1, (added, removed)
+    (add,), (delete,) = added, removed
+    assert add.number is not None and add.triplet is None, \
+        f"the added band {add} is not a cube colour, so Rich will round it"
+    assert add.number != page, \
+        "the added row's band is the page's own colour at 256"
+    assert add != delete
+
+
 def test_a_diff_renders_on_a_widget_with_no_running_app():
     """`self.app` RAISES outside a running app and widgets are built bare
     throughout this suite, so the geometry has the same guard the palette

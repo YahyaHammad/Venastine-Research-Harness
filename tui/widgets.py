@@ -430,7 +430,7 @@ class PostureBadge(Static):
     §40 (UN3). The startup banner scrolls away; a posture does not. The
     case this exists for is not the researcher who just typed a flag --
     it is the user who set `ALLOW_INSECURE_SANDBOX_FALLBACK` months ago
-    and forgot, or who inherited a config.py from somewhere. Neither of
+    and forgot, or who inherited a config.yaml from somewhere. Neither of
     them reads app.log.
 
     Hidden when the posture is the shipped one, GoalBanner-style, so it

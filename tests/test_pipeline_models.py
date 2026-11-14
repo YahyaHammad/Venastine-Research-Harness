@@ -129,7 +129,7 @@ class TestUnreadableStores:
 
     def test_an_unknown_version_reads_as_empty(self):
         """There is nothing here that was consented to, so the worst
-        consequence of forgetting is falling back to config.py."""
+        consequence of forgetting is falling back to config.yaml."""
         with open(pipeline_models.store_path(), "w", encoding="utf-8") as f:
             json.dump({"version": 999, "roles": {
                 "critic": {"provider_name": "OPENAI", "model": "gpt-5.1"}}}, f)

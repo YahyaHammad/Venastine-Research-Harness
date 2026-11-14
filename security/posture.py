@@ -19,9 +19,10 @@ the precedent: `tools/builtin/_math_common.py` exists because "an
 expression string is code", and its docstring lists the escapes that were
 found before the AST allowlist went in.
 
-So the posture is bound once and frozen (UN1). The `config.py` constants
-are still where a HUMAN writes the value; they simply stop being what is
-read at the moment a decision is made.
+So the posture is bound once and frozen (UN1). `config.yaml` is still
+where a HUMAN writes the value, and the `config.py` constants that
+publish it simply stop being what is read at the moment a decision is
+made.
 
 WHAT THE GUARANTEE IS, AND IS NOT
 ---------------------------------
@@ -254,7 +255,7 @@ class Posture:
         if self.shell_approval_mode == "never":
             reasons.append((
                 "shell: never ask",
-                "SHELL_APPROVAL_MODE is 'never' -- no shell command is "
+                "shell_approval_mode is 'never' -- no shell command is "
                 "ever asked about, including one that reads outside the "
                 "workspace on the host"))
         elif self.shell_approval_mode == "contained":
@@ -264,7 +265,7 @@ class Posture:
             # holds a `.venastine/` that code can read it.
             reasons.append((
                 "shell: contained",
-                "SHELL_APPROVAL_MODE is 'contained' -- a command that runs "
+                "shell_approval_mode is 'contained' -- a command that runs "
                 "in the container without network runs without asking, "
                 "including code the agent wrote itself; host reads and "
                 "network commands still ask"))
@@ -279,7 +280,7 @@ class Posture:
                    "asks, as under tiered")
             reasons.append((
                 "shell: classified",
-                "SHELL_APPROVAL_MODE is 'classified' -- a decision model "
+                "shell_approval_mode is 'classified' -- a decision model "
                 f"({who}) decides whether a single command that runs in the "
                 "container, and that tiered would ask about, runs without "
                 "asking; compound commands, host reads, the host fallback, "
@@ -293,14 +294,14 @@ class Posture:
                 and self.shell_approval_mode != "always"):
             reasons.append((
                 "host shell, no ask",
-                "ALLOW_INSECURE_SANDBOX_FALLBACK and "
-                "AUTO_APPROVE_SANDBOX_FALLBACK are both on -- unprompted "
+                "allow_insecure_sandbox_fallback and "
+                "auto_approve_sandbox_fallback are both on -- unprompted "
                 "arbitrary code on the host, with your own file access, "
                 "including writes into this harness's own source"))
         elif self.allow_insecure_fallback:
             reasons.append((
                 "host shell fallback",
-                "ALLOW_INSECURE_SANDBOX_FALLBACK is on -- if no container "
+                "allow_insecure_sandbox_fallback is on -- if no container "
                 "runtime (Docker or Podman) can run the sandbox, commands "
                 "run on the host with no filesystem or network isolation"))
         # ROADMAP_v3 §49 slice 3 (SS41). Reported when it is ENABLED rather
@@ -321,7 +322,7 @@ class Posture:
             # this is §48 (CE6)'s correction applied to a second pair.
             if (self.auto_approve_fallback
                     and self.shell_approval_mode not in ("always", "never")):
-                asking = ("AUTO_APPROVE_SANDBOX_FALLBACK is on as well, so "
+                asking = ("auto_approve_sandbox_fallback is on as well, so "
                           "NOTHING there asks first -- that opt-in answers "
                           "for the whole backend, not only for the host "
                           "fallback it is named after. Running as root is "
@@ -332,7 +333,7 @@ class Posture:
                           "runs as root always asks")
             reasons.append((
                 "wsl backend",
-                "ALLOW_WSL_BACKEND is on -- the agent can ask for a command "
+                "allow_wsl_backend is on -- the agent can ask for a command "
                 "to run in WSL, which is not a sandbox: it reaches this "
                 "harness's own config and authority files, has no memory or "
                 "process limits, and can start Windows programs with your "
@@ -345,7 +346,7 @@ class Posture:
         if self.allow_ssh_backend:
             reasons.append((
                 "ssh backend",
-                "ALLOW_SSH_BACKEND is on -- the agent can ask for a command "
+                "allow_ssh_backend is on -- the agent can ask for a command "
                 "to run on the configured remote host, which this harness "
                 "cannot inspect: no isolation, no memory or process limits, "
                 "and credentials it did not issue. Nothing runs there "
@@ -355,7 +356,7 @@ class Posture:
         if not self.redact_tool_outputs:
             reasons.append((
                 "no redaction",
-                "REDACT_TOOL_OUTPUTS is off -- credential-shaped strings "
+                "redact_tool_outputs is off -- credential-shaped strings "
                 "in tool results are passed through unredacted"))
         elif self.redact_off_env:
             reasons.append((

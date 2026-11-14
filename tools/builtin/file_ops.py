@@ -281,7 +281,7 @@ def _read_rich(resolved_path: str) -> str:
     consumer, it sits behind `read`, and `read` is globally denied and
     cannot be re-enabled at runtime -- so a default install carries neither
     it nor its eleven transitive distributions. Anyone who reaches here has
-    enabled `read` in config.py, and the bare ModuleNotFoundError would name
+    enabled `read` in config.yaml, and the bare ModuleNotFoundError would name
     a package they never asked for and cannot place.
     """
     try:

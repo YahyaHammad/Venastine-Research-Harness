@@ -1346,3 +1346,100 @@ def test_the_documented_settable_scalar_count_is_the_one_the_test_walks():
     assert int(figures[0]) == len(_settable_scalars()), (
         f"ARCHITECTURE.md says {figures[0]} settable scalars; the "
         f"catalogue has {len(_settable_scalars())}")
+
+
+# ---- Batch 257: what a person reads names config.yaml ----------------------
+
+class TestWhatAPersonReadsNamesConfigYaml:
+    """The owner's report: harness text still sent people to `config.py`.
+    That module is the loader that publishes `config.yaml`'s values as
+    UPPER-CASE attributes, not a file to edit, so a message naming it --
+    or naming a value by its attribute spelling, which `config.yaml` does
+    not contain -- points a reader at nothing they can change.
+
+    Read off every production string literal that is NOT a docstring:
+    log formats, exceptions, help texts, transcript lines and tool
+    results, the f-string pieces among them. A docstring or a comment is
+    for whoever reads the code, where `config.MAX_TOKENS` is the right
+    spelling. `config.py` and `config_schema.py` are left out: they are
+    the two places the attribute spelling is defined.
+
+    A literal with no space in it is code more often than prose --
+    `getattr(config, "PERSIST_SOURCE_TEXT", True)` -- so there only the
+    dotted `config.NAME` form counts, which no `getattr` needs. That form
+    is how the old /window line said where a window came from, and how
+    the shell's mode check labelled its error.
+    """
+
+    _DEFINERS = ("config.py", "config_schema.py")
+
+    @staticmethod
+    def _literals():
+        import ast
+
+        from tests.test_docs_consistency import _production_modules
+
+        root = pathlib.Path(__file__).resolve().parent.parent
+        for rel in _production_modules():
+            if not rel.endswith(".py") or rel in (
+                    TestWhatAPersonReadsNamesConfigYaml._DEFINERS):
+                continue
+            tree = ast.parse((root / rel).read_text(encoding="utf-8"))
+            docstrings = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                     ast.AsyncFunctionDef)) and node.body:
+                    first = node.body[0]
+                    if isinstance(first, ast.Expr) and isinstance(
+                            first.value, ast.Constant):
+                        docstrings.add(id(first.value))
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Constant)
+                        and isinstance(node.value, str)
+                        and id(node) not in docstrings):
+                    yield rel, node.lineno, node.value
+
+    def test_no_message_sends_a_reader_to_config_py(self):
+        named = [f"{rel}:{line}: {text[:70]!r}"
+                 for rel, line, text in self._literals()
+                 if re.search(r"\bconfig\.py\b", text)]
+        assert not named, (
+            "these strings name config.py, which is the loader and not a "
+            "file to edit -- name config.yaml:\n  " + "\n  ".join(named))
+
+    def test_no_message_names_a_setting_by_its_attribute_spelling(self):
+        """`max_injected_refs in config.yaml` rather than
+        `config.MAX_INJECTED_REFS`: the second is a name the file a
+        reader opens does not contain. Every attribute here is a key's
+        upper-case form (`config_schema.as_module_namespace`), so the
+        key is always the lower-case name."""
+        named = [f"{rel}:{line}: {match.group(0)} in {text[:60]!r}"
+                 for rel, line, text in self._literals()
+                 for match in [self._attribute_spelling(text)] if match]
+        assert not named, (
+            "these strings name a setting the way config.py spells it; "
+            "config.yaml has the lower-case key:\n  " + "\n  ".join(named))
+
+    @staticmethod
+    def _attribute_spelling(text):
+        names = "|".join(sorted(name.upper() for name in
+                                config_schema.HarnessConfig.model_fields))
+        prefix = r"(?:config\.)?" if " " in text else r"config\."
+        return re.search(rf"\b{prefix}(?:{names})\b", text)
+
+    def test_the_scan_reads_messages_and_not_docstrings_or_keys(self):
+        """The control. `main.py`'s banner is a literal this batch
+        changed, and is read; a module docstring is not; a `getattr` key
+        is read and passes, and the two spellings it must catch do not."""
+        literals = {(rel, text) for rel, _line, text in self._literals()}
+        assert ("main.py",
+                "  !! REDUCED SECURITY POSTURE -- set in config.yaml") \
+            in literals
+        assert not any(rel == "tui/themes.py"
+                       and text.lstrip().startswith("tui/themes.py")
+                       for rel, text in literals)
+        assert ("core/reasoning/output_writer.py",
+                "PERSIST_SOURCE_TEXT") in literals
+        assert not self._attribute_spelling("PERSIST_SOURCE_TEXT")
+        assert self._attribute_spelling("config.SHELL_APPROVAL_MODE")
+        assert self._attribute_spelling("Raise MAX_INJECTED_REFS first")

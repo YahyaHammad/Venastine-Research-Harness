@@ -455,7 +455,7 @@ def input_approval_check(tool_name: str, params: dict) -> bool:
         return False
     active = posture.current()
     mode = capability.validate_mode(active.shell_approval_mode,
-                                    "config.SHELL_APPROVAL_MODE")
+                                    "shell_approval_mode in config.yaml")
     if mode == capability.ALWAYS:
         return True
     if mode == capability.NEVER:

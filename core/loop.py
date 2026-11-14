@@ -239,7 +239,7 @@ def with_refs(system_prompt: str, memory: ConversationMemory) -> str:
     if total > cap:
         logger.warning(
             "Injecting %s of %s attached references; the rest are not in this "
-            "prompt. Raise config.MAX_INJECTED_REFS or drop one with "
+            "prompt. Raise max_injected_refs in config.yaml or drop one with "
             "/ref --clear.", cap, total)
         header = (f"{header}\n\nShowing {cap} of {total} attached references. "
                   f"The others exist and are not included here.")
@@ -428,7 +428,7 @@ def attach_ref(memory: ConversationMemory, thread_id, summary: str,
     if existing is None and len(refs) >= config.MAX_INJECTED_REFS:
         return False, (
             f"Already referencing {len(refs)} conversations, which is the "
-            f"limit (config.MAX_INJECTED_REFS). Drop one with /ref --clear "
+            f"limit (max_injected_refs in config.yaml). Drop one with /ref --clear "
             f"first -- none is removed automatically.")
 
     entry = {
@@ -1855,7 +1855,7 @@ class RunAgentLoop:
                 f"max_steps must be a positive integer, got {max_steps!r}. "
                 f"Agent definitions carrying an invalid max_steps are "
                 f"repaired by the loader to {config.MAX_ITERATIONS} "
-                f"(config.MAX_ITERATIONS); direct callers must pass a valid "
+                f"(max_iterations in config.yaml); direct callers must pass a valid "
                 f"value themselves.")
         client = api_initialization(provider_name)
         # Validate the level against the model that will RECEIVE it, here

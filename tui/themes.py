@@ -29,8 +29,11 @@ here sets it: these fourteen are RGB palettes, which is the whole
 premise of the contrast floors they are held to.
 """
 
+import colorsys
 import logging
 
+from rich.color import Color as RichColor
+from rich.color import ColorSystem
 from textual.color import Color
 from textual.theme import Theme
 
@@ -332,7 +335,102 @@ def _tint(colour: str, background: str,
     return Color.parse(colour).blend(Color.parse(background), factor).hex
 
 
-def role_styles(theme: Theme) -> dict[str, str]:
+# Batch 257. How many colours the terminal can show, by the names Rich's
+# `Console.color_system` reports them under. A blended band is designed
+# in truecolour, and Rich ROUNDS every colour to the nearest one the
+# terminal has. On 256 colours that sent dark-plain's added-line band
+# (#1E2F27) to #000000 -- the page's own colour, so the band vanished --
+# while the removed-line band (#35201F) landed on #5f0000 and stayed.
+# Measured on the owner's WSL install, which runs with
+# TERM=xterm-256color and no COLORTERM, so Rich picks 256 there.
+TRUECOLOUR = "truecolor"
+EIGHT_BIT = "256"
+SIXTEEN = frozenset({"standard", "windows"})
+
+#: The six hues the xterm cube can draw at a band's depth, in the order
+#: of the hue circle from red. A channel is 1 where that hue has it.
+_CUBE_HUES = ((1, 0, 0), (1, 1, 0), (0, 1, 0), (0, 1, 1), (0, 0, 1),
+              (1, 0, 1))
+
+#: The same six as the terminal's own colour names, for a sixteen-colour
+#: terminal: the colours git, diff and patch use there.
+_ANSI_HUES = ("red", "yellow", "green", "cyan", "blue", "magenta")
+
+#: The cube levels a 256-colour band takes, as (channel absent, channel
+#: present). The cube's levels are 0, 95, 135, 175, 215 and 255.
+#: On a dark page the band is the hue at the cube's first step out of
+#: black (#005f00, #5f0000). On a light page it is the hue two steps in
+#: from white (#afd7af, #d7afaf); one step in (#d7ffd7, #ffd7d7) stands
+#: off light-plain's page at 1.06:1 and 1.13:1, under X7's 1.15 floor.
+_CUBE_DARK = (0, 1)
+_CUBE_LIGHT = (3, 4)
+
+
+def _hue_sector(colour: str) -> int:
+    """Which of the six cube hues `colour` is nearest, as an index into
+    `_CUBE_HUES`. Rounding the hue to a sixth of the circle is all the
+    resolution a band at one cube step has."""
+    red, green, blue = Color.parse(colour).rgb
+    hue, _sat, _val = colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)
+    return round(hue * 6) % 6
+
+
+def _cube_band(colour: str, dark: bool) -> int:
+    """`colour`'s hue as a band on the xterm cube, as a colour number.
+
+    Placed on the cube rather than blended and left to Rich to round,
+    because the rounding is what lost the band: the cube is fixed, so
+    a band chosen on it is the band the terminal paints. Still derived
+    from the theme's own hue (#116), only at the cube's resolution."""
+    absent, present = _CUBE_DARK if dark else _CUBE_LIGHT
+    red, green, blue = (present if channel else absent
+                        for channel in _CUBE_HUES[_hue_sector(colour)])
+    return 16 + 36 * red + 6 * green + blue
+
+
+def _as_256(colour: str) -> int:
+    """The colour number Rich paints `colour` as on a 256-colour
+    terminal: its own downgrade, so the comparison below is against the
+    page the reader actually sees."""
+    return RichColor.parse(colour).downgrade(ColorSystem.EIGHT_BIT).number
+
+
+def _diff_styles(palette: dict[str, str], dark: bool,
+                 depth: str | None) -> tuple[str, str]:
+    """The added and removed rows' styles at the terminal's colour depth.
+
+    Truecolour, and a depth Rich could not name, keep X7's blended band.
+    256 colours put the band on the cube (`_cube_band`). Sixteen colours
+    have no band to give, so the row takes the hue as its TEXT colour,
+    the ANSI themes' rule. An ANSI theme keeps that rule at every depth:
+    its colours are the terminal's own, with no RGB to measure.
+
+    A 256-colour band that would land on the page's own colour, or on
+    the other band, falls back to the sixteen-colour form. No shipped
+    theme reaches it (tests/test_themes.py holds that); a theme from
+    ctrl+p's list might.
+    """
+    success, error = palette["success"], palette["error"]
+    page, text = palette["background"], palette["foreground"]
+    measured = all(c.startswith("#") for c in (success, error, page))
+    if not measured:
+        add, delete = _tint(success, page), _tint(error, page)
+        return (f"{text} on {add}" if add else success,
+                f"{text} on {delete}" if delete else error)
+    as_text = (_ANSI_HUES[_hue_sector(success)],
+               _ANSI_HUES[_hue_sector(error)])
+    if depth in SIXTEEN:
+        return as_text
+    if depth == EIGHT_BIT:
+        add, delete = _cube_band(success, dark), _cube_band(error, dark)
+        if add == delete or _as_256(page) in (add, delete):
+            return as_text
+        return f"{text} on color({add})", f"{text} on color({delete})"
+    return (f"{text} on {_tint(success, page)}",
+            f"{text} on {_tint(error, page)}")
+
+
+def role_styles(theme: Theme, depth: str | None = TRUECOLOUR) -> dict[str, str]:
     """Rich style strings keyed by transcript role, for one theme.
 
     Roles are what a line MEANS, not where it came from: `pass` covers a
@@ -344,10 +442,16 @@ def role_styles(theme: Theme) -> dict[str, str]:
     leave a slot at None or fill it with textual's `ansi_*` names,
     and one of them took the whole app down at mount. `_palette`
     fills and translates; nothing below can see the difference.
+
+    `depth` is the terminal's colour depth as Rich names it, and only
+    the two diff rows read it (batch 257): they are the one place this
+    table sets a background, and a background is what Rich's rounding
+    can merge into the page. Every other role is a foreground, which
+    rounding moves but cannot hide. The default is truecolour, which is
+    what every caller but `styles_for` means.
     """
     palette = _palette(theme)
-    add = _tint(palette["success"], palette["background"])
-    delete = _tint(palette["error"], palette["background"])
+    diff_add, diff_del = _diff_styles(palette, theme.dark, depth)
     return {
         # Who is speaking. The hues, because these distinguish identity.
         "user": f"bold {palette['primary']}",
@@ -443,10 +547,12 @@ def role_styles(theme: Theme) -> dict[str, str]:
         # was the alternative, and DIFF_TINT's comment above turns that
         # down for every theme that CAN be measured; picking it for the
         # one that cannot would be backwards.
-        "diff_add": (f"{palette['foreground']} on {add}" if add
-                     else palette["success"]),
-        "diff_del": (f"{palette['foreground']} on {delete}" if delete
-                     else palette["error"]),
+        #
+        # And unless the terminal cannot show the blend. `_diff_styles`
+        # puts the band on the xterm cube at 256 colours and falls back
+        # to the foreground form at sixteen (batch 257).
+        "diff_add": diff_add,
+        "diff_del": diff_del,
         # Unchanged context recedes: it is there to place the change,
         # not to be read. `secondary` rather than a dimmed foreground
         # for X1's reason -- `dim` is an attribute no floor can
@@ -509,6 +615,21 @@ def role_styles(theme: Theme) -> dict[str, str]:
 _UNSTYLABLE: set[str] = set()
 
 
+def colour_depth(app) -> str | None:
+    """How many colours `app`'s terminal shows, as Rich names it.
+
+    Read off Textual's own console, because that console is what renders
+    the screen: Rich decides the depth there from COLORTERM and TERM
+    (TEXTUAL_COLOR_SYSTEM overrides it), and downgrades every colour to
+    it on the way out. None when it cannot be read, which `role_styles`
+    treats as truecolour -- what this module did before it asked.
+    """
+    try:
+        return app.console.color_system
+    except Exception:  # noqa: BLE001 -- no console yet; keep the blend
+        return None
+
+
 def styles_for(app) -> dict[str, str]:
     """The active theme's role styles, or unstyled when there is no app.
 
@@ -550,7 +671,7 @@ def styles_for(app) -> dict[str, str]:
     if theme is None:
         return {}
     try:
-        return role_styles(theme)
+        return role_styles(theme, colour_depth(app))
     except Exception:  # noqa: BLE001 -- a theme this build cannot resolve
         name = getattr(theme, "name", "?")
         if name not in _UNSTYLABLE:

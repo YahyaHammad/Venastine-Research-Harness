@@ -175,7 +175,7 @@ class TestReadTool:
         "it is not installed" -- and a bare ModuleNotFoundError names a
         package the user never asked for and cannot place.
 
-        Reached only by someone who has enabled `read` in config.py, since
+        Reached only by someone who has enabled `read` in config.yaml, since
         the tool is globally denied. dispatch() would contain the raise into
         an {"error": ...} result either way; what this pins is that the
         message names the extra that fixes it.

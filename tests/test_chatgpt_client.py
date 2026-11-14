@@ -572,7 +572,7 @@ class TestEffortAndTheWindow:
         assert ("'gpt-6-luba' is not in your ChatGPT plan's model list"
                 in caplog.text)
         assert f"The plan lists: {MODEL}." in caplog.text
-        assert "MODEL_EFFORT_LEVELS" not in caplog.text
+        assert "model_effort_levels" not in caplog.text
         assert "ultra" not in caplog.text and "ultra" not in levels
         assert authoritative is True
 

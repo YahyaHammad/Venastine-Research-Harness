@@ -7,8 +7,8 @@ ROADMAP_v2 §45 (SQ7). A research run reaches for three models: the
 generator (the session pair, `/model`), the CRITIC that grounds and
 critiques its claims (§11), and — since §45 — the EMBEDDER that scores how
 close a source is to the claim it was cited for. Only the first has ever
-been reachable without editing installed source. `CRITIC_MODEL` has sat in
-`config.py` since §11, which means the routing this project's own
+been reachable without editing installed source. `critic_model` has sat in
+the harness's own config (`config.py`, now `config.yaml`) since §11, which means the routing this project's own
 methodology calls essential ("a model checking its own output for errors
 shares that model's blind spots") was available only to whoever could edit
 the checkout.
@@ -27,10 +27,10 @@ which part in a run — and `model_windows.py` is next door as the example
 of when a second file is right instead (it holds a different kind of fact,
 keyed on a pair rather than naming one).
 
-PRECEDENCE: THE STORE OUTRANKS `config.py`. The opposite of
+PRECEDENCE: THE STORE OUTRANKS `config.yaml`. The opposite of
 `model_windows`, and for the opposite reason — there, a configured value
 could be confidently wrong about a deployment, so the person won. Here
-`config.py` is the harness's own default and the store is a choice
+`config.yaml` is the harness's own default and the store is a choice
 someone made at a command prompt for this account, which is `/model`
 outranking `config.MODEL_NAME` exactly.
 
@@ -63,7 +63,7 @@ from json_store import read_versioned, write_json_atomic
 logger = logging.getLogger(__name__)
 
 # Bumped when the SHAPE changes. An unknown version reads as an empty
-# store, which costs the remembered roles and falls back to config.py --
+# store, which costs the remembered roles and falls back to config.yaml --
 # there is nothing here that was consented to, so the MCP store's careful
 # legacy handling has no counterpart.
 STORE_VERSION = 1
@@ -74,7 +74,7 @@ STORE_VERSION = 1
 # module exists to remove for CRITIC_MODEL.
 ROLES = ("critic", "embedder", "subagent")
 
-# Which config.py constant answers when the store is silent. None means
+# Which config.yaml value answers when the store is silent. None means
 # nothing does: `subagent` is remembered or unset (§57, SM5).
 _FALLBACK_ATTR = {"critic": "CRITIC_MODEL", "embedder": "EMBEDDER_MODEL",
                   "subagent": None}
@@ -89,7 +89,7 @@ def store_path() -> str:
 
 def _read_raw() -> dict:
     data = read_versioned(store_path(), STORE_VERSION,
-                          "falling back to config.py for pipeline models.")
+                          "falling back to config.yaml for pipeline models.")
     roles = data.get("roles")
     return roles if isinstance(roles, dict) else {}
 
@@ -128,7 +128,7 @@ def _valid(entry) -> bool:
 
 
 def remembered(role: str) -> Optional[dict]:
-    """What the user chose for `role`, or None. Ignores config.py."""
+    """What the user chose for `role`, or None. Ignores config.yaml."""
     entry = _read_raw().get(role)
     if not _valid(entry):
         return None
@@ -136,7 +136,7 @@ def remembered(role: str) -> Optional[dict]:
 
 
 def resolve(role: str) -> Optional[dict]:
-    """The pair actually in force for `role`: the store, else config.py,
+    """The pair actually in force for `role`: the store, else config.yaml,
     else None.
 
     THE ONE READER FOR THE PIPELINE. `orchestrator` and every shell ask
@@ -171,7 +171,7 @@ def forget(role: str) -> str:
     Three outcomes rather than a bool, following model_windows: the shell
     says a different sentence for each, and a failed write reported as
     "nothing was set" would be a lie about a file the user can go and
-    read. Note that "removed" does not mean the role is unset -- config.py
+    read. Note that "removed" does not mean the role is unset -- config.yaml
     may still answer, and the shell says so.
     """
     if role not in ROLES:
