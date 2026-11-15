@@ -6455,6 +6455,38 @@ its own batch because it changes what a deployment checks before it serves
 anyone, which wants a run on the Space; meanwhile `TestTheWallsHold` runs the
 real path in CI on every push.
 
+## 118. The Space's audit leaves out what only the Space installs (open, found batch 262)
+
+(Item 117 is on batch 260's branch, `stateless-ghs-redaction`, not yet merged.)
+
+**Found while moving the demo to Gradio 6.32.0.** On Hugging Face,
+`deploy_demo.audit_targets` audits `session.lock` and a lock compiled from
+`bridge_requirements`: the bridge's own requirements plus `gradio==` the pinned
+version. The Space installs more than that, in one pip command: the bundle's
+`requirements.txt`, `gradio[oauth,mcp]` at `sdk_version`, and the platform's own
+`torch<=2.13.0`, `uvicorn`, `websockets` and `spaces` (the line
+`build_demo_bundle.py` records from the Space's log). Resolved with uv 0.13.4
+on 2026-11-15 for 6.32.0, that line pins 112 packages against the audited
+set's 72:
+
+- **40 never audited:** among them `mcp` 1.30.0, `authlib`, `cryptography`,
+  `pyjwt`, `jsonschema`, `sse-starlette`, torch 2.13.0, triton, and torch's
+  CUDA packages;
+- **one at another version:** `pydantic` (2.12.5 in the Space, 2.14.3 audited),
+  because the `mcp` extra caps it.
+
+pip-audit 2.10.1 found nothing in either set that day, so nothing is exposed
+now. But an advisory in one of the 40 would not refuse a deploy, while the
+same advisory in the bridge's own set would.
+
+**Shape, not done here.** For `hf`, compile the Space's whole line for the audit,
+from `requirements(root, "hf")` plus `gradio[oauth,mcp]==GRADIO_VERSION` and
+the platform's pins, kept as one constant beside `GRADIO_VERSION`. That
+constant is read from a build log, so it can drift when Hugging Face changes
+its line. Left for its own batch because it changes what refuses a deploy,
+and the accepted list would need triage for a package the bridge never
+imports.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both

@@ -75,90 +75,22 @@ SINGLE_USER = "VENASTINE_SINGLE_USER"
 SINGLE_USER_DESCRIPTION = ("Set to 1 in a PRIVATE duplicate for single-user "
                            "mode: your own keys and the file tools.")
 
-# Audit findings triaged and accepted BY ID, the owner's call (batch 169,
-# batch 175 for two published after it, batch 192 for a third and batch
-# 210 for a fourth). An
-# entry applies only to a lock that pins exactly its version; once the pin
-# moves it is passed to nothing and the run says it is stale. A new ID for
-# the same version still refuses until someone triages it -- which is how
-# batch 175's two arrived: as a refusal, two days after the first 35 were
-# accepted. One entry per triage, so each reason says what was read and
-# when.
-ACCEPTED = (
-    {"package": "pillow", "version": "12.3.0",
-     # The first run of this audit found them; nothing had audited Gradio's
-     # dependencies before, because the Space installs Gradio itself.
-     "reason": (
-         "Gradio 6.30.0, the latest release and the version both platforms "
-         "run, requires pillow<13, and 13.0.0 is the first fixed release. "
-         "Read in Gradio's source on 2026-10-23: its upload route copies a "
-         "file without decoding it, and pillow opens only the deployment's "
-         "own favicon; image decoding happens in components and the MCP "
-         "server, and the bridge registers no image component and starts no "
-         "MCP server. session.lock, which runs the harness, pins 13.0.0."),
-     "ids": (
-         "CVE-2026-96636", "CVE-2026-96637", "CVE-2026-96638",
-         "CVE-2026-96639", "CVE-2026-96640", "CVE-2026-96641",
-         "CVE-2026-96642", "CVE-2026-96643", "CVE-2026-96644",
-         "CVE-2026-96778", "CVE-2026-112390", "CVE-2026-112391",
-         "CVE-2026-112392", "CVE-2026-112393", "CVE-2026-112395",
-         "CVE-2026-112396", "CVE-2026-112397", "CVE-2026-112399",
-         "CVE-2026-112400", "CVE-2026-112401", "CVE-2026-112402",
-         "CVE-2026-112404", "CVE-2026-112405", "CVE-2026-112406",
-         "CVE-2026-112891", "CVE-2026-112892", "CVE-2026-112893",
-         "CVE-2026-112894", "CVE-2026-112895", "CVE-2026-112896",
-         "CVE-2026-112897", "CVE-2026-112899", "CVE-2026-112900",
-         "CVE-2026-112901", "GHSA-78g4-xqwv-q3g8")},
-    {"package": "pillow", "version": "12.3.0",
-     # Published after batch 169; the deploy's audit refused them on
-     # 2026-10-25, the day image input merged.
-     "reason": (
-         "The same pin, for the same reason: Gradio 6.30.0 is still the "
-         "latest release and still requires pillow<13. Read on 2026-10-25. "
-         "CVE-2026-114501 leaks heap memory into an Arrow export when "
-         "PILLOW_ALIGNMENT is above 1: nothing in deploy/ sets that variable, "
-         "and neither the bridge nor Gradio's source exports an image to "
-         "Arrow. CVE-2026-112398 overflows the FlashPix decoder, reached by "
-         "Image.open on an untrusted file with olefile installed: olefile is "
-         "not in bridge.lock, so pillow cannot open FlashPix at all, and the "
-         "bridge opens no uploaded file -- its Image.open calls are the "
-         "favicon and gr.Workflow, which it does not use."),
-     "ids": ("CVE-2026-114501", "CVE-2026-112398")},
-    {"package": "pillow", "version": "12.3.0",
-     # Published 2026-10-19; the deploy's audit first refused it on
-     # 2026-10-27, in batch 191's dry runs.
-     "reason": (
-         "The same pin, for the same reason: Gradio 6.30.0 is still the "
-         "latest release and still requires pillow<13. Read on 2026-10-27, "
-         "in the gradio, spaces and hf-gradio wheels bridge.lock pins by "
-         "hash. PYSEC-2026-4327 (CVE-2026-112394) reads up to three heap "
-         "bytes past a buffer, or crashes, in the raw decoders for P;2L and "
-         "P;4L, on crafted image data. The bridge's own code imports no "
-         "pillow, and spaces and hf-gradio decode no image. Gradio decodes "
-         "in its components, its MCP server, its pipeline and Workflow "
-         "helpers and its PWA icon route; the bridge registers no "
-         "component, starts no MCP server (GRADIO_MCP_SERVER is never "
-         "set), calls no helper, and sets no favicon_path, so that route "
-         "answers 404 without opening anything."),
-     "ids": ("PYSEC-2026-4327",)},
-    {"package": "pillow", "version": "12.3.0",
-     # The deploy's audit first refused it on 2026-11-01, batch 209's
-     # redeploy; accepted in batch 210, the owner's call.
-     "reason": (
-         "The same pin, for the same reason: Gradio 6.31.0, now the latest "
-         "release, still requires pillow<13. Read on 2026-11-01, in the "
-         "gradio 6.30.0, gradio-client 2.7.2, spaces, hf-gradio and "
-         "textual-serve wheels bridge.lock pins by hash. PYSEC-2026-4332 "
-         "(CVE-2026-112403) overruns a heap buffer in the JPEG decoder when "
-         "a caller asks for downscaling, through Image.draft() or "
-         "Image.thumbnail(), which is the only caller of draft() in pillow "
-         "itself. None of those packages calls either: Gradio's one resize "
-         "helper, processing_utils.resize_and_crop, uses ImageOps.fit, "
-         "which does not draft, and nothing in Gradio calls the helper; "
-         "gradio-client, textual-serve and the bridge's own code import no "
-         "pillow at all."),
-     "ids": ("PYSEC-2026-4332",)},
-)
+# Audit findings triaged and accepted BY ID, the owner's call. An entry is
+# {"package", "version", "reason", "ids"}, and applies only to a lock that
+# pins exactly its version; once the pin moves it is passed to nothing and
+# the run says it is stale. A new ID for the same version still refuses
+# until someone triages it. One entry per triage, so each reason says what
+# was read and when.
+#
+# EMPTY since batch 262 (2026-11-15). Four entries had accepted 39 pillow
+# 12.3.0 advisories in the bridge (batches 169, 175, 192 and 210), each read
+# against what the bridge reaches, because Gradio up to 6.31.0 required
+# pillow<13 and 13.0.0 was the first fixed release. Three more refused every
+# deploy from 2026-11-14 (PYSEC-2026-4363, CVE-2026-128066, CVE-2026-128067).
+# Gradio 6.32.0 allows pillow<14, so GRADIO_VERSION moved to it, the bridge
+# resolves pillow 13.0.0, and the entries were removed rather than left to be
+# reported stale on every run.
+ACCEPTED: tuple = ()
 
 
 class DeployError(Exception):

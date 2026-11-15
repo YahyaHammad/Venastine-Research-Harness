@@ -78,7 +78,8 @@ def take_secrets(environ=None) -> dict:
 def drop_spaces_flag(environ=None) -> bool:
     """On a ModelScope Studio, remove `SYSTEM`, which its Studio OAuth sets
     to `spaces` for Gradio's own sign-in button (batch 177); True when it
-    did. Gradio 6.30 reads `SYSTEM=spaces` as running on a Hugging Face
+    did. Gradio 6.30 reads `SYSTEM=spaces` (gradio/utils.py, unchanged in
+    6.32, batch 262) as running on a Hugging Face
     Space and then starts that platform's hot-reload watcher from the
     `spaces` package (gradio/http_server.py), among other Space-only
     defaults (gradio/blocks.py: `api_open`, `pwa`). The bridge
