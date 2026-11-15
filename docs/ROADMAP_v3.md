@@ -43,6 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§96. The container's `/workspace`, read by the file tools** - **(BUILT in batch 263)** (the shell runs in a container that mounts the workspace at `/workspace`, so the paths the model saw there were spelled from it, while `read`, `write`, `edit` and `view_image` run on the host, where that path is not the workspace: each such call asked to leave the workspace and then failed. `resolve_path` now maps the container's spelling onto the workspace while a tool that starts commands is enabled, and every other outside path still asks; CW1-CW3)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -3062,6 +3063,76 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §96. The container's `/workspace`, read by the file tools
+
+**Added and built in batch 263, from the owner's report** (2026-11-15). Running 0.3.14 in WSL,
+with the shell in a container, the owner saw the shell work in `/workspace/...` while `read` and
+`write` were handed those same paths, asked to leave the workspace, and then failed.
+
+### What was measured (2026-11-15)
+
+- **The two halves see different machines.** The container mounts the workspace with
+  `-v <workspace>:/workspace -w /workspace` (`security/sandbox.py`), so `pwd` and every path a
+  build prints there begin `/workspace`. The file tools run on the host. `resolve_path` joined the
+  path onto the workspace with `os.path.join`, which keeps an absolute path as it is, so
+  `/workspace/notes.txt` stayed `/workspace/notes.txt` on POSIX and became
+  `C:\workspace\notes.txt` on Windows.
+- **So every such call asked, then failed.** A path outside the workspace always asks (ROADMAP
+  §6, which the owner kept on 2026-11-15). After a yes, `read` found no such file and `write` hit a
+  permission error: in WSL, `/` is not writable and `/workspace` does not exist.
+- **The model is told the spelling whatever the runtime.** `shell`'s description says the
+  workspace is mounted at `/workspace`. `shell_background`, `shell_monitor` and
+  `shell_interactive` start their commands in the same container.
+- **Live, in WSL with Podman** (batch 263). The real sandbox's `pwd` printed `/workspace`. With
+  the shell tools off, `read` of `/workspace/notes.txt` asked and then found no such file. With
+  them on, it read the file without asking, and a `write` to `/workspace/made.txt` was visible
+  to `cat` inside the container.
+- **The shell has the same gap from its side.** Measured on Windows and in WSL:
+  `cat /workspace/notes.txt` classifies `HOST_READ` and routes to the host, where the path is not
+  the workspace, while `cat notes.txt` is `INERT` and runs in the container. §96 leaves the shell
+  alone (see below).
+
+### Decisions (CW1-CW3)
+
+| # | Decision |
+|---|---|
+| **CW1** | **`/workspace/x` is `<workspace>/x` to `read`, `write`, `edit` and `view_image` while a tool that starts commands is enabled** (owner: map it, gated on the shell being enabled). Those tools are `APPROVAL_BY_SHELL_MODE`, asked through `is_tool_allowed`, so a shared hosted deployment, which refuses them, maps nothing. There is no runtime probe: the model learns the spelling from the tool descriptions, which say it whatever a probe would find, and a probe here could put up to 10 s per CLI on the TUI's UI thread, where a `write`'s diff resolves its path. The map lives in `file_ops.resolve_path`, so the approval check, the four handlers, the protected deny and the TUI's diff all resolve the path the same way. The mount point is one constant, `sandbox.CONTAINER_WORKSPACE`, which the container's `-v` and `-w` read too |
+| **CW2** | **Only the container's spelling of a workspace file is mapped.** `/workspace` is a whole segment, so `/workspacefoo` is not it, and a run of slashes after it counts as one, as POSIX reads it. The host's own reading wins when it already lands inside the workspace, so a host whose workspace really lives under `/workspace` keeps its meaning. A mapped path that lands outside the workspace (through `..` or a link) is not mapped, and the call asks about the path the host reads, as before. Every other path outside the workspace still asks (owner: keep asking, so no tool says whether a file exists before a yes) |
+| **CW3** | **The protected deny is unchanged.** `/workspace/.venastine/...` maps onto the workspace's own `.venastine/` and is refused before approval, in the words a relative path gets. The deny reads the mapped path, so a hard link inside the workspace to a protected file, named through the mount, is refused as well |
+
+CW1's gate and map are the owner's choice. CW2's two host rules and CW3 are adopted defaults the
+owner may overturn.
+
+### What §96 deliberately does not change
+
+- **The shell's classifier.** `cat /workspace/x` still reads as leaving the workspace, and runs
+  on the host after a prompt. The classifier reads tokens on the host and does not parse
+  (ROADMAP_v2 §28, G2), and mapping a token there would change what the gate auto-approves, which
+  wants its own decision. Recorded as `TECHNICAL_DEBT` 119.
+- **The tool descriptions.** `path` still says relative to the workspace, or absolute. The
+  change makes the spelling the model already uses work, and tells it nothing new.
+- **The WSL and SSH backends.** They run on the user's machine or a remote one, and mount
+  nothing.
+
+### Built (batch 263)
+
+- **`security/sandbox.py`**: `CONTAINER_WORKSPACE`, read by `_docker_argv`.
+- **`tools/builtin/file_ops.py`**: `resolve_path` maps the container's spelling, through
+  `_container_remainder`, `_shell_starts_commands` and `_inside`.
+
+19 tests in `tests/test_file_ops.py`, against a real workspace on disk, on Windows and in WSL:
+the four handlers, the approval check, `registry.dispatch` with no approval callback, the
+protected deny and a hard link to a protected file reached through the mount, each tool that turns the map on, and each rule in CW2.
+
+### Gap register
+
+- **Not driven in the owner's own install.** The live check used this branch's code against the
+  real sandbox, in WSL with Podman. The TUI's diff was not driven, and it reads `resolve_path`
+  as the handlers do.
+- **The shell side** is `TECHNICAL_DEBT` 119.
+
 ---
 
 ## §95. A reply that was all reasoning

@@ -2599,6 +2599,15 @@ def _interactive_command(prompt_token: str) -> str:
         prompt=prompt_token)
 
 
+#: Where the container mounts the workspace, and its working directory.
+#: Named once (ROADMAP_v3 §96, CW1) because the file tools read it too:
+#: `file_ops.resolve_path` maps a path spelled this way onto the workspace
+#: it names, and a second literal there would let the mount move without
+#: the map. Always a POSIX path, whatever the host is -- it is a path
+#: inside a Linux container.
+CONTAINER_WORKSPACE = "/workspace"
+
+
 def _docker_argv(
     command: str,
     workspace_dir: str,
@@ -2674,8 +2683,8 @@ def _docker_argv(
         # may run at once, so cleaning up "our" containers by the label
         # above would kill the other's sessions; this one scopes it.
         "--label", f"venastine.process={PROCESS_TOKEN}",
-        "-v", f"{workspace_real}:/workspace",
-        "-w", "/workspace",
+        "-v", f"{workspace_real}:{CONTAINER_WORKSPACE}",
+        "-w", CONTAINER_WORKSPACE,
         "--memory", f"{config.SANDBOX_MEMORY_MB}m",
         "--cpus", "1",
         "--pids-limit", str(config.SANDBOX_MAX_PIDS),
