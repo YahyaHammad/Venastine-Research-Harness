@@ -683,11 +683,18 @@ def _already_said(notices, kind: str) -> bool:
 # reasoning-only reply ends the turn with a notice. The row's first line is
 # also the live notice's text, so the line a person sees while the turn
 # runs is the line its replay draws (RO5).
+#
+# The first line says what did not run is THAT reply, and that results
+# returned before it are real (RO2 as amended in batch 261, the owner's
+# choice). It corrects a model that acts as though calls written in its
+# reasoning took effect, and a bare "nothing ran" could also be read as
+# "the calls earlier in this turn did not run either".
 HARNESS_REASONING_ONLY = "reasoning_only"
 REASONING_ONLY_END = "reasoning_only_end"
 REASONING_ONLY_HEADER = (
     "[harness] The last reply was reasoning only: no answer and no tool "
-    "call reached the harness, so nothing ran.")
+    "call reached the harness, so nothing in that reply ran. Results "
+    "returned before it are real.")
 _REASONING_ONLY_NUDGE = (
     REASONING_ONLY_HEADER + "\n"
     "A tool call written inside reasoning is not run. Make the call through "
