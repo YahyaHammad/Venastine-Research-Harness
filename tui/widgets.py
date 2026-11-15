@@ -39,6 +39,7 @@ from core.ansi import AnsiStripper
 from prompts.system_prompts import pass_label
 from tui import diffs, markdown, ravens, themes
 from tui.commands import registry as commands
+from tui.meters import short_count
 
 
 def as_content(text: Text) -> Content:
@@ -537,29 +538,29 @@ class UsageLine(Static):
             return
         self._last = key
 
-        def _k(n: int) -> str:
-            return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
-
         self.display = True
         mark = "*" if overridden else ""
         if window:
             # The limit as the scale, the fold point named as what it is.
-            scale = f"/{_k(window)}"
-            scale += f" (fold {_k(ceiling)}{mark})" if ceiling else ""
+            scale = f"/{short_count(window)}"
+            scale += f" (fold {short_count(ceiling)}{mark})" if ceiling else ""
         elif ceiling:
             # No window resolved -- context_limit() always answers, so this
             # is the bare-built widget and the pre-batch-119 callers that
             # pass four arguments. The old shape exactly, rather than a
             # blank scale, because a trigger is still better than nothing.
-            scale = f"/{_k(ceiling)}{mark}"
+            scale = f"/{short_count(ceiling)}{mark}"
         else:
             scale = ""
         # `system` is the harness-talking-about-itself role -- the right
         # meaning for a usage line, and the palette route the batch-26
         # guard test demands (it caught this line as a literal within one
         # commit of the widget existing).
+        # ROADMAP_v3 §97 (UF3): every figure here through the one k/M/B
+        # formatter, so `billed` past a million reads `1.2M`, not `1200k`.
         self.update(as_content(
-            Text(f"usage · ctx {_k(ctx)}{scale} · billed {_k(billed)}",
+            Text(f"usage · ctx {short_count(ctx)}{scale} · "
+                 f"billed {short_count(billed)}",
                  style=self._styles().get("system", ""))))
 
 

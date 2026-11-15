@@ -839,3 +839,191 @@ class TestACountThatIsPresentAndNotANumber:
         resp = _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
                                         "m", [], "sys", []))
         assert resp.usage == {"input_tokens": 11, "output_tokens": 0}
+
+
+# ---------------------------------------------------------------------------
+# ---- ROADMAP_v3 §97: cache counts, thoughts, and the counts not sent -------
+# ---------------------------------------------------------------------------
+
+class TestGoogleThoughtsAreOutput:
+    """§97 UF2. `candidates_token_count` leaves the model's thoughts out
+    (the SDK's own `total_token_count` adds them separately), so a thinking
+    model's output, its rate and `billed` all read short by them."""
+
+    def test_thoughts_join_the_candidates(self, monkeypatch):
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [_google_chunk(
+            [SimpleNamespace(text="hi", function_call=None)],
+            usage=SimpleNamespace(prompt_token_count=21,
+                                  candidates_token_count=9,
+                                  thoughts_token_count=30))]
+        resp = _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                        "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 21, "output_tokens": 39}
+
+    def test_a_reply_that_was_all_thoughts_is_not_a_missing_count(
+            self, monkeypatch):
+        """Under the flag, candidates absent and thoughts reported is a
+        count, not D21's broken promise: the model wrote thoughts."""
+        monkeypatch.setattr(
+            "core.client.load_provider_data",
+            lambda: {"GOOGLE": {"supports_stream_usage": True}})
+        chunks = [_google_chunk(
+            [], usage=SimpleNamespace(prompt_token_count=21,
+                                      candidates_token_count=None,
+                                      thoughts_token_count=12))]
+        resp = _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                        "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 21, "output_tokens": 12}
+        assert resp.usage_unreported == ()
+
+    def test_each_count_keeps_its_own_last_report(self, monkeypatch):
+        """Batch 147's per-field rule, per field still: a later chunk that
+        carries the candidates and not the thoughts keeps the thoughts."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [
+            _google_chunk([], usage=SimpleNamespace(
+                prompt_token_count=21, thoughts_token_count=30)),
+            _google_chunk([SimpleNamespace(text="hi", function_call=None)],
+                          usage=SimpleNamespace(prompt_token_count=21,
+                                                candidates_token_count=9)),
+        ]
+        resp = _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                        "m", [], "sys", []))
+        assert resp.usage["output_tokens"] == 39
+
+
+class TestCacheCountsComeThroughAsReported:
+    """§97 UF4 and UF5. Each branch reads its SDK's cache fields under one
+    spelling, keeps them only when sent, and makes `input_tokens` the whole
+    prompt where its SDK reports the cached part apart."""
+
+    def test_the_anthropic_branch_adds_its_cache_into_input(
+            self, monkeypatch):
+        """UF5, the owner's choice: this SDK's `input_tokens` excludes the
+        cache, so `billed`, `ctx` and the trigger read short without it."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=2_000, output_tokens=7,
+                                  cache_read_input_tokens=90_000,
+                                  cache_creation_input_tokens=500))
+        resp = _drain(call_model_stream(
+            _FakeAnthropicClient([_text_event("ok")], final_message),
+            "ANTHROPIC", "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 92_500, "output_tokens": 7,
+                              "cache_read_tokens": 90_000,
+                              "cache_write_tokens": 500}
+
+    def test_no_cache_fields_leave_the_usage_as_it_was(self, monkeypatch):
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=11, output_tokens=7,
+                                  cache_read_input_tokens=None,
+                                  cache_creation_input_tokens=None))
+        resp = _drain(call_model_stream(
+            _FakeAnthropicClient([_text_event("ok")], final_message),
+            "ANTHROPIC", "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 11, "output_tokens": 7}
+
+    def test_a_cache_count_alone_is_not_an_input_count(self, monkeypatch):
+        """UF5 adds to a reported input, never in place of one: D21 judges
+        a missing input, and a cache figure must not hide that."""
+        monkeypatch.setattr(
+            "core.client.load_provider_data",
+            lambda: {"ANTHROPIC": {"supports_stream_usage": True}})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=None, output_tokens=7,
+                                  cache_read_input_tokens=90_000))
+        with pytest.raises(RuntimeError, match="input_tokens"):
+            _drain(call_model_stream(
+                _FakeAnthropicClient([_text_event("ok")], final_message),
+                "ANTHROPIC", "m", [], "sys", []))
+
+    def test_the_google_branch_reports_its_cached_content(
+            self, monkeypatch):
+        """Part of `prompt_token_count` already, so input is unchanged."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [_google_chunk(
+            [SimpleNamespace(text="hi", function_call=None)],
+            usage=SimpleNamespace(prompt_token_count=21,
+                                  candidates_token_count=9,
+                                  cached_content_token_count=16))]
+        resp = _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                        "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 21, "output_tokens": 9,
+                              "cache_read_tokens": 16}
+
+    def test_the_openai_compatible_branch_reports_its_prompt_details(
+            self, monkeypatch):
+        """Part of `prompt_tokens` already, so input is unchanged."""
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [
+            _oai_chunk(_oai_delta(content="hi")),
+            _oai_chunk(None, usage=SimpleNamespace(
+                prompt_tokens=50, completion_tokens=3,
+                prompt_tokens_details=SimpleNamespace(
+                    cached_tokens=40, cache_write_tokens=6))),
+        ]
+        resp = _drain(call_model_stream(_FakeOpenAIClient(chunks), "OPENAI",
+                                        "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 50, "output_tokens": 3,
+                              "cache_read_tokens": 40,
+                              "cache_write_tokens": 6}
+
+    def test_a_provider_with_no_prompt_details_reports_no_cache(
+            self, monkeypatch):
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [_oai_chunk(None, usage=SimpleNamespace(
+            prompt_tokens=50, completion_tokens=3,
+            prompt_tokens_details=None))]
+        resp = _drain(call_model_stream(_FakeOpenAIClient(chunks), "OPENAI",
+                                        "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 50, "output_tokens": 3}
+
+
+class TestTheCountsD21CoercedAreNamed:
+    """§97 UF4. With the flag false, `_stream_usage` makes an unreported
+    count a 0 for the loop's arithmetic; `usage_unreported` names each, so
+    `/usage` can say "not reported" instead of printing the zero."""
+
+    def test_a_stream_that_reported_nothing_names_both(self, monkeypatch):
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [_oai_chunk(_oai_delta(content="hi"))]
+        resp = _drain(call_model_stream(_FakeOpenAIClient(chunks), "OPENAI",
+                                        "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 0, "output_tokens": 0}
+        assert resp.usage_unreported == ("input_tokens", "output_tokens")
+
+    def test_a_partial_report_names_only_the_missing_count(
+            self, monkeypatch):
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        chunks = [_google_chunk(
+            [SimpleNamespace(text="hi", function_call=None)],
+            usage=SimpleNamespace(prompt_token_count=11,
+                                  candidates_token_count=None))]
+        resp = _drain(call_model_stream(_FakeGoogleClient(chunks), "GOOGLE",
+                                        "m", [], "sys", []))
+        assert resp.usage_unreported == ("output_tokens",)
+
+    def test_a_full_report_names_nothing(self, monkeypatch):
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=11, output_tokens=7))
+        resp = _drain(call_model_stream(
+            _FakeAnthropicClient([_text_event("ok")], final_message),
+            "ANTHROPIC", "m", [], "sys", []))
+        assert resp.usage_unreported == ()
+
+    def test_the_anthropic_branch_names_them_too(self, monkeypatch):
+        monkeypatch.setattr("core.client.load_provider_data", lambda: {})
+        final_message = SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")], usage=None)
+        resp = _drain(call_model_stream(
+            _FakeAnthropicClient([_text_event("ok")], final_message),
+            "ANTHROPIC", "m", [], "sys", []))
+        assert resp.usage == {"input_tokens": 0, "output_tokens": 0}
+        assert resp.usage_unreported == ("input_tokens", "output_tokens")

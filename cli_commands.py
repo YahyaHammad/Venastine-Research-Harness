@@ -41,6 +41,7 @@ from uuid import UUID
 
 from core import ansi
 from core.commands import CATALOG, CLI, CommandRegistry, absent_reason, bind
+from core.usage_view import UsageTally, report_lines
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,12 @@ class ChatSession:
     # Left for run_chat by /quit and /grill-me.
     quit_requested: bool = False
     one_shot: object = None
+    # ROADMAP_v3 §97 (UF4). `/usage`'s tally: the calls this shell made on
+    # `usage_thread` since it was opened here. The TUI's memory keeps one
+    # across turns; this shell builds a memory per turn, so the turns'
+    # tallies (`ModelResponse.turn_usage`) are added up here instead.
+    usage: object = field(default_factory=UsageTally)
+    usage_thread: Optional[UUID] = None
 
     def memory(self):
         """The current thread, created if there is none yet.
@@ -98,6 +105,19 @@ class ChatSession:
         memory = ConversationMemory(thread_id=self.thread_id)
         self.thread_id = memory.thread_id
         return memory
+
+    def count_usage(self, response) -> None:
+        """Add a finished turn's calls to `/usage`'s tally (§97, UF4).
+
+        The tally starts again when the turn ran on another thread than
+        the one it was counting -- the first turn after /new, /resume or
+        /threads -- which is the TUI's span: a thread since it was opened.
+        """
+        thread = getattr(response, "thread_id", None) or self.thread_id
+        if thread != self.usage_thread:
+            self.usage = UsageTally()
+            self.usage_thread = thread
+        self.usage.merge(getattr(response, "turn_usage", None))
 
 
 def _out(text: str = "") -> None:
@@ -689,6 +709,16 @@ def _cmd_network(session: ChatSession, args: str) -> None:
         _out(line)
 
 
+def _cmd_usage(session: ChatSession, args: str) -> None:
+    """ROADMAP_v3 §97 (UF4). The TUI's /usage, line for line: both print
+    `core.usage_view.report_lines`. Empty until a turn has run on this
+    thread here, which is the span the TUI's memory covers."""
+    same = (session.thread_id is not None
+            and session.usage_thread == session.thread_id)
+    for line in report_lines(session.usage if same else None):
+        _out(line)
+
+
 def _cmd_forget(session: ChatSession, args: str) -> None:
     raw = args.strip()
     if not raw:
@@ -852,6 +882,7 @@ def register_cli_commands() -> None:
         bind("model", _cmd_model),
         bind("network", _cmd_network),
         bind("new", _cmd_new),
+        bind("usage", _cmd_usage),
         bind("quit", _cmd_quit),
         bind("ref", _cmd_ref),
         bind("resume", _cmd_resume),

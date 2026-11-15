@@ -346,6 +346,22 @@ class SessionNote(Message):
         super().__init__()
 
 
+class SessionWait(Message):
+    """The turn worker began (or stopped) waiting on its background
+    sessions (ROADMAP_v3 §97, UF1).
+
+    Posted by `_wait_for_sessions` for the meter, which runs on the UI
+    thread: the seconds between wake turns are the shell waiting, not the
+    model writing, so the completion line's rate leaves them out. FIFO from
+    the one worker, like SessionNote, so a wake turn's events always land
+    after the `False` that resumes the clock for them.
+    """
+
+    def __init__(self, waiting: bool) -> None:
+        self.waiting = waiting
+        super().__init__()
+
+
 class ConnectCodeReady(Message):
     """`/connect huggingface` has a device code to show (ROADMAP_v3 §79, HD5).
 
@@ -887,6 +903,7 @@ class VenastineApp(App):
     _meter_timer = None
     _meter_last = None
     _last_turn_elapsed = None
+    _last_turn_generating = None
     _turn_output_tokens = None
     _history = None
     # ROADMAP_v3 §61 (CN9). The live turn's CancelToken, or None between
@@ -1115,6 +1132,10 @@ class VenastineApp(App):
         #: at the exits, because `_busy` is also cleared on paths
         #: where no turn ever ran.
         self._last_turn_elapsed = None
+        #: The same turn's seconds with no tool running and no session
+        #: wait: the completion line's rate divides by this, `took` by
+        #: the one above (ROADMAP_v3 §97, UF1).
+        self._last_turn_generating = None
         #: The finished turn's OUTPUT tokens, off the terminal
         #: response. None where the provider reports no usage, which
         #: is twelve of the fifteen configured ones -- and None is
@@ -1645,7 +1666,13 @@ class VenastineApp(App):
         now = monotonic()
         if value:
             self._meter.start(now)
+            # §97 (UF1). Summed per terminal response since this batch, so
+            # it starts at the turn: a count left by a turn whose line was
+            # never written must not join the next one's.
+            self._turn_output_tokens = None
         else:
+            # Read BEFORE stop, which closes the turn and zeroes it.
+            self._last_turn_generating = self._meter.generating(now)
             self._last_turn_elapsed = self._meter.stop(now)
         self._sync_meter_timer()
         self._refresh_meter()
@@ -1781,9 +1808,12 @@ class VenastineApp(App):
         if elapsed is None:
             # `_busy` was cleared without a turn having run.
             return
+        generating = self._last_turn_generating
+        self._last_turn_generating = None
         self._transcript.write_role(
             'system',
-            self._meter.completion(elapsed, self._turn_output_tokens))
+            self._meter.completion(elapsed, self._turn_output_tokens,
+                                   generating))
         self._turn_output_tokens = None
 
     def refresh_status(self) -> None:
@@ -3351,6 +3381,9 @@ class VenastineApp(App):
         from core.session_wake import build_wake
 
         sessions = shell_sessions.sessions
+        # ROADMAP_v3 §97 (UF1). Whether the meter has been told this stretch
+        # is a wait, so it is told once per stretch rather than per second.
+        waiting = False
         while True:
             if not sessions.live_for(thread_id) and not sessions.pending(thread_id):
                 return
@@ -3409,6 +3442,9 @@ class VenastineApp(App):
                     "and their results will arrive with your next "
                     "message —"))
                 return
+            if not waiting:
+                self.post_message(SessionWait(True))
+                waiting = True
             batch = sessions.wait_for_wake(thread_id, timeout=1.0)
             if batch is None:
                 if sessions.suspended(thread_id):
@@ -3424,6 +3460,9 @@ class VenastineApp(App):
                     return
                 continue
             text, record = build_wake(batch)
+            # §97 (UF1). The wake turn is the model writing again.
+            self.post_message(SessionWait(False))
+            waiting = False
             # ITS FIRST LINE, matching core/replay.py's rule for the same
             # row: the rest is program output the model was given, which
             # can run to thousands of lines and would bury the
@@ -3437,6 +3476,13 @@ class VenastineApp(App):
 
     def on_session_note(self, message: SessionNote) -> None:
         self._transcript.write_role(message.role, message.text)
+
+    def on_session_wait(self, message: SessionWait) -> None:
+        """ROADMAP_v3 §97 (UF1): pause or resume the rate's clock."""
+        if self._meter is None:
+            return
+        self._meter.set_waiting(message.waiting, monotonic())
+        self._refresh_meter()
 
     def _deliver_held(self, thread_id) -> None:
         """Results held for the user's next message (§49, SS2/SS19): past
@@ -4056,8 +4102,17 @@ class VenastineApp(App):
             # input deltas a tool-using turn brings in). Dividing
             # either by a duration yields a number that looks like
             # tok/s and is not.
-            self._turn_output_tokens = getattr(
+            #
+            # SUMMED, since ROADMAP_v3 §97 (UF1): a turn held open for its
+            # background sessions ends with one line, after every wake
+            # turn, and each wake turn is a run of its own with its own
+            # terminal response. Assigning kept only the LAST wake turn's
+            # count, divided by a time that covered them all.
+            reported = getattr(
                 event.final_response, 'turn_output_tokens', None)
+            if reported is not None:
+                self._turn_output_tokens = (
+                    (self._turn_output_tokens or 0) + reported)
             transcript.flush_stream()
             if event.stop_reason and event.stop_reason != "complete":
                 transcript.write_system(f"[stopped early: {event.stop_reason}]")
@@ -6240,6 +6295,22 @@ def _cmd_network(app: VenastineApp, args: str) -> None:
     app.refresh_network_line(force=True)
 
 
+def _cmd_usage(app: VenastineApp, args: str) -> None:
+    """ROADMAP_v3 §97 (UF4): this thread's provider-reported counts.
+
+    The lines are `core.usage_view.report_lines`'s, which the CLI prints
+    too, over the tally `ConversationMemory.record_usage` keeps beside
+    `billed` -- so this and the usage line cover one span. `_memory`, not
+    `memory`: a thread with no turn yet has nothing to count, and the
+    public property would write a thread row to say so.
+    """
+    from core.usage_view import report_lines
+
+    memory = app._memory
+    for line in report_lines(getattr(memory, "usage", None)):
+        app._transcript.write_system(line)
+
+
 def _cmd_trigger(app: VenastineApp, args: str) -> None:
     """Override the working-set compaction ceiling for this session.
 
@@ -8415,6 +8486,7 @@ def register_builtin_commands() -> None:
         bind("window", _cmd_window),
         bind("trigger", _cmd_trigger),
         bind("network", _cmd_network),
+        bind("usage", _cmd_usage),
         bind("classifier", _cmd_classifier),
         bind("config", _cmd_config, complete=_config_rows),
         bind("secrets", _cmd_secrets),

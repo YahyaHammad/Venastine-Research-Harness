@@ -22,6 +22,7 @@ from uuid import uuid4
 import pytest
 
 from core.client import ModelResponse, StreamToken, ToolCallRequest
+from core.usage_view import UsageTally
 
 # ---------------------------------------------------------------------------
 # ---- Generator draining (ROADMAP_v2 §22) ---------------------------------
@@ -1442,6 +1443,7 @@ class FakeMemory:
         # accumulator -- same shape, same scope (per object, never
         # persisted), so growth tests can assert the thread total.
         self.billed_tokens = 0
+        self.usage = UsageTally()
         self.checkpoints_applied = 0
         # Batch 91. What the loop recorded as this run's failure, in order.
         self.failures = []
@@ -1477,6 +1479,10 @@ class FakeMemory:
 
     def record_billed(self, tokens):
         self.billed_tokens += int(tokens or 0)
+
+    def record_usage(self, usage, unreported=()):
+        # ROADMAP_v3 §97 (UF4): the real tally, since it is pure.
+        self.usage.add(usage, unreported)
 
     def apply_checkpoint(self):
         self.checkpoints_applied += 1

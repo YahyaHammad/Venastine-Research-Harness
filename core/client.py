@@ -310,6 +310,17 @@ class ModelResponse:
     turn_billed_tokens: Optional[int] = None
     turn_new_tokens: Optional[int] = None
     turn_output_tokens: Optional[int] = None
+    # ROADMAP_v3 §97 (UF4). The usage keys THIS call's provider did not
+    # send, which `_stream_usage` coerced to 0 so the loop's arithmetic
+    # stays integer (D21). `/usage` reads it so a coerced zero is never
+    # shown as a count. A cache count needs no entry here: it is put in
+    # `usage` only when reported, so its absence already says so.
+    usage_unreported: tuple = ()
+    # §97 (UF4). This run's calls as a `core.usage_view.UsageTally`, set by
+    # `run_agent_conversation` and `wake_conversation` -- whose memory is
+    # built for the one run, so its tally is this turn's -- for the CLI's
+    # `/usage`, which keeps no memory between turns. None elsewhere.
+    turn_usage: Optional[object] = None
     # Batch 44 (§44). The turn's reasoning, as the PROVIDER'S OWN BLOCKS
     # rather than as the text §38 streams for display:
     #
@@ -497,6 +508,14 @@ def _stream_usage(provider_name: str, counts: dict,
     With the flag FALSE the coercion is all that happens, and 0 is the
     right answer there: the flag's whole purpose is to let a provider that
     genuinely omits usage run anyway.
+
+    RETURNS THE COERCED KEYS TOO (ROADMAP_v3 §97, UF4): `(usage,
+    unreported)`, where `unreported` names each count this made a 0 of,
+    for `ModelResponse.usage_unreported`. The 0 is right for the loop's
+    sums and wrong for `/usage`, which shows only what the provider sent;
+    one return keeps the two from being decided in two places. A cache
+    count (`CACHE_COUNTS`) is carried through only when it was reported --
+    nothing adds it, so it needs no zero.
     """
     reported_in = counts["input_tokens"]
     reported_out = counts["output_tokens"]
@@ -518,8 +537,56 @@ def _stream_usage(provider_name: str, counts: dict,
                 f"supports_stream_usage=True, so this step's token "
                 f"accounting would be short by it."
             )
-    return {"input_tokens": reported_in or 0,
-            "output_tokens": reported_out or 0}
+    usage = {"input_tokens": reported_in or 0,
+             "output_tokens": reported_out or 0}
+    for key in CACHE_COUNTS:
+        if counts.get(key) is not None:
+            usage[key] = counts[key]
+    unreported = tuple(name for name, value in
+                       (("input_tokens", reported_in),
+                        ("output_tokens", reported_out)) if value is None)
+    return usage, unreported
+
+
+#: The cache counts a usage dict may carry (ROADMAP_v3 §97, UF4/UF5), each
+#: present only when the provider reported it. Spelled the same on every
+#: branch, whatever the SDK calls it, so `core/usage_view.py` reads one key.
+CACHE_COUNTS = ("cache_read_tokens", "cache_write_tokens")
+
+#: The Google branch's usage fields, each read per chunk and kept per its
+#: own last report (batch 147's rule), then combined at the end of the
+#: stream (§97, UF2). `tests/test_sdk_conformance.py` asks the pinned SDK
+#: for every one.
+_GOOGLE_COUNTS = ("prompt_token_count", "candidates_token_count",
+                  "thoughts_token_count", "cached_content_token_count")
+
+
+def _sum_reported(*values) -> Optional[int]:
+    """The sum of the counts that were reported, or None when none was.
+
+    For a figure a provider splits across fields that are each nullable:
+    Google's output, which is its candidates PLUS its thoughts (§97 UF2).
+    Not `sum(v or 0 ...)`, which would turn "reported nothing" into a zero
+    before D21 has looked at it -- batch 147's defect, one helper over.
+    """
+    reported = [value for value in values if value is not None]
+    return sum(reported) if reported else None
+
+
+def _whole_prompt(input_tokens, cache_read, cache_write) -> Optional[int]:
+    """Input as the WHOLE prompt, on a branch that reports its cached part
+    apart (ROADMAP_v3 §97, UF5, the owner's choice).
+
+    The Anthropic SDK's `input_tokens` leaves out the tokens read from the
+    cache and the tokens written to it; the OpenAI-compatible and Google
+    counts include theirs. Adding them here, at the producer, is what makes
+    `billed`, `ctx` and the compaction trigger mean one thing on every
+    branch. None stays None: an input count the provider did not send is
+    D21's to judge, and a cache count alone is not an input count.
+    """
+    if input_tokens is None:
+        return None
+    return input_tokens + (cache_read or 0) + (cache_write or 0)
 
 
 # ============================================================================
@@ -2186,6 +2253,15 @@ def _chatgpt_stream(client, model: str, items: list, system_prompt: str,
                     reported = _token_count(usage_obj, key)
                     if reported is not None:
                         usage[key] = reported
+                # §97 (UF4). Part of `input_tokens` already on this API,
+                # so UF5 adds nothing here; only what was sent is kept.
+                cached = getattr(usage_obj, "input_tokens_details", None)
+                for key, attribute in (("cache_read_tokens", "cached_tokens"),
+                                       ("cache_write_tokens",
+                                        "cache_write_tokens")):
+                    reported = _token_count(cached, attribute)
+                    if reported is not None:
+                        usage[key] = reported
                 details = getattr(response, "incomplete_details", None)
                 if getattr(details, "reason", None) == "max_output_tokens":
                     finish_reason = "length"
@@ -2206,7 +2282,7 @@ def _chatgpt_stream(client, model: str, items: list, system_prompt: str,
         if callable(close):
             close()
 
-    usage = _stream_usage("CHATGPT", usage, supports_stream_usage)
+    usage, unreported = _stream_usage("CHATGPT", usage, supports_stream_usage)
     calls = []
     for item in pending_calls:
         name = getattr(item, "name", None) or ""
@@ -2221,6 +2297,7 @@ def _chatgpt_stream(client, model: str, items: list, system_prompt: str,
             name=name, input=parsed, parse_error=parse_error))
     yield StreamToken(final_response=ModelResponse(
         text="".join(text_parts), tool_calls=calls, usage=usage,
+        usage_unreported=unreported,
         thinking=_thinking_record("CHATGPT", model, reasoning_items),
     ))
 
@@ -2396,9 +2473,19 @@ def call_model_stream(
                 if b.type in ("thinking", "redacted_thinking")
             ]
             usage_obj = getattr(final_msg, "usage", None)
+            # §97 (UF4, UF5). This SDK reports the cached part of the
+            # prompt APART from `input_tokens`, so input is made the whole
+            # prompt here, as every other branch's already is.
+            cache_read = _token_count(usage_obj, "cache_read_input_tokens")
+            cache_write = _token_count(usage_obj,
+                                       "cache_creation_input_tokens")
             usage = {
-                "input_tokens": _token_count(usage_obj, "input_tokens"),
+                "input_tokens": _whole_prompt(
+                    _token_count(usage_obj, "input_tokens"),
+                    cache_read, cache_write),
                 "output_tokens": _token_count(usage_obj, "output_tokens"),
+                "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write,
             }
 
         # D21 parity with the other two branches (audit #40). This branch
@@ -2421,10 +2508,12 @@ def call_model_stream(
         # Batch 147: the rule itself, and the coercion that makes `usage`
         # two ints, are in `_stream_usage` -- one copy for three branches
         # that carried three.
-        usage = _stream_usage(provider_name, usage, supports_stream_usage)
+        usage, unreported = _stream_usage(provider_name, usage,
+                                          supports_stream_usage)
 
         yield StreamToken(final_response=ModelResponse(
             text=text, tool_calls=calls, usage=usage,
+            usage_unreported=unreported,
             thinking=_thinking_record(provider_name, model, thinking_blocks),
         ))
         return
@@ -2450,6 +2539,13 @@ def call_model_stream(
         # partial-report case the widened rule exists for arrives here
         # already coerced and indistinguishable (batch 147).
         usage = {"input_tokens": None, "output_tokens": None}
+        # The provider's own fields, kept apart until the stream ends:
+        # OUTPUT IS TWO OF THEM (§97, UF2). `candidates_token_count` leaves
+        # the model's thoughts out -- the SDK's own `total_token_count` is
+        # documented as prompt + candidates + tool-use prompt + thoughts --
+        # and thoughts are generated and billed as output, so the rate and
+        # `billed` read short by them on a thinking model until this batch.
+        google_counts = dict.fromkeys(_GOOGLE_COUNTS)
 
         for chunk in client.models.generate_content_stream(
             model=model,
@@ -2489,22 +2585,33 @@ def call_model_stream(
             # the provider chose to put the totals on.
             usage_meta = getattr(chunk, "usage_metadata", None)
             if usage_meta is not None:
-                for key, attribute in (
-                        ("input_tokens", "prompt_token_count"),
-                        ("output_tokens", "candidates_token_count")):
+                for attribute in _GOOGLE_COUNTS:
                     reported = _token_count(usage_meta, attribute)
                     if reported is not None:
-                        usage[key] = reported
+                        google_counts[attribute] = reported
+
+        # §97 (UF2, UF4). Each field kept per its own last report above,
+        # then combined once: thoughts join the candidates in output
+        # (`_sum_reported`, so neither alone being absent zeroes the other),
+        # and the cached content is a cache read that `prompt_token_count`
+        # already includes, so UF5 adds nothing to input on this branch.
+        usage["input_tokens"] = google_counts["prompt_token_count"]
+        usage["output_tokens"] = _sum_reported(
+            google_counts["candidates_token_count"],
+            google_counts["thoughts_token_count"])
+        usage["cache_read_tokens"] = google_counts["cached_content_token_count"]
 
         # D21, in the one place all three branches read it (batch 147).
         # This is the branch the nullable-field defect was found in: the
         # pinned google-genai declares every usage field Optional[int], so
         # `usage` could leave here holding None and the raise could not
         # fire -- `None != 0`.
-        usage = _stream_usage(provider_name, usage, supports_stream_usage)
+        usage, unreported = _stream_usage(provider_name, usage,
+                                          supports_stream_usage)
 
         yield StreamToken(final_response=ModelResponse(
             text="".join(text_parts), tool_calls=calls, usage=usage,
+            usage_unreported=unreported,
             thinking=_thinking_record(provider_name, model, signatures),
         ))
         return
@@ -2605,12 +2712,23 @@ def call_model_stream(
                 reported = _token_count(usage_obj, attribute)
                 if reported is not None:
                     usage[key] = reported
+            # §97 (UF4). Part of `prompt_tokens` already on this API, so
+            # UF5 adds nothing here. A provider that spells its cache
+            # counts some other way reports none, and /usage says so.
+            cached = getattr(usage_obj, "prompt_tokens_details", None)
+            for key, attribute in (("cache_read_tokens", "cached_tokens"),
+                                   ("cache_write_tokens",
+                                    "cache_write_tokens")):
+                reported = _token_count(cached, attribute)
+                if reported is not None:
+                    usage[key] = reported
 
     # D21: if the provider is marked as supporting stream usage but we
     # got no usable usage, the stream was likely interrupted before the
     # final usage chunk arrived. Raise rather than silently reporting zero.
     # One copy for three branches since batch 147.
-    usage = _stream_usage(provider_name, usage, supports_stream_usage)
+    usage, unreported = _stream_usage(provider_name, usage,
+                                      supports_stream_usage)
 
     calls = []
     for idx in sorted(tool_fragments):
@@ -2651,6 +2769,7 @@ def call_model_stream(
 
     yield StreamToken(final_response=ModelResponse(
         text="".join(text_parts), tool_calls=calls, usage=usage,
+        usage_unreported=unreported,
         thinking=_thinking_record(provider_name, model, reasoning_blocks),
     ))
 
