@@ -2343,6 +2343,27 @@ def rebind_posture(monkeypatch):
 # survival IS the leak). The needle differs from the text for the shapes
 # because their whole point is to preserve the surrounding structure: a
 # redacted `<password>` element still has its tags.
+
+
+#: The signature of the fake below, named because a row and a test each
+#: need the part a pattern taking only some of the token would leave.
+STATELESS_SIGNATURE = "q1W2-e3R4_" * 30
+
+
+def fake_stateless_github_token(prefix: str = "ghs_") -> str:
+    """A FAKE GitHub token in the stateless `ghs_APPID_JWT` form (batch 260).
+
+    The shape is GitHub's own: an app id, then a JWT whose header and
+    payload open the way base64url JSON does, 526 characters with two dots,
+    where GitHub gives about 520. BUILT from pieces like every value below,
+    so that no source line holds a run a secret scanner reads as a JWT. The
+    signature is no signature, and the header is the standard one for
+    `{"alg":"RS256","typ":"JWT"}`."""
+    return (prefix + "1234567_" + "eyJhbGciOiJSUzI1" + "NiIsInR5cCI6IkpXVCJ9"
+            + "." + "eyJpc3MiOiJmYWtl" + "a1b2c3d4" * 20 + "."
+            + STATELESS_SIGNATURE)
+
+
 REDACTION_CASES = [
     ("openai key",
      "401 from https://api.example/v1?key=sk-a1b2c3d4a1b2c3d4a1b2c3",
@@ -2394,6 +2415,13 @@ REDACTION_CASES = [
     ("github oauth token",
      "token refresh returned gho_" + "a1b2c3d4" * 4 + "a1b2",
      "gho_" + "a1b2c3d4" * 4 + "a1b2"),
+    # Batch 260: the stateless form every installation token has had since
+    # GitHub's rollout finished, which the 40-character pattern behind the
+    # row above cannot see. The needle is the signature: it comes last, so
+    # it is what a pattern that took only part of the token leaves standing.
+    ("github stateless token",
+     "git push failed with " + fake_stateless_github_token() + " (exit 128)",
+     STATELESS_SIGNATURE),
     ("openai project key",
      "401 for sk-proj-" + "a1b2c3d4_" * 3 + "a1b2",
      "sk-proj-" + "a1b2c3d4_" * 3 + "a1b2"),

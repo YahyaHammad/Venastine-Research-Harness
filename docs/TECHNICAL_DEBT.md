@@ -3145,6 +3145,18 @@ Two findings in the building, both in DEVLOG batch 160: a lazy BEGIN-to-END
 match ate the prose between two quoted markers, and the obvious footer regex is
 quadratic on a megabyte of base64.
 
+**The `ghs_` half of that list went stale in April, and batch 260 covers it
+again.** Since 2026-04-27, GitHub has minted installation tokens in a stateless
+form, `ghs_APPID_JWT`: a JWT after the prefix, about 520 characters with two
+dots. GitHub's changelog called the rollout complete on 2026-10-02, with Actions'
+`GITHUB_TOKEN` included. The 40-character pattern added above stops at the first
+underscore. Measured on 2026-11-14, a fake passed `redact_output_text` whole and
+refused no input. Batch 259's evaluation of a GitHub persona found the gap.
+Batch 260 adds a second GitHub pattern, on both sides as this closure's ruling
+requires: the four `gh[ousr]_` prefixes, then three base64url runs of at least 20
+characters joined by two dots. DEVLOG batch 260 has the measurements and the
+owner's two choices.
+
 ## 53. `resolve=False` checks dotted IP literals and no other numeric form (closed, batch 213)
 
 **Issue:** #207.
@@ -6454,6 +6466,44 @@ would then fail the startup gate rather than every call after it. Left for
 its own batch because it changes what a deployment checks before it serves
 anyone, which wants a run on the Space; meanwhile `TestTheWallsHold` runs the
 real path in CI on every push.
+
+## 117. The input side's URL scan is quadratic on one long alphanumeric run (open, found batch 260)
+
+**Found while writing batch 260's linearity test.** The test drove a megabyte
+through `check_input_policy` as well as `redact_output_text`. Severity `S3`,
+`stability`.
+
+**What was measured.** `_input_leaf` runs `_URL_RE.findall` over every string
+in every tool call's arguments, looking for a URL whose domain is blocked. On
+one run of letters and digits with no `://` in it, every position is a start.
+`[a-zA-Z][a-zA-Z0-9+.\-]*` scans to the end of the run and then fails to find
+`://`. Measured on Windows in the pinned venv:
+
+| run length | `_URL_RE.findall` |
+|---|---|
+| 25 KB | 0.24 s |
+| 50 KB | 0.98 s |
+| 100 KB | 4.8 s |
+| 1 MB, through `check_input_policy` | 441 s |
+
+The same 100 KB through `redact_output_text` takes 0.008 s. With a `_` every
+nine characters, `check_input_policy` takes 0.008 s too, because `_` is not a
+scheme character and so it ends the run.
+
+**Why it matters.** The scan runs on the arguments before the handler does. A
+call carrying a long hex string, or a minified line with no punctuation, stalls
+dispatch for seconds at 100 KB and for minutes at a megabyte. Nothing is refused
+and nothing leaks; the cost is the hang.
+
+**Shape, not done here.** Measured standalone on the regex, not applied. Bound
+the scheme: `[a-zA-Z][a-zA-Z0-9+.\-]{0,31}://`. Each start then costs at most 32
+steps, and a megabyte takes 0.05 s. It finds every URL today's pattern finds in
+`1abc://`, `0https://`, `git+ssh://` and ordinary prose. For a scheme glued to a
+long run, it finds the same host from a later start. The other shape, a
+lookbehind like batch 260's, takes 0.016 s, but it stops seeing
+`0https://exploit-db.com/x`, and that is a way around the blocklist. Left out of
+batch 260 because it changes what the blocklist reads, and the batch is about
+one token form.
 
 ## Review-marathon arrivals at open issues with no register entry
 

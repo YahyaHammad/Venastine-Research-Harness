@@ -20,7 +20,11 @@ from safety.policy_enforcement import (
     param_digest,
     redact_secrets,
 )
-from tests.conftest import rebind_posture
+from tests.conftest import (
+    STATELESS_SIGNATURE,
+    fake_stateless_github_token,
+    rebind_posture,
+)
 
 # ===========================================================================
 # ---- redact_secrets -------------------------------------------------------
@@ -1238,4 +1242,132 @@ class TestTheWidenedVocabularyKeepsItsBoundaries:
 
         started = time.perf_counter()
         redact_output_text(text)
+        assert time.perf_counter() - started < 10
+
+
+# ===========================================================================
+# ---- Batch 260: GitHub's stateless tokens ---------------------------------
+# ===========================================================================
+
+_STATELESS = fake_stateless_github_token()
+
+
+class TestTheStatelessGitHubTokenShape:
+    """GitHub's installation tokens have had the form `ghs_APPID_JWT` since
+    its rollout finished on 2026-10-02: a JWT after the prefix, about 520
+    characters long with two dots. The classic 40-character pattern stops at
+    the first underscore, so before batch 260 a fake passed
+    `redact_output_text` whole and refused no input. The owner chose the
+    two-dot structural pattern and all four prefixes the classic one covers.
+    Every test drives the real `redact_output_text` and
+    `check_input_policy`, with nothing patched.
+    """
+
+    @pytest.mark.parametrize("prefix", ["ghs_", "ghu_", "gho_", "ghr_"])
+    def test_a_stateless_token_is_redacted_whole(self, prefix):
+        """The EXACT output, so a pattern that took only part of the token
+        (the prefix and the header, say) fails here instead of passing on a
+        needle that happens to be gone."""
+        from safety.policy_enforcement import redact_output_text
+
+        token = fake_stateless_github_token(prefix)
+        assert redact_output_text(f"push failed: {token} (exit 128)") == (
+            "push failed: [REDACTED] (exit 128)")
+
+    @pytest.mark.parametrize("prefix", ["ghs_", "ghu_", "gho_", "ghr_"])
+    def test_a_stateless_token_refuses_an_input(self, prefix):
+        """BOTH SIDES, like every vendor token in the list: one vocabulary.
+        The reason must not quote what it refused."""
+        token = fake_stateless_github_token(prefix)
+        reason = check_input_policy("spy", {"text": f"use {token}"})
+        assert reason is not None
+        assert token not in reason and STATELESS_SIGNATURE not in reason
+
+    @pytest.mark.parametrize("text, redacted", [
+        (f"Use {_STATELESS}.", "Use [REDACTED]."),
+        (f"https://x-access-token:{_STATELESS}@github.com/o/r.git",
+         "https://x-access-token:[REDACTED]@github.com/o/r.git"),
+        ('{"token": "' + _STATELESS + '", "expires_at": "2026-11-14T12:00Z"}',
+         '{"token": "[REDACTED]", "expires_at": "2026-11-14T12:00Z"}'),
+        (f"GITHUB_TOKEN={_STATELESS}\nNEXT=1", "GITHUB_TOKEN=[REDACTED]\nNEXT=1"),
+        ("next=%2Fcb%3Ftoken%3D" + _STATELESS + "%26x%3D1",
+         "next=%2Fcb%3Ftoken%3D[REDACTED]%26x%3D1"),
+        ('{"out": "line one\\n' + _STATELESS + '\\nline two"}',
+         '{"out": "line one\\n[REDACTED]\\nline two"}'),
+    ], ids=["sentence-end", "url-userinfo", "json", "env-line", "url-encoded",
+            "json-escaped-newline"])
+    def test_a_token_goes_and_what_surrounds_it_stays(self, text, redacted):
+        """No dot in the runs, so a sentence keeps its final period, which
+        GitHub's own suggested pattern would take. The last two are why the
+        lookbehind lets a token character before the prefix through when it
+        closes an escape: a URL-encoded or JSON-escaped token is still a
+        token, and the classic pattern has always caught those."""
+        from safety.policy_enforcement import redact_output_text
+
+        assert redact_output_text(text) == redacted
+
+    @pytest.mark.parametrize("text", [
+        "Installation tokens start with ghs_ and used to be 40 characters.",
+        "GitHub writes the new form as ghs_APPID_JWT, with two dots in it.",
+        "ghs_installation_access_token_for_the_release_job = mint_token()",
+        "self.ghs_token_cache_for_installation_lookups.get(installation_id)",
+        "from ghs_helpers.installation_tokens.refresh_cached import token",
+        "the old check, ghs_[A-Za-z0-9]{36}, no longer matches",
+        "see docs/ghs_installation_token_rotation_runbook_for_operators.md",
+    ])
+    def test_code_and_prose_that_name_the_prefix_survive(self, text):
+        """A research harness reads and writes code about tokens. GitHub's
+        suggested `ghs_` plus 36 of `[A-Za-z0-9._-]` takes three of these
+        lines and would refuse a `write` carrying any of them. Both dots,
+        and the 20-character floor on each run, are what leave them alone."""
+        from safety.policy_enforcement import redact_output_text
+
+        assert redact_output_text(text) == text
+        assert check_input_policy("spy", {"text": text}) is None
+
+    def test_a_classic_run_inside_a_segment_does_not_split_the_token(self):
+        """The segments are base64url, so `ghs_` followed by 36 alphanumerics
+        can sit inside one, and the classic pattern has no lookbehind. If it
+        ran first it would cut that piece out of the payload, leaving a run
+        too short to match, so the header, the rest of the payload and the
+        signature would all stay. So the stateless pattern runs first."""
+        from safety.policy_enforcement import redact_output_text
+
+        token = ("ghs_1234567_" + "eyJhbGciOiJSUzI1" + "NiIsInR5cCI6IkpXVCJ9"
+                 + "." + "eyJpc3MiOiJmYWtl" + "gh" + "s_" + "a1b2c3d4" * 4
+                 + "a1b2" + "a1b2c3d4" * 16 + "." + STATELESS_SIGNATURE)
+        assert redact_output_text(f"push failed: {token} (exit 128)") == (
+            "push failed: [REDACTED] (exit 128)")
+
+    @pytest.mark.parametrize("text", [
+        "ghs_1_eyJ" * 116000,
+        "ghs_1234567_" + "a1b2_c3d4" * 111000,
+        ("%41ghs_" + "a1b2c3d4" * 3) * 32000,
+        ("\\nghs_" + "a1b2c3d4" * 3) * 33000,
+        ("ghs_1_ab" + "ghs_1_xn") * 58000,
+    ], ids=["prefix-inside-one-run", "one-long-run", "percent-escape-starts",
+            "backslash-escape-starts", "escape-halves-inside-one-run"])
+    def test_the_stateless_shape_is_linear_on_a_megabyte(self, text):
+        """Without the lookbehind, every `ghs_` inside one long run is a
+        start that scans to the run's end, and the first of these took
+        99 s. Each escape start sits two characters after a `%`
+        or a `\\`, which ends every run, so those starts stay linear too.
+        The last case is what an escape loosened to its second half would
+        let in: a hex pair or a bare `n` before every prefix in one run.
+        Measured at about 0.03 s each; the bound is far above that and
+        far below the quadratic case. Both sides, since an argument can be
+        a megabyte as easily as a result.
+
+        The long run carries a `_` every nine characters. It is one run to
+        this pattern, but it breaks the input side's URL scan, which is
+        quadratic on one long ALPHANUMERIC run by itself (TECHNICAL_DEBT
+        117) and would time this test out for a reason that is not this
+        pattern's."""
+        import time
+
+        from safety.policy_enforcement import redact_output_text
+
+        started = time.perf_counter()
+        redact_output_text(text)
+        check_input_policy("spy", {"text": text})
         assert time.perf_counter() - started < 10

@@ -273,6 +273,35 @@ _SECRET_PATTERNS = [
     # --- `sk-` always have; one vendor list, one vocabulary.
     # GitHub fine-grained PATs, the format `ghp_` is being retired for
     re.compile(r"github_pat_[A-Za-z0-9_]{22,}"),
+    # GitHub's STATELESS tokens (batch 260): `ghs_APPID_JWT`, a JWT after
+    # the prefix, about 520 characters with two dots where the classic
+    # shape below is 40 with none. GitHub's docs and changelog say every
+    # installation token minted since its rollout finished on 2026-10-02
+    # has this form, Actions' GITHUB_TOKEN included, and the classic
+    # pattern stops at the first underscore. Measured before this: a fake
+    # passed `redact_output_text` whole and refused no input.
+    # Three base64url runs of at least 20 characters, joined by the two
+    # dots GitHub says tell the forms apart. Nothing about the JWT's
+    # contents, which GitHub says clients must not rely on, and no dot in
+    # the runs, so a sentence's final period stays (GitHub's own
+    # suggestion, `ghs_` and 36 of `[A-Za-z0-9._-]`, redacted 3 of 8
+    # lines of code and prose that merely name something `ghs_`). All
+    # four prefixes, the owner's choice: GitHub has changed `ghs_` and
+    # says user-to-server tokens are next.
+    # The lookbehind keeps it linear. Without it, every `ghs_` inside one
+    # long run is a start that scans to the run's end: measured quadratic,
+    # 99 s on a hostile megabyte against 0.03 s with it. A token character
+    # is allowed before the prefix only where it closes an escape, `%3D`
+    # or `\n`, since a URL-encoded or JSON-escaped token is still a token,
+    # and the classic pattern catches those. Each of those starts sits two
+    # characters after a `%` or a `\`, which no run contains, so the scan
+    # stays linear.
+    # This pattern runs BEFORE the classic one, because a 36-character
+    # alphanumeric run inside a segment would otherwise take a piece of
+    # the token and leave the rest standing.
+    re.compile(r"(?:(?<![A-Za-z0-9_-])|(?<=%[0-9A-Fa-f]{2})|(?<=\\[nrt]))"
+               r"gh[ousr]_[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}"
+               r"\.[A-Za-z0-9_-]{20,}"),
     # GitHub OAuth, user-to-server, server-to-server and refresh tokens
     re.compile(r"gh[ousr]_[A-Za-z0-9]{36}"),
     # OpenAI project, service-account and admin keys: `sk-proj-...`
