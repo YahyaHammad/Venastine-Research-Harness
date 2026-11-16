@@ -949,6 +949,28 @@ class TestReviewHardening:
         # record has to agree with the claims it sits beside.
         assert not any("accepted and applied" in line for line in run.trace)
 
+    def test_an_empty_re_synthesis_is_contained_like_a_failed_one(
+            self, mocker, make_stage):
+        """Batch 267 (ROADMAP_v3 §95, amended). An empty re-synthesis is
+        asked again, then FAILS, and this stage contains a failure: the
+        run keeps the report its passes produced instead of replacing it
+        with nothing."""
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [TEXT_FINDING])
+        resynth = _stub_resynthesis(mocker, text="")
+        empty = make_model_response(text="")
+        hop = mocker.patch.object(RunAgentLoop, "continue_conversation",
+                                  return_value=empty)
+
+        make_stage(run, mocker, consent=_consent(("accept", "")))
+
+        assert [c["pass_id"] for c in resynth] == ["Final synthesis"]
+        assert hop.call_count == config.MAX_JSON_RETRIES
+        assert run.final_report == "REPORT v1"
+        assert run.claims[0].final_text == "original text"
+        assert any("NOT applied" in line and "no text" in line
+                   for line in run.trace)
+
     def test_retry_continuations_carry_the_reviewer_context(
             self, mocker, make_stage):
         """r2-1: the restriction binds on EVERY turn of the review, not

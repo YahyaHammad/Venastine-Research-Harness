@@ -29,7 +29,9 @@ follow-up message. The failed assistant turn is already in the thread's
 history (see _run()'s always-persist fix in core/loop.py), so the model
 sees its own prior output in context. Up to config.MAX_JSON_RETRIES
 corrective attempts are made; a final ValueError surfaces unrecoverable
-failures.
+failures. ROADMAP_v3 §95 (RO6, amended in batch 267) gives the two prose
+passes the same recovery for a reply with no text: _run_pass sends it
+through retry_until_text, and a pass still empty fails.
 
 ROADMAP §5 (durable pipeline persistence): each run is wrapped in a
 try/except that records status='failed' (with a snapshot of the partial
@@ -83,7 +85,7 @@ from core.reasoning.base import Claim, PipelineRun, resolve_by_id
 from core.reasoning.confidence_scoring import is_contested, run_confidence_tiering
 from core.reasoning.events import PipelineEvent
 from core.reasoning.json_retry import parse_json_response as _parse_json_response
-from core.reasoning.json_retry import retry_until_json
+from core.reasoning.json_retry import retry_until_json, retry_until_text
 from core.reasoning.payload_validation import validate as _validate_payload
 from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
 from core.reasoning.scholar import ScholarLookup
@@ -457,6 +459,18 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
     threaded from the shell's setting through the pipeline, validated per
     RECEIVING model by effort_for() inside the loop, so an ensemble roster
     or critic routing needs no effort-specific handling here.
+
+    ROADMAP_v3 §95, amended in batch 267: every caller of this function is
+    a PROSE pass (Pass 1, each ensemble candidate, Final synthesis), and a
+    prose pass that comes back with no text is now asked again in its own
+    thread (retry_until_text, the JSON passes' recovery and budget) and
+    FAILS if it is still empty. Before, a model that replied with
+    reasoning only twice ended the pass `complete` with "", and the run
+    finished with an empty raw response and an empty report.
+
+    The retries share the JSON passes' two §26 limits, stated at
+    `_run_pass_with_json_retry`: a tool call a corrective attempt makes
+    produces no tool_call event, and a page it fetches reaches no corpus.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
     try:
@@ -468,6 +482,24 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
         _record_granted_calls(pass_id, response, authorization)
         _record_pass_thread(pass_id, response, pass_threads)
         _check_not_truncated(pass_id, response, trace)
+        text = retry_until_text(
+            response,
+            label=pass_id,
+            # The prompt the attempt ran under, as the JSON retry builds it
+            # and for its reason: a retry that saw a different tool set
+            # than the attempt it corrects is a different pass.
+            system_prompt=system_prompts.pass_prompt(
+                pass_id, *advertisement_facts(authorization)),
+            model=model,
+            provider_name=provider_name,
+            trace=trace,
+            temperature=temperature,
+            authorization=authorization,
+            effort=effort,
+            on_response=lambda r: _settle_text_retry(
+                pass_id, r, authorization, trace),
+            activity=activity,
+        )
     except Exception as exc:
         # E14/#115, UNIFORM: a fatal pass reports itself before its
         # exception propagates, so no shell is left holding a row that
@@ -476,7 +508,21 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
         yield _pass_failed_event(pass_id, exc)
         raise
     yield PipelineEvent(kind="pass_complete", pass_id=pass_id, ok=True)
-    return response.text
+    return text
+
+
+def _settle_text_retry(pass_id: str, response, authorization,
+                       trace: list[str] | None) -> None:
+    """Batch 267. What `_run_pass` does to its first attempt, done to each
+    corrective one: its granted calls join the §25 audit trail (a retry is
+    the same pass continuing), and its stop reason is read by the same
+    rule. A retry cut off by a ceiling with no text FAILS here, naming the
+    stop -- asking again into an exhausted turn says the same thing at a
+    cost, and "the last reply was empty" would hide which ceiling it hit.
+    One cut off WITH text is traced as truncated and used, like the
+    attempt it corrects."""
+    _record_granted_calls(pass_id, response, authorization)
+    _check_not_truncated(pass_id, response, trace)
 
 
 def _record_pass_thread(pass_id: str, response, pass_threads) -> None:
