@@ -31699,3 +31699,45 @@ on an export of the tracked files finds nothing. The requirements files are unch
 so pip-audit was not re-run.
 
 - **Version:** the branch's beta identity, `0.3.16-b.1.stateless-ghs-redaction.r1e297c60e5bb`.
+
+## Batch 261 -- the reasoning-only ask says what did not run was that reply (2026-11-15)
+
+**Asked.** In the 2026-11-15 bug round, on release 0.3.14, the owner reported that a reply
+that was only thinking, with no call written in it, still drew §95's ask and its "nothing
+ran". The owner guessed this "might confuse the model about whether earlier tool calls went
+through or not", and asked whether the line needed rewording. It was to be checked against
+the code before any fix.
+
+**What the code said.** The ask's first line was `[harness] The last reply was reasoning
+only: no answer and no tool call reached the harness, so nothing ran.` §95 chose "nothing
+ran" on purpose. The owner had seen the model carry on as though calls written in its
+reasoning had taken effect, and the line corrects that belief. But it says nothing about the
+turn's earlier steps, and the ask always follows a tool result in the measured case. So "nothing
+ran" can be read as covering those steps too. A reply that is only thinking, with no call markup
+in it, gets the same ask, because RO1 counts readable reasoning with no text and no call. That
+is RO1 as decided, not a fault.
+
+**The fix, the owner's choice** (the other option was to keep the wording). The first line now
+ends "so nothing in that reply ran. Results returned before it are real.", the example the
+owner approved, word for word. The rest of the row is unchanged. That line is also the live
+notice, which the TUI draws in the `wake` role and the CLI prints as `Harness:`, and the line
+replay draws (RO5). All three read `REASONING_ONLY_HEADER`, so they changed together. A thread
+recorded before this keeps its row as written, and replay draws what the row says.
+
+- **ROADMAP_v3 §95:** RO2's row carries the amendment. The measurements' closing sentence now
+  names both wordings.
+- **AGENTS.md:** the §95 paragraph names the new words.
+- **The test:** `test_the_ask_scopes_what_did_not_run_to_that_reply` drives the measured case
+  through the real loop: a real call, its result, then a reasoning-only reply. It checks that
+  the row's first line scopes the claim to that reply, states that the earlier results stand,
+  and is the notice a person sees. `tests/BREAKING_CHANGES.md` has its row.
+
+**Not measured.** Whether the new words change what the model does. The ask itself never was
+measured (§95's gap register), and the test holds the words and where they appear, not their
+effect.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9423 passed, 88 skipped (9511). 5 of 5 mutations killed against a green control, each undoing one part of the fix: the old unscoped line, the earlier-results sentence dropped, the claim scoped to the turn, that sentence moved below the first line where no person sees it, and the notice showing the whole row. ruff, bandit (no new findings, no baseline count grew)
+and gitleaks on a clean export are clean. The requirements files are unchanged, so pip-audit
+was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.reasoning-only-wording.r9440d8cb7de0`.

@@ -123,6 +123,25 @@ class TestTheLoopAsksOnce:
         assert _notices(events) == [{"kind": HARNESS_REASONING_ONLY,
                                      "text": REASONING_ONLY_HEADER}]
 
+    def test_the_ask_scopes_what_did_not_run_to_that_reply(self, loop):
+        """RO2 as amended in batch 261. The measured case: a real call, its
+        result, then a reasoning-only reply. A bare "nothing ran" could be
+        read as the whole turn, so the ask names THAT reply and says the
+        result returned before it stands -- in its first line, which is
+        also what the person sees (RO5)."""
+        fake = loop(_calls(), _reasoning_only(), _answer())
+        memory = FakeMemory()
+
+        events = _run(memory)
+
+        assert fake.calls == 3
+        [(nudge, _)] = memory.harness_messages
+        first = nudge.splitlines()[0]
+        assert "so nothing in that reply ran." in first
+        assert "Results returned before it are real." in first
+        assert "so nothing ran" not in nudge
+        assert _notices(events)[0]["text"] == first
+
     def test_the_row_is_written_before_the_notice_is_yielded(self, loop):
         """#42's rule: persist before emit. A consumer gone at the notice
         must not leave an ask the thread never recorded."""
