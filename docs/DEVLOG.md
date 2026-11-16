@@ -32153,3 +32153,67 @@ count grew) and gitleaks on a clean export are clean; no requirements file chang
 was not re-run.
 
 - **Version:** the branch's beta identity, `0.3.16-b.1.empty-research-pass.r8eb5a4e08bd5`.
+
+## The 2026-11-15 bug round on one branch: batches 260-267 merged (2026-11-16)
+
+**Asked.** The owner asked for one pull request carrying the round's eight branches, as the
+bugfixes branch carried batches 218-233, rather than eight PRs that would each conflict with
+the last and each cut a release.
+
+**How.** Each branch was one commit on `b4fcd65`. They were merged in batch order with
+`--no-ff`, so each batch's commit is the one that was verified, and every resolution is in a
+merge commit.
+
+**Resolved by rule.**
+
+- **The suite total:** ours plus theirs minus the base, at each merge. The full suite on
+  the result is the check.
+- **The appended tails** of DEVLOG and BREAKING_CHANGES: both, in batch order.
+- **ROADMAP_v3:** §97 sits above §96, because sections run newest first with `---` between
+  them, and the index above them runs oldest first.
+- **Status lines:** AGENTS.md's document map and README's status line name §96 and §97, and
+  `TECHNICAL_DEBT` items 117, 118 and 119. Items 118 and 119 lost the sentences saying
+  their neighbours' branches were not merged yet.
+- **AGENTS.md's §95 paragraph:** 261's wording with 267's rule after it.
+- **`test_session_tui.py`'s tree line:** both batches' text, and the count the file now
+  collects.
+- **The version:** the combined branch's beta identity.
+
+**One seam needed code: 264 and 265.** Batch 265 rebuilt both session waits that 264 had
+instrumented.
+
+- **The TUI.** 264's pause (`SessionWait(True)`) goes after 265's message check and before
+  its stop-aware `wait_for_wake`. A hand-over returns with the clock paused, as the
+  suspended and stopped returns do. TurnFinished stops that turn's meter, and the message's
+  turn starts a fresh one.
+- **The CLI.** `_await_sessions` keeps 264's `count_usage`, returns 265's `_WaitEnd`, and
+  `_again` re-enters the wait with the same counter.
+
+**Two of 264's CLI tests had been written against the old wait.**
+
+- `test_the_wake_turns_count_in_the_cli_too` scripted `live_for` and read the real stdin.
+  Under xdist the worker died on it, because its stdin is the runner's channel, and with
+  `-n0` it hung.
+- `test_the_cli_hands_its_counter_to_the_session_wait` patched `_await_sessions` with a bare
+  mock, whose `.line` `run_chat` now reads as typed input.
+
+Both now use 265's shapes: `waited_on`, `cli_stdin`, and a real `_WaitEnd`.
+
+**A new test pins the seam** (`test_a_hand_over_leaves_the_turns_clock_paused_and_the_next_fresh`):
+
+- A hand-over leaves exactly one `SessionWait(True)`.
+- Replayed into a real `TurnMeter`, the wait stays out of the turn's rate and out of the
+  next turn's.
+
+Its first version passed with both meter resets removed. `start()` never re-syncs the pause,
+so a stale wait flag shows only at the next change to it. A tool now runs in the next turn,
+and the test fails with both resets gone. It also fails when the pause is never posted. With
+only `start()`'s reset gone it still passes, because `stop()` clears the same flag, so that
+mutation is equivalent.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset, on the merged branch: 9682 passed,
+88 skipped (9770: the 9510 on `b4fcd65`, each batch's new tests, and the seam test). ruff,
+bandit (no new findings, no baseline count grew) and gitleaks on a clean export are clean. No
+workflow file and no `config.yaml` is in the diff.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.bug-round-2026-11-15.r7070c89b1d87`.
