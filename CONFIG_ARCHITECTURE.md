@@ -1361,11 +1361,13 @@ start at a time nobody chose.
 ### `shell_session_max_consecutive_wakes`
 
 ROADMAP_v3 §49 (SS2). How many wake turns may run in a row with no message
-from the user. Every wake is a model call nobody typed, and while sessions
-are live the prompt is blocked, so an agent that starts a new session on
-every wake would otherwise hold the session and spend tokens indefinitely.
-Past the limit, waking stops, the plain prompt unblocks, and the results are
-delivered with the user's next message; a user message resets the count.
+from the user. Every wake is a model call nobody typed, so an agent that
+starts a new session on every wake would otherwise spend tokens
+indefinitely. Past the limit, waking stops, the commands the wait holds
+are released, and the results are delivered with the user's next message;
+a user message resets the count. (Since batch 265 a plain message is never
+held by live sessions: the user can type while they run, and each message
+gets a turn of its own -- ROADMAP_v3 §49, SS2 as amended.)
 
 10 is a ceiling on an unattended loop, not an estimate of a normal one. A
 subagent has no user to reset it, so it gets one final wake and returns
@@ -1985,9 +1987,9 @@ for `shell`'s reason and not a weaker one: a session IS a shell command, and
 one that keeps running after the call that started it has been answered.
 Enabling them without `shell` is allowed and coherent -- a session is
 classified, approved and routed by exactly the same rules -- but a session
-also holds a container for as long as its timeout, blocks the user's prompt
-while it runs, and can wake the agent, so it is more authority rather than
-less.
+also holds a container for as long as its timeout, holds the user's
+thread- and model-changing commands while it runs, and can wake the agent,
+so it is more authority rather than less.
 
 The two that START one are approval-gated by `shell_approval_mode` alone
 (SS16) and have no `tool_approvals` key, exactly like `shell`; the three

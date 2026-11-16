@@ -618,15 +618,20 @@ class TestUsageInEachShell:
         _cmd_usage(session, "")
         assert "no model calls yet" in capsys.readouterr().out
 
-    def test_the_wake_turns_count_in_the_cli_too(self, mocker):
+    def test_the_wake_turns_count_in_the_cli_too(self, mocker, cli_stdin):
         """`_await_sessions` hands each wake turn's response to the same
-        counter as the turn that started the sessions."""
+        counter as the turn that started the sessions.
+
+        Batch 265's wait reads `waited_on` rather than `live_for`, and
+        polls the one stdin reader while it waits, so both are scripted:
+        a real read in a test reads the runner's own stdin."""
         import main
         from core.client import ModelResponse
 
+        cli_stdin()
         thread = uuid4()
         sessions = mocker.patch.object(main, "sessions")
-        sessions.live_for.side_effect = [True, False]
+        sessions.waited_on.side_effect = [True, False]
         sessions.pending.return_value = False
         sessions.wait_for_wake.return_value = [object()]
         mocker.patch("core.session_wake.build_wake",
@@ -685,7 +690,9 @@ class TestUsageInEachShell:
 
         mocker.patch("main.RunAgentLoop.run_agent_conversation",
                      side_effect=_run)
-        waited = mocker.patch("main._await_sessions")
+        # Batch 265: the wait says how it ended, and run_chat reads that.
+        waited = mocker.patch("main._await_sessions",
+                              return_value=main._WaitEnd())
         cli_stdin("hello")
         main.run_chat(None, "ANTHROPIC", "m")
         counter = waited.call_args.kwargs["count_usage"]
