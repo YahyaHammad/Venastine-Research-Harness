@@ -422,6 +422,10 @@ class FakeStdinReader:
         self.prompts = []
         self.timeouts = []
         self.masked_prompts = []
+        # Batch 265: what is typed while the chat waits on sessions, and
+        # each wait read's deadline. See `poll`.
+        self.during_wait = []
+        self.polls = []
 
     def _next(self):
         if not self.lines:
@@ -469,6 +473,32 @@ class FakeStdinReader:
             return self._next()
         except EOFError:
             return None
+
+    def poll(self, timeout):
+        """The session wait's read (ROADMAP_v3 §49, SS2 as amended in batch
+        265): the next of `during_wait`, or None when nothing was typed.
+
+        A SEPARATE LIST, because a test cannot type in time: every line in
+        `lines` is already there when the turn starts, so a fake that
+        served them here as well would have every chat test type its next
+        message during the wait instead of at the prompt it was written
+        for. A test types into the wait by filling this list, and an
+        exception in it is raised as in `lines` -- `EOFError` is a stdin
+        that ended while the chat waited. None is a read that found
+        nothing typed, and a callable is called and its answer served, a
+        test's way of making something happen at an exact read.
+        """
+        self.polls.append(timeout)
+        if not self.during_wait:
+            return None
+        item = self.during_wait.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        if isinstance(item, type) and issubclass(item, BaseException):
+            raise item()
+        if callable(item):
+            return item()
+        return item
 
 
 @pytest.fixture

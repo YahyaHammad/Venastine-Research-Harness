@@ -66,7 +66,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 9510 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 9563 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1544,9 +1544,9 @@ it — but a list presented as a measurement should be one.)
 **ctrl+b stops a background session** (ROADMAP_v3 §49, SS2, batch 97), by the same elimination and
 re-measured the same way. What narrows it past the free letters is the TERMINAL rather than
 textual: ctrl+h/i/j/m ARE backspace, tab, LF and CR, and ctrl+s/ctrl+q are software flow control,
-which leaves b, n, o and r. It is the one control SS2 keeps usable while sessions are blocking
-input, which is why it is a key at all — `/kill` is typed into the prompt, and the prompt is where
-the block is felt — and why `check_action` returns **None** rather than False while nothing is
+which leaves b, n, o and r. It is the one control SS2 keeps usable while sessions hold the shell's
+commands (a plain message is not held since batch 265, SS2 as amended), which is why it is a key at all
+— `/kill` is typed into the prompt, and the prompt is where the hold is felt — and why `check_action` returns **None** rather than False while nothing is
 running: False drops the footer entry and reflows, None greys it, and a control a blocked user
 needs has to stay visible.
 
@@ -1570,6 +1570,16 @@ already means something adjacent. It reads the live `CancelToken` instead — pr
 there is a turn to stop. A cancel landing during the wait ends the WAIT and leaves the sessions
 running, with their results held for the user's next message (SS19), which is the suspension path
 arriving by a second route rather than a new behaviour.
+
+**A message sent during the session wait gets a turn of its own** (ROADMAP_v3 §49, SS2 as amended in
+batch 265, the owner's choice). Between replies `_hand_to_wait` takes it, the wait returns with the
+sessions still running, and `on_turn_finished` starts its turn; during a wake reply it is refused as
+during any turn. `_wait_phase` and `_handed_message` change under `_wait_lock`, the lock order is that
+lock then the manager's, and a batch taken in the same instant goes back with `SessionManager.put_back`.
+The funnel asks a message `by_sessions=False`, so commands keep SS2's answer. The CLI's
+`_await_sessions` reads through `_StdinReader.poll` and returns a `_WaitEnd`; the commands the TUI holds
+are refused there by `cli_commands.REFUSED_WHILE_WAITING`, which an AST test holds to the TUI's
+`refuse_if_occupied` sites.
 
 **The permission modal names the asking run, and the harness fact is written LAST.** A subagent's
 approvals have always surfaced on the parent's screen — the channel is inherited — and the modal
@@ -2450,9 +2460,11 @@ And slice 2 (batch 100) -- an interactive shell the agent types into (SS25-SS34)
   (`interactive_profile`: runs_code, writes, measured) rather than read off text. Reading the first line
   would mean opening with `pwd` was auto-approved as a read and handed back a shell that can run
   anything. `_SHELL_MODE_GATES` holds each exempt tool to ITS gate by identity.
-- **Two questions, one list** (SS25): the 4-live cap counts an interactive session, and the prompt block
-  does not. `_live_locked` takes the kinds, and `wait_for_wake` passes the blocking ones -- load bearing,
-  since that loop keeps a turn alive and an idle shell would hold it open exactly as a hung read would.
+- **Two questions, one list** (SS25): the 4-live cap counts an interactive session, and the post-turn
+  wait does not. `_live_locked` takes the kinds, and `wait_for_wake` passes the blocking ones -- load
+  bearing, since that loop keeps a turn alive and an idle shell would hold it open exactly as a hung read
+  would. Both shells' wait loops ask `waited_on`, never `live_for`: until batch 265 they asked the broad
+  count, and with only an open shell they spun (measured: ~37,000 `wait_for_wake` calls in two seconds).
 - **Its end is HELD, never a wake** (SS31), whoever ended it.
 
 And slice 4 first, because it is the one with a rule the others do not have -- see below for
@@ -2695,7 +2707,9 @@ And slice 1's tools, the sleeping subagent and the CLI (batch 95):
   wake carries them (SS20), because a subagent has no user whose message could reset the count. A child
   that RAISES has its sessions killed by SPAN id: a span is frozen and carries no thread, so a run that
   failed before returning one is identifiable anyway.
-- **The CLI waits between turns** (`main._await_sessions`) and runs a wake turn per batch. Ctrl+C there is
+- **The CLI waits between turns** (`main._await_sessions`) and runs a wake turn per batch. Since batch
+  265 its prompt is open while it waits (SS2 as amended): a line typed there runs as at the prompt,
+  and a command goes back to the wait. Ctrl+C there is
   aimed at the SESSIONS, not at the conversation: they are stopped and the prompt comes back, with their
   results held for the next message (SS19). During a wake turn it stops them only after the turn ends
   (A21), and only on a second press inside the window (A81). Held results are written into the thread before the turn that

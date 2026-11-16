@@ -1453,3 +1453,67 @@ class TestAControlKeyDoesNotCarryText:
             c if isinstance(c, bytes) else c.encode("utf-8")
             for c in stdin.chunks)
         assert b"echo hi" in typed
+
+
+class TestNeitherShellWaitsOnAnOpenShell:
+    """Batch 265. SS25's rule at the two loops that broke it.
+
+    Both shells' post-turn waits counted every live kind (`live_for`) and
+    asked `wait_for_wake`, which waits for the blocking kinds alone -- so
+    with only an interactive shell open, each asked again at once, for as
+    long as the shell stayed open. Measured before the fix: 37,154 calls in
+    two seconds on the TUI's worker and 38,195 in the CLI's, with the turn
+    held open the whole while.
+
+    Each runs on a thread with a bound, so the broken loop fails here
+    rather than hanging the suite, and is then released by closing the
+    manager (the CLI's) or the shutdown flag (the TUI's).
+    """
+
+    def test_the_wait_does_not_count_one(self, manager):
+        _open(manager)
+        assert manager.waited_on("t1") == 0
+
+    def test_the_wait_counts_a_background_one_beside_it(self, manager):
+        _background(manager)
+        _open(manager)
+        assert manager.waited_on("t1") == 1
+
+    def test_the_tuis_wait_returns_at_once(self, manager, monkeypatch):
+        import threading
+
+        from tests.test_session_tui import _bare_app
+
+        monkeypatch.setattr(ss, "sessions", manager)
+        _open(manager)
+        app = _bare_app(thread_id="t1")
+        worker = threading.Thread(
+            target=app._wait_for_sessions,
+            args=("t1", lambda t, r: iter(())), daemon=True)
+        worker.start()
+        worker.join(3.0)
+        spinning = worker.is_alive()
+        app._shutting_down = True
+        worker.join(3.0)
+        assert not spinning, "the TUI's wait held the turn for an open shell"
+
+    def test_the_clis_wait_returns_at_once(self, manager, monkeypatch,
+                                           cli_stdin):
+        import threading
+
+        import main
+
+        monkeypatch.setattr(ss, "sessions", manager)
+        monkeypatch.setattr(main, "sessions", manager)
+        cli_stdin()
+        _open(manager)
+        worker = threading.Thread(
+            target=main._await_sessions, args=("t1",),
+            kwargs=dict(model="m", provider_name="ANTHROPIC", effort=None,
+                        authorization=None), daemon=True)
+        worker.start()
+        worker.join(3.0)
+        spinning = worker.is_alive()
+        manager.close()
+        worker.join(3.0)
+        assert not spinning, "the CLI's wait held the prompt for an open shell"

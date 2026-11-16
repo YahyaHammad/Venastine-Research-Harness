@@ -31584,3 +31584,95 @@ once-only drop warning. ruff, bandit (no new findings, no baseline count grew) a
 clean export are clean; the requirements files are unchanged, so pip-audit was not re-run.
 
 - **Version:** the branch's beta identity, `0.3.15-b.1.session-panel-ollama-404.r52f9026d5cb0`.
+## Batch 265 -- typing while background sessions run: SS2 amended (2026-11-16)
+
+**Asked.** In the owner's 2026-11-15 bug round, `shell_background` returned at once and the
+shell then sat "waiting": nothing typed was accepted until the command ended. The diagnosis
+(recorded with the round) was SS2 itself, working as designed -- plain prompts are refused
+while a background or monitor session is live, because the TUI's turn worker holds in
+`_wait_for_sessions` and `_busy` stays true through it. The owner chose to amend SS2: a plain
+prompt is accepted while sessions run after the turn, the user's message gets its own turn,
+and the session's result wakes after it, never two turns at once. Two forks were asked before
+building. A message sent while the agent is replying to a result is **refused, as during any
+turn** (the owner's pick of the two offered; the other queued it). And the change applies to
+**both shells**, with the commands the TUI refuses while sessions run refused in the CLI too.
+The doc home follows the standing rule: SS2 is amended inline, as batch 258 amended SS14.
+
+**The TUI.** The wait has a phase, `_WAIT_IDLE` between replies and `_WAIT_WAKE` while a wake
+turn runs, and it and the handed message change under `_wait_lock`, because the UI thread
+takes a message on the strength of the phase and the worker starts a wake on the strength of
+the message. `_hand_to_wait` takes a plain message only when the phase is idle and no other is
+waiting, and nudges the manager; the wait reads it at the top of the loop and through
+`wait_for_wake`'s new `stop`, and returns with the sessions still running. `on_turn_finished`
+then starts the message's turn as its last act, after the finished turn's own line, and also
+after a failure, since the box was cleared when the message was taken. Not on the way out. A
+message sent during a reply falls through to the funnel, which now takes `by_sessions=False`
+for a message: live sessions no longer refuse it, a running turn still does, with the words
+any turn gets. Commands keep SS2's answer. One more thing had to move: `_fire_pending_restart`
+is scheduled by the `_busy` setter in the same pass that starts the message's turn, so it now
+waits while a turn runs instead of exiting under it.
+
+**The race.** A result and a message can reach a waiting shell together: the worker has taken a
+batch, and the message lands before it starts the wake. The owner's answer to the edge case was
+that the message wins. So the worker, holding `_wait_lock`, finds the message and hands the
+batch back (`SessionManager.put_back`): at the front, so it keeps its place ahead of anything
+newer, and with its wake uncounted, since no turn answered it. The lock order is `_wait_lock`
+then the manager's, and `stop` is a plain attribute read with no lock of ours.
+
+**The CLI.** Its wait read no input at all, and Ctrl+C there stopped the sessions. Now it prints
+`You:` once per stretch and polls the one reader (`_StdinReader.poll`, readline()'s discipline
+with ask()'s deadline -- type-ahead kept, nothing drained -- which starts the pump). A line
+typed there ends the wait as a `_WaitEnd`, and `run_chat` runs it exactly as one typed at the
+prompt. A message's turn ends in a wait of its own; a command goes back to the wait it
+interrupted (`resume`). A line and a result together go message first, as in the TUI. The
+commands in `cli_commands.REFUSED_WHILE_WAITING` (compact, grill-me, model, new, resume,
+submodel with an argument, threads) are refused when sent from the wait, in the TUI's words
+with Ctrl+C as the way out. An AST test maps every TUI `refuse_if_occupied` site to its command
+and holds the table to it. At the end of stdin -- a piped run -- the wait stops reading and
+carries on as before; Ctrl+C still stops the sessions. A line typed while a wake turn runs is
+type-ahead, read once the turn ends, as during the user's own turn. When the wait ends with
+`You:` open and nothing typed, the next read prints no second one.
+
+**Found on the way: both waits spun on an interactive shell.** The two loops counted every live
+kind (`live_for`) and asked `wait_for_wake`, which waits for the blocking kinds alone. With only
+an interactive shell open, each asked again at once. Measured before the fix: 37,154 calls in
+two seconds on the TUI's worker and 38,195 in the CLI's. The turn stayed open (the TUI said
+"Still working", the CLI never returned to its prompt) until the shell's idle timeout, against
+SS25. Both now count `SessionManager.waited_on`, the background and monitor sessions alone,
+and so does the funnel's session count.
+
+**What the model is told.** The two tool descriptions that said "the user's prompt is blocked"
+now say the user can still message the agent, each message is a turn of its own, and a result
+that lands meanwhile wakes it after. README's `/kill` row, CONFIG_ARCHITECTURE's two passages and
+the CLI's `/kill` absence reason are corrected the same way. **Not corrected: `config.yaml`'s
+comments** ("does not block your prompt", "the prompt unblocks"), which stay as they are because
+`config.yaml` is never staged here. They read as true of the commands the wait holds.
+
+**Not measured live against a provider.** The TUI half is driven end to end through a mounted app
+with a scripted model (a real turn starts a session, the user types into the wait, the model is
+called in the owner's order); the CLI half through its chat loop with the fake reader; and the
+real reader's `poll` against a pipe. Then the reader was measured in real terminals, because
+the CLI's wait now leaves a reader thread on the console where it left none: in a Windows
+console of its own (Ctrl+C from `GenerateConsoleCtrlEvent`, keys written with
+`WriteConsoleInputW`) and in WSL under a pty (0x03 through the line discipline). On both, a
+line typed during the wait arrived; Ctrl+C reached the wait as `KeyboardInterrupt` within one
+0.2 s read (0.21 s measured on Windows); the reader thread survived it with stdin not marked
+ended; and a line typed after it still arrived. One cost, stated rather than fixed: a line
+typed while a wake reply runs that then asks for approval is discarded by the prompt's drain
+(§88's A83), exactly as type-ahead during the user's own turn always was.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9475 passed, 88 skipped
+(9563, 53 new). The seven touched test files pass in WSL (1025). 46 of 46 mutations killed,
+each reverting one piece: the manager's `stop`, `nudge`, `put_back` (its order, its uncounted
+wake, an empty batch) and `waited_on`; the TUI's phase test, the second message, the nudge, the
+loop's own check, the race and its put-back, both phases, the finished turn's start and its
+way-out rule, the submit handler's routes, the funnel's `by_sessions` and count, the wait's count
+and the restart guard; the CLI's read, its race, the empty line, an ended stdin, the count, the
+resumed wait, the refusal, the open prompt, the banner and the reader's pump and deadline; and
+the refusal table. The first pass stalled on the CLI rows, though nothing survived: those
+tests gave their session a 600 s timeout, so a mutant that stopped the wait reading sat each one
+out. They use 5 s now, which a working wait never reaches. ruff, bandit (no new findings, no
+baseline count grew) and gitleaks on a clean export are clean; no requirements file changed, so
+pip-audit was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.ss2-type-during-sessions.r881d0b00dc0e`.

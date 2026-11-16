@@ -119,9 +119,10 @@ _SPECS = (
                 "[--software|--research] [--config]",
                 absent={CLI: "not yet; run venastine --init."}),
     CommandSpec("kill", "stop a background session", "[session-id]",
-                absent={CLI: "the CLI's prompt waits until background "
-                             "sessions finish, and Ctrl+C while it waits "
-                             "stops them."}),
+                # Batch 265: the prompt no longer waits for them (SS2 as
+                # amended), so the reason is the key alone.
+                absent={CLI: "Ctrl+C while the CLI waits on background "
+                             "sessions stops them."}),
     CommandSpec("memories", "list durable memories visible here"),
     CommandSpec("mentions", "show file mention status or include ignored "
                             "paths", "[ignored on|off]",

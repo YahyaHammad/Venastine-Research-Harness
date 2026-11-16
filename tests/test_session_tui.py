@@ -23,6 +23,8 @@ binding, a modal, the footer) say so by using `run_test`.
 """
 
 import ast
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -30,7 +32,14 @@ import pytest
 
 from core import shell_sessions as ss
 from core.session_wake import build_wake
-from tui.app import SessionNote, VenastineApp, _cmd_kill, _kill_rows
+from tui.app import (
+    _WAIT_IDLE,
+    _WAIT_WAKE,
+    SessionNote,
+    VenastineApp,
+    _cmd_kill,
+    _kill_rows,
+)
 
 THREAD = "tui-thread"
 
@@ -797,3 +806,393 @@ def test_the_wake_line_the_tui_draws_is_the_one_replay_draws(
     # Neither carries the program output that followed it.
     assert "\n" not in live and "\n" not in replayed[0][1]
     assert "12 passed" not in live
+
+
+# ---------------------------------------------------------------------------
+# ---- SS2 as amended (batch 265): a message while the sessions run ---------
+# ---------------------------------------------------------------------------
+
+
+def _until(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def _submit(app, text):
+    """The submit handler, as Textual calls it, on a bare app."""
+    prompt = SimpleNamespace(value=text)
+    app.on_prompt_input_submitted(SimpleNamespace(value=text, prompt=prompt))
+    return prompt
+
+
+def _submit_app():
+    app = _bare_app()
+    app._history = MagicMock()
+    app.refresh_bindings = MagicMock()
+    app.run_agent_turn = MagicMock()
+    return app
+
+
+def _waiting(app, wake=lambda t, r: iter(())):
+    """The turn worker's wait, on a thread of its own, started."""
+    worker = threading.Thread(target=app._wait_for_sessions,
+                              args=(THREAD, wake), daemon=True)
+    worker.start()
+    return worker
+
+
+class TestAMessageIsTakenBetweenReplies:
+    """The owner's choice: a message sent while the turn's sessions run is
+    taken between replies and gets a turn of its own; during a reply it is
+    refused as it is during any turn."""
+
+    def test_between_replies_it_is_taken(self, manager):
+        app = _bare_app()
+        app._wait_phase = _WAIT_IDLE
+        assert app._hand_to_wait("and another thing") is True
+        assert app._handed_message == "and another thing"
+
+    def test_during_a_reply_it_is_not(self, manager):
+        app = _bare_app()
+        app._wait_phase = _WAIT_WAKE
+        assert app._hand_to_wait("and another thing") is False
+        assert app._handed_message is None
+
+    def test_with_no_wait_running_it_is_not(self, manager):
+        """None is the phase outside the wait: an ordinary turn, or no turn
+        at all, where the submit handler's own route applies."""
+        app = _bare_app()
+        assert app._hand_to_wait("hello") is False
+
+    def test_a_second_message_does_not_replace_the_first(self, manager):
+        app = _bare_app()
+        app._wait_phase = _WAIT_IDLE
+        app._hand_to_wait("first")
+        assert app._hand_to_wait("second") is False
+        assert app._handed_message == "first"
+
+
+class TestTheSubmitHandler:
+
+    def test_a_message_between_replies_clears_the_box_and_waits_its_turn(
+            self, manager):
+        """Taken, so the box clears; NOT started here, because the worker
+        is still in the wait and two turns would then be running."""
+        app = _submit_app()
+        _start(manager)
+        app._busy_state = True
+        app._wait_phase = _WAIT_IDLE
+        prompt = _submit(app, "and another thing")
+        assert prompt.value == ""
+        assert app._handed_message == "and another thing"
+        assert app.transcript.errors == []
+        assert not app.run_agent_turn.called, \
+            "the message's turn started under the wait it interrupted"
+        app._history.remember.assert_called_once_with("and another thing")
+
+    def test_a_message_during_a_reply_is_refused_and_kept(self, manager):
+        """The owner's choice: as during any turn -- the words any turn
+        gets, and the text left in the box to send once it finishes."""
+        app = _submit_app()
+        _start(manager)
+        app._busy_state = True
+        app._wait_phase = _WAIT_WAKE
+        prompt = _submit(app, "and another thing")
+        assert prompt.value == "and another thing"
+        assert app.transcript.errors == [
+            "Still working — wait for this turn to finish."]
+        assert app._handed_message is None
+
+    def test_live_sessions_alone_no_longer_hold_a_message_back(
+            self, manager):
+        """The amendment itself. With the wait over (escape ends it, and
+        leaves the sessions running) and no turn running, a message is an
+        ordinary turn. Before batch 265 it was refused until the sessions
+        ended -- under a note that had just promised their results "with
+        your next message"."""
+        app = _submit_app()
+        _start(manager)
+        _submit(app, "hello")
+        assert app.transcript.errors == []
+        app.run_agent_turn.assert_called_once_with("hello")
+
+    def test_the_funnel_still_holds_a_command(self, manager):
+        """What SS2 keeps: the commands that would change what the wait is
+        waiting for. The plain message's question is the one that changed."""
+        app = _bare_app()
+        _start(manager)
+        assert app.refuse_if_occupied("send a message",
+                                      by_sessions=False) is False
+        assert app.refuse_if_occupied("start a new thread") is True
+        assert "1 background session still running" in \
+            app.transcript.errors[0]
+
+    def test_the_session_count_leaves_out_an_open_shell(self, manager,
+                                                        session_starter):
+        """`waited_on`: an interactive shell does not hold the shell
+        (SS25), so the sentence does not ask the user to wait for one."""
+        app = _bare_app()
+        _start(manager)
+        _start(manager)
+        # Three running, as an open shell beside these two would make it:
+        # `live_for` counts every kind, and the sentence must not.
+        manager.live_for = MagicMock(return_value=3)
+        app.refuse_if_occupied("start a new thread")
+        assert "2 background sessions still running" in \
+            app.transcript.errors[0]
+
+    def test_a_command_between_replies_is_not_taken_as_a_message(
+            self, manager):
+        """Only a plain message is handed over. A command sent between
+        replies takes its own route, and the ones SS2 holds still refuse."""
+        app = _submit_app()
+        _start(manager)
+        app._busy_state = True
+        app._wait_phase = _WAIT_IDLE
+        _submit(app, "/new")
+        assert app._handed_message is None
+        assert "background session" in app.transcript.errors[0]
+
+class TestTheWaitHandsOver:
+
+    def test_a_message_ends_the_wait_and_the_sessions_keep_running(
+            self, manager):
+        app = _bare_app()
+        _start(manager, command="sleep 300", timeout_s=600)
+        woken = []
+        worker = _waiting(app, lambda t, r: woken.append(t) or iter(()))
+        assert _until(lambda: app._wait_phase == _WAIT_IDLE)
+        assert app._hand_to_wait("hello")
+        worker.join(5.0)
+        assert not worker.is_alive(), "the wait did not hand over"
+        assert woken == []
+        assert manager.waited_on(THREAD) == 1, \
+            "handing over stopped the sessions"
+        assert app._wait_phase is None
+        assert app._handed_message == "hello", \
+            "the wait ate the message it was handed"
+
+    def test_it_hands_over_at_once_not_at_the_end_of_a_slice(
+            self, session_starter, monkeypatch, mocker):
+        """`nudge` and `stop`. The slice here is a minute long, so a wait
+        that read the message only when the slice ended would hold it that
+        long -- with the user looking at a cleared box and nothing else."""
+        slow = ss.SessionManager(starter=session_starter, poll_s=60.0)
+        monkeypatch.setattr(ss, "sessions", slow)
+        app = _bare_app()
+        _start(slow, command="sleep 300", timeout_s=600)
+        entered = threading.Event()
+        real = slow.wait_for_wake
+
+        def counted(*args, **kwargs):
+            entered.set()
+            return real(*args, **kwargs)
+
+        mocker.patch.object(slow, "wait_for_wake", side_effect=counted)
+        worker = _waiting(app)
+        assert entered.wait(5.0)
+        started = time.monotonic()
+        assert app._hand_to_wait("hello")
+        worker.join(10.0)
+        try:
+            assert not worker.is_alive()
+            assert time.monotonic() - started < 5.0
+        finally:
+            slow.close()
+
+    def test_a_result_and_a_message_together_go_message_first(
+            self, manager, session_starter, mocker):
+        """The owner's rule for the race: the batch the wait had just taken
+        goes back, unanswered, and wakes after the message's turn."""
+        app = _bare_app()
+        _start(manager)
+        session_starter.started[0]["process"].exit(0)
+        real = manager.wait_for_wake
+
+        def together(owner, timeout=None, stop=None):
+            # Takes the result regardless of `stop`, and the message lands
+            # in the same instant -- the window `put_back` is for.
+            batch = real(owner, timeout=5.0)
+            assert app._hand_to_wait("hello")
+            return batch
+
+        mocker.patch.object(manager, "wait_for_wake", side_effect=together)
+        woken = []
+        app._wait_for_sessions(
+            THREAD, lambda t, r: woken.append(t) or iter(()))
+        assert woken == [], "a wake turn ran ahead of the user's message"
+        batch = manager.take_wake(THREAD)
+        assert batch, "the result was dropped instead of put back"
+        assert batch[0].shape == ss.EXITED
+
+    def test_a_reply_is_the_wake_phase(self, manager, session_starter):
+        app = _bare_app()
+        _start(manager)
+        session_starter.started[0]["process"].exit(0)
+        seen = []
+
+        def wake(text, record):
+            seen.append(app._wait_phase)
+            seen.append(app._hand_to_wait("too soon"))
+            return iter(())
+
+        app._wait_for_sessions(THREAD, wake)
+        assert seen == [_WAIT_WAKE, False]
+        assert app._wait_phase is None
+
+    def test_after_a_reply_the_wait_takes_messages_again(
+            self, manager, session_starter):
+        app = _bare_app()
+        _start(manager, command="first")
+        _start(manager, command="sleep 300", timeout_s=600)
+        session_starter.started[0]["process"].exit(0)
+        woken = []
+        worker = _waiting(app, lambda t, r: woken.append(t) or iter(()))
+        assert _until(lambda: woken and app._wait_phase == _WAIT_IDLE)
+        assert app._hand_to_wait("hello")
+        worker.join(5.0)
+        assert not worker.is_alive()
+        assert len(woken) == 1
+
+
+class TestTheFinishedTurnStartsTheMessagesOwn:
+
+    @pytest.mark.asyncio
+    async def test_it_starts_once_the_turn_has_finished(self, mocker):
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            started = mocker.patch.object(app, "run_agent_turn")
+            app._handed_message = "hello"
+            app.on_turn_finished(TurnFinished(None))
+            started.assert_called_once_with("hello")
+            assert app._handed_message is None
+
+    @pytest.mark.asyncio
+    async def test_after_a_failure_too(self, mocker):
+        """The box was cleared when the message was taken, so a turn that
+        failed must not take the message down with it."""
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            started = mocker.patch.object(app, "run_agent_turn")
+            app._handed_message = "hello"
+            app.on_turn_finished(TurnFinished(RuntimeError("fell over")))
+            started.assert_called_once_with("hello")
+
+    @pytest.mark.asyncio
+    async def test_not_on_the_way_out(self, mocker):
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            started = mocker.patch.object(app, "run_agent_turn")
+            app._handed_message = "hello"
+            app._shutting_down = True
+            app.on_turn_finished(TurnFinished(None))
+            assert not started.called
+            app._shutting_down = False
+
+    @pytest.mark.asyncio
+    async def test_with_nothing_handed_nothing_starts(self, mocker):
+        from tui.app import TurnFinished
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            started = mocker.patch.object(app, "run_agent_turn")
+            app.on_turn_finished(TurnFinished(None))
+            assert not started.called
+
+    def test_a_queued_restart_waits_for_that_turn_too(self):
+        """`_fire_pending_restart` is scheduled by the `_busy` setter in the
+        same pass that starts the message's turn, so it can fire with that
+        turn running. It must wait for it rather than exit under it."""
+        app = _bare_app()
+        app.restart_for_config = MagicMock()
+        app._pending_restart = "theme"
+        app._busy_state = True
+        app._fire_pending_restart()
+        assert not app.restart_for_config.called
+        assert app._pending_restart == "theme", \
+            "the restart was dropped rather than left queued"
+        app._busy_state = False
+        app._fire_pending_restart()
+        app.restart_for_config.assert_called_once_with("theme")
+
+
+class TestTheWholeRoute:
+    """End to end through a mounted app: a real turn starts a session, the
+    user types while it runs, and the model is called in the owner's
+    order -- the turn, the user's message, then the result."""
+
+    @pytest.mark.asyncio
+    async def test_typed_during_the_wait_it_runs_before_the_result(
+            self, manager, session_starter, mocker):
+        from tests.conftest import (
+            make_model_response,
+            make_stream_sequence,
+            settle,
+        )
+        from tui.app import _WAIT_IDLE as IDLE
+
+        mocker.patch("core.loop.api_initialization", return_value=object())
+        mocker.patch("core.loop.registry.approval_needed",
+                     return_value=False)
+        stream = make_stream_sequence(
+            make_model_response(text="", tool_calls=[
+                {"id": "t1", "name": "web_search", "input": {"query": "x"}}]),
+            make_model_response(text="started it"),
+            make_model_response(text="answered you"),
+            make_model_response(text="read the result"))
+        # What each call was SENT, written down when it was made: the loop
+        # hands the model the history list it goes on appending to, so the
+        # mock's own call record shows every call the latest history.
+        sent = []
+
+        def model(*args, **kwargs):
+            sent.append(repr((args, kwargs)))
+            return stream(*args, **kwargs)
+
+        mocker.patch("core.loop.call_model_stream", side_effect=model)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+
+        def dispatch(*args, **kwargs):
+            # Where the model's tool call runs: on the turn's worker,
+            # inside its `consuming()`, for the thread the turn is in.
+            _start(manager, owner=app._memory.thread_id,
+                   command="sleep 300", timeout_s=600)
+            return {"result": "started"}
+
+        mocker.patch("core.loop.registry.dispatch", side_effect=dispatch)
+
+        async with app.run_test() as pilot:
+            app.query_one("#prompt").value = "start it"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: stream.calls == 2
+                                and app._wait_phase == IDLE), \
+                "the turn never reached the session wait"
+            app.query_one("#prompt").value = "and another thing"
+            await pilot.press("enter")
+            assert await settle(pilot, lambda: stream.calls == 3
+                                and app._wait_phase == IDLE), \
+                "the message typed during the wait never got its turn"
+            session_starter.started[0]["process"].exit(0)
+            assert await settle(pilot, lambda: stream.calls == 4
+                                and not app._busy), \
+                "the result never woke after the message's turn"
+
+        third, fourth = sent[2:4]
+        assert "and another thing" in third
+        assert "exited with code 0" not in third, \
+            "the result reached the model before the user's message"
+        assert "exited with code 0" in fourth

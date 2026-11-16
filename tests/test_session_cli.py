@@ -508,3 +508,357 @@ class TestCtrlCDuringAWakeTurn:
         assert signal.getsignal(signal.SIGINT) is outside, (
             "the handler outlived the wake turn; the interrupt that "
             "belongs to the WAIT would take it too")
+
+
+# ---------------------------------------------------------------------------
+# ---- SS2 as amended (batch 265): typing while it waits --------------------
+# ---------------------------------------------------------------------------
+
+
+def _until(predicate, timeout=5.0):
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def _logged(mocker, during=None):
+    """`_turns` and `wakes` in ONE log, so the ORDER of the user's turns
+    and the wake turns is what a test asserts on."""
+    log = []
+
+    def fake_turn(**kwargs):
+        log.append(("turn", kwargs["user_goal"]))
+        if during is not None:
+            during(sum(1 for kind, _ in log if kind == "turn"))
+        response = make_model_response(text=f"answer {len(log)}")
+        response.thread_id = THREAD
+        return response
+
+    def fake_wake(**kwargs):
+        log.append(("wake", kwargs["text"]))
+        response = make_model_response(text=f"woken {len(log)}")
+        response.thread_id = THREAD
+        return response
+
+    mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                        side_effect=fake_turn)
+    mocker.patch.object(RunAgentLoop, "wake_conversation",
+                        side_effect=fake_wake)
+    return log
+
+
+def _exit_then(session_starter, manager, value=None, code=0):
+    """A read during the wait at which the session ends, and its result is
+    waiting by the time the read returns."""
+    def read():
+        session_starter.started[0]["process"].exit(code)
+        assert _until(lambda: manager.pending(THREAD))
+        return value
+    return read
+
+
+#: The sessions below time out after this long (batch 265). Each test ends
+#: them itself in milliseconds, so the bound is never reached by a wait that
+#: works; it is what makes one that never reads FAIL in seconds -- the
+#: session's own timeout wakes it -- rather than sit out ten minutes.
+_BOUND_S = 5
+
+
+class TestTypingWhileItWaits:
+    """The owner's choice, in the CLI: the prompt is open while the chat
+    waits on a turn's sessions, a line typed there gets a turn (or runs as
+    a command) of its own, and the results wake after it."""
+
+    def test_a_message_gets_its_own_turn_and_the_result_wakes_after(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            mocker):
+        def start_once(n):
+            if n == 1:
+                _start(manager, command="sleep 300", timeout_s=_BOUND_S)
+            if n == 2:
+                session_starter.started[0]["process"].exit(0)
+
+        log = _logged(mocker, during=start_once)
+        reader = cli_stdin("start it")
+        reader.during_wait = ["and another thing"]
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        assert [kind for kind, _ in log] == ["turn", "turn", "wake"]
+        assert log[1] == ("turn", "and another thing")
+        assert "exited with code 0" in log[2][1]
+
+    def test_the_prompt_is_open_and_says_so(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            mocker, capsys):
+        def start_once(n):
+            if n == 1:
+                _start(manager, command="sleep 300", timeout_s=_BOUND_S)
+
+        _logged(mocker, during=start_once)
+        reader = cli_stdin("start it")
+        reader.during_wait = [_exit_then(session_starter, manager)]
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        out = capsys.readouterr().out
+        banner = out.index("[waiting on 1 background session(s)")
+        assert "type a message to send it now" in out
+        assert "Ctrl+C stops them" in out
+        assert out.index("You: ", banner) > banner, \
+            "the wait shows no prompt to type at"
+
+    def test_a_result_and_a_message_together_go_message_first(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            mocker):
+        """The first read finds nothing; the result is then taken, and the
+        next read -- made before the wake starts -- finds the message. The
+        batch goes back, so the message's turn runs first and the result
+        still wakes, after it. Without `put_back` it would be lost."""
+        def start_once(n):
+            if n == 1:
+                _start(manager, command="sleep 300", timeout_s=_BOUND_S)
+
+        log = _logged(mocker, during=start_once)
+        reader = cli_stdin("start it")
+        reader.during_wait = [_exit_then(session_starter, manager),
+                              "and another thing"]
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        assert [kind for kind, _ in log] == ["turn", "turn", "wake"]
+        assert log[1] == ("turn", "and another thing")
+
+    def test_enter_on_nothing_is_not_a_message(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            mocker):
+        def start_once(n):
+            if n == 1:
+                _start(manager, command="sleep 300", timeout_s=_BOUND_S)
+
+        log = _logged(mocker, during=start_once)
+        reader = cli_stdin("start it")
+        reader.during_wait = ["", _exit_then(session_starter, manager)]
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        assert [kind for kind, _ in log] == ["turn", "wake"]
+
+    def test_a_command_runs_and_the_wait_goes_on(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            mocker, capsys):
+        def start_once(n):
+            if n == 1:
+                _start(manager, command="sleep 300", timeout_s=_BOUND_S)
+
+        log = _logged(mocker, during=start_once)
+        reader = cli_stdin("start it")
+        reader.during_wait = ["/help", _exit_then(session_starter, manager)]
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        assert "Commands:" in capsys.readouterr().out
+        assert [kind for kind, _ in log] == ["turn", "wake"], \
+            "the wait did not resume after the command"
+
+    def test_a_command_the_tui_refuses_is_refused_here_too(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            mocker, capsys):
+        def start_once(n):
+            if n == 1:
+                _start(manager, command="sleep 300", timeout_s=_BOUND_S)
+
+        import cli_commands
+
+        log = _logged(mocker, during=start_once)
+        dispatch = mocker.spy(cli_commands.registry, "dispatch")
+        reader = cli_stdin("start it")
+        reader.during_wait = ["/new", _exit_then(session_starter, manager)]
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        out = capsys.readouterr().out
+        assert ("[1 background session still running — start a new thread "
+                "once they finish, or press Ctrl+C to stop them]") in out
+        assert not dispatch.called, "/new ran under the wait"
+        assert [kind for kind, _ in log] == ["turn", "wake"], \
+            "the wait did not resume after the refusal"
+
+    def test_ctrl_c_while_it_reads_still_stops_the_sessions(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            mocker, capsys):
+        def start_once(n):
+            if n == 1:
+                _start(manager, command="sleep 300", timeout_s=_BOUND_S)
+
+        log = _logged(mocker, during=start_once)
+        reader = cli_stdin("start it")
+        reader.during_wait = [KeyboardInterrupt]
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        assert manager.row("s1").state == ss.KILLED
+        assert "stopped 1 background session" in capsys.readouterr().out
+        assert [kind for kind, _ in log] == ["turn"]
+
+    def test_the_end_of_stdin_leaves_the_wait_to_carry_on(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            mocker):
+        """A piped run: its input is done, and the wait goes on without
+        reading -- the result still wakes, as it did before the prompt
+        was open."""
+        def start_once(n):
+            if n == 1:
+                _start(manager, command="sleep 300", timeout_s=_BOUND_S)
+                import threading
+                threading.Timer(
+                    0.3, session_starter.started[0]["process"].exit).start()
+
+        log = _logged(mocker, during=start_once)
+        reader = cli_stdin("start it")
+        reader.during_wait = [EOFError()]
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        assert [kind for kind, _ in log] == ["turn", "wake"]
+        assert len(reader.polls) == 1, "it kept reading a stdin that ended"
+
+    def test_an_open_prompt_is_not_printed_twice(
+            self, manager, session_starter, cli_stdin, fake_storage,
+            mocker):
+        """The wait can end with "You: " on screen and nothing typed -- a
+        session the user's own kill ended is held, not woken for (SS19) --
+        and the read after it then prints no second one."""
+        def start_once(n):
+            if n == 1:
+                _start(manager, command="sleep 300", timeout_s=_BOUND_S)
+
+        def kill():
+            [row] = manager.live_rows()
+            manager.kill(row.id, owner_thread=ss.ANY_OWNER,
+                         reason=ss.KILL_USER)
+            return None
+
+        _logged(mocker, during=start_once)
+        reader = cli_stdin("start it")
+        reader.during_wait = [kill]
+
+        main.run_chat(None, "ANTHROPIC", "m")
+
+        assert reader.prompts == ["You: ", ""]
+
+
+class TestTheCommandsRefusedWhileItWaits:
+
+    def _session(self):
+        from cli_commands import ChatSession
+        return ChatSession("ANTHROPIC", "m", thread_id=THREAD)
+
+    @pytest.mark.parametrize("line", [
+        "/compact", "/grill-me", "/model x", "/new", "/resume abc",
+        "/submodel x", "/threads"])
+    def test_each_is_refused_with_a_session_running(
+            self, manager, line, capsys):
+        from cli_commands import _refused_while_waiting
+        _start(manager, command="sleep 300", timeout_s=600)
+        assert _refused_while_waiting(self._session(), line) is True
+        assert "still running" in capsys.readouterr().out
+
+    def test_submodel_that_only_shows_is_not(self, manager):
+        from cli_commands import _refused_while_waiting
+        _start(manager, command="sleep 300", timeout_s=600)
+        assert _refused_while_waiting(self._session(), "/submodel") is False
+
+    def test_a_command_that_changes_nothing_underneath_is_not(self,
+                                                               manager):
+        from cli_commands import _refused_while_waiting
+        _start(manager, command="sleep 300", timeout_s=600)
+        assert _refused_while_waiting(self._session(), "/help") is False
+
+    def test_with_nothing_running_nothing_is(self, manager):
+        from cli_commands import _refused_while_waiting
+        assert _refused_while_waiting(self._session(), "/new") is False
+
+    def test_at_the_prompt_nothing_is(self, manager, mocker):
+        """Only a line the wait handed back: with no wait running there is
+        nothing for a command to pull out from under, and refusing one
+        there would leave no way round it."""
+        from cli_commands import run_command
+        _start(manager, command="sleep 300", timeout_s=600)
+        handler = mocker.patch("cli_commands.registry.dispatch",
+                               return_value=True)
+        run_command(self._session(), "/new")
+        assert handler.called
+
+    def test_the_table_covers_every_command_the_tui_holds(self):
+        """THE DRIFT GUARD. Each TUI site that asks `refuse_if_occupied`,
+        mapped to the command it serves: a command both shells have must be
+        in the CLI's table, or the two shells disagree about what may run
+        under a wait. A new TUI site with no mapping fails here first."""
+        import ast
+
+        from cli_commands import REFUSED_WHILE_WAITING
+        from core.commands import CATALOG, CLI
+
+        tree = ast.parse(open("tui/app.py", encoding="utf-8").read())
+        handlers = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and \
+                    getattr(node.func, "id", None) == "bind" and \
+                    len(node.args) >= 2 and \
+                    isinstance(node.args[0], ast.Constant):
+                handlers[node.args[1].id] = node.args[0].value
+        methods = {"action_pick_thread": "threads",
+                   "switch_to_thread": "resume",
+                   # A message, not a command: SS2 as amended.
+                   "on_prompt_input_submitted": None}
+        sites = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and any(
+                    isinstance(c, ast.Call)
+                    and getattr(c.func, "attr", None) == "refuse_if_occupied"
+                    for c in ast.walk(node)):
+                sites.add(node.name)
+        for site in sorted(sites):
+            assert site in handlers or site in methods, (
+                f"tui/app.py's {site} refuses while sessions run and is "
+                f"mapped to no command; add it here and, if the CLI has "
+                f"the command, to REFUSED_WHILE_WAITING")
+            name = handlers.get(site) or methods[site]
+            if name and CATALOG[name].in_shell(CLI):
+                assert name in REFUSED_WHILE_WAITING, name
+        # The TUI refuses /grill-me for its running turn, which its wait is.
+        assert "grill-me" in REFUSED_WHILE_WAITING
+
+
+class TestTheReadersPoll:
+    """`_StdinReader.poll`, the real one: readline()'s discipline -- type-
+    ahead kept, nothing drained -- with ask()'s deadline."""
+
+    def test_it_keeps_type_ahead_and_ends_at_eof(self, monkeypatch):
+        import io
+
+        monkeypatch.setattr(main.sys, "stdin", io.StringIO("first\nsecond\n"))
+        reader = main._StdinReader()
+        assert reader.poll(5.0) == "first"
+        assert reader.poll(5.0) == "second", \
+            "a line typed ahead was drained, as ask() would"
+        with pytest.raises(EOFError):
+            reader.poll(5.0)
+
+    def test_nothing_typed_is_none_at_the_deadline(self, monkeypatch):
+        import os
+
+        read_fd, write_fd = os.pipe()
+        monkeypatch.setattr(main.sys, "stdin", os.fdopen(read_fd, "r"))
+        reader = main._StdinReader()
+        try:
+            assert reader.poll(0.1) is None
+            os.write(write_fd, b"late\n")
+            assert reader.poll(5.0) == "late"
+        finally:
+            os.close(write_fd)

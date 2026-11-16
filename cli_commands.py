@@ -112,8 +112,56 @@ def _out(text: str = "") -> None:
 
 # ---- the loop's entry point ---------------------------------------------------
 
-def run_command(session: ChatSession, line: str) -> None:
+#: The commands refused when they are sent while the chat waits on a turn's
+#: background sessions, and what each would have done (ROADMAP_v3 §49, SS2
+#: as amended in batch 265, the owner's choice). The CLI's half of the
+#: TUI's `refuse_if_occupied`: the TUI refuses these while its wait runs,
+#: because each changes what the wait is waiting FOR -- the thread, the
+#: model, the history -- underneath it. `/grill-me` is one of them because
+#: the TUI's refuses for its running turn, and its wait is one.
+#: `/submodel` only when it would change something, as in the TUI.
+REFUSED_WHILE_WAITING = {
+    "compact": "compact this thread",
+    "grill-me": "run /grill-me",
+    "model": "change the model",
+    "new": "start a new thread",
+    "resume": "switch threads",
+    "submodel": "change the submodel",
+    "threads": "switch threads",
+}
+
+
+def _refused_while_waiting(session: ChatSession, line: str) -> bool:
+    """Whether `line`, sent during the session wait, is refused, saying why.
+
+    Asked only of a line the wait handed back: at the prompt, with nothing
+    waiting, there is no wait for a command to pull the ground from under,
+    and a refusal there would leave the user no way round it.
+    """
+    from core import shell_sessions
+
+    name, _, args = line[1:].partition(" ")
+    action = REFUSED_WHILE_WAITING.get(name)
+    if action is None or (name == "submodel" and not args.strip()):
+        return False
+    thread_id = session.thread_id
+    sessions = shell_sessions.sessions
+    if thread_id is None or not sessions.blocks(thread_id):
+        return False
+    live = sessions.waited_on(thread_id)
+    plural = "" if live == 1 else "s"
+    _out(f"[{live} background session{plural} still running — {action} "
+         f"once they finish, or press Ctrl+C to stop them]")
+    return True
+
+
+def run_command(session: ChatSession, line: str, *,
+                waiting: bool = False) -> None:
     """Run one `/` line, and contain whatever the command does.
+
+    `waiting` (batch 265): the line was sent while the chat waited on
+    background sessions, and the commands in `REFUSED_WHILE_WAITING` are
+    refused rather than run.
 
     CONTAINED HERE, as the TUI contains its own dispatch (batch 135): a
     handler that raises must not end the conversation, and the traceback
@@ -123,6 +171,8 @@ def run_command(session: ChatSession, line: str) -> None:
     turn.
     """
     name = line[1:].split(" ")[0]
+    if waiting and _refused_while_waiting(session, line):
+        return
     try:
         handled = registry.dispatch(session, line)
     except KeyboardInterrupt:

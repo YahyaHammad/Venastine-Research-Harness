@@ -75,7 +75,8 @@ def available() -> bool:
 
 _TIMEOUT_DESCRIPTION = (
     "The longest this session may run, in seconds. Pick what the work needs: "
-    "while it runs the user's prompt is blocked. Above "
+    "while it runs the user can still message you but cannot switch thread "
+    "or model. Above "
     f"{config.SHELL_SESSION_TIMEOUT_CAP_S} it is capped at "
     f"{config.SHELL_SESSION_TIMEOUT_CAP_S} and the result says so. When it is "
     "reached the command is stopped and you are woken.")
@@ -215,8 +216,10 @@ class KillParams(BaseModel):
 
 _SHARED = (
     f"At most {config.SHELL_SESSION_MAX_LIVE} sessions run at once, shared with "
-    "any subagents, and the user's prompt is blocked while one of yours runs. "
-    "Read output with shell_output and stop a session with shell_kill.")
+    "any subagents. While one of yours runs the user can still message you: "
+    "each message is a turn of its own, and a result that lands meanwhile "
+    "wakes you after it. Read output with shell_output and stop a session "
+    "with shell_kill.")
 
 
 def _schema(name: str, description: str, model, required) -> dict:

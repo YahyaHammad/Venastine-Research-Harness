@@ -9231,13 +9231,18 @@ class _StubSessions:
     def live_for(self, owner):
         return self._live
 
+    def waited_on(self, owner):
+        # Batch 265: what the wait loop counts since it stopped counting
+        # interactive shells. The one session here is a background one.
+        return self._live
+
     def pending(self, owner):
         return 0
 
     def suspended(self, owner):
         return False
 
-    def wait_for_wake(self, owner, timeout=None):
+    def wait_for_wake(self, owner, timeout=None, stop=None):
         self.waits += 1
         if self._on_wait is not None:
             self._on_wait(self.waits)
