@@ -31741,3 +31741,81 @@ and gitleaks on a clean export are clean. The requirements files are unchanged, 
 was not re-run.
 
 - **Version:** the branch's beta identity, `0.3.16-b.1.reasoning-only-wording.r9440d8cb7de0`.
+
+## Batch 262 -- the demo deploys again: Gradio 6.32.0 lets the bridge have pillow 13 (2026-11-15)
+
+**Asked.** In the 2026-11-15 bug round the owner noticed that the demo deployment on GitHub was
+failing. It was checked against the code first, and the owner chose the fix:
+
+- bump Gradio to 6.32.0;
+- drop the accepted pillow entries;
+- rehearse before anything deploys.
+
+**Why it failed.** Every `deploy-hf` run since 2026-11-14 stopped at the same line:
+`pip-audit refused bridge.lock`. That covers 47d7616 (run 43570477939) and b4fcd65 (run
+43592431355). The audit refused three pillow 12.3.0 advisories, PYSEC-2026-4363, CVE-2026-128066
+and CVE-2026-128067, all fixed in 13.0.0. It had already ignored the 39 accepted IDs.
+
+Gradio up to 6.31.0 requires `pillow<13`, so no lock could reach a fix. Each new pillow advisory
+had to be read against what the bridge reaches and accepted by ID, four triages since batch
+169. The failure was reproduced locally before anything changed, with the deploy's own uv 0.13.4
+and pip-audit 2.10.1: the same three IDs, and 39 ignored.
+
+**The fix.** Gradio 6.32.0, released 2026-11-12, is the first to allow pillow 13. Its notes say
+"Allow Pillow 13 on 6.x", and it requires `pillow<14`.
+
+- **The pin.** `GRADIO_VERSION` is 6.32.0. So the Space's `sdk_version`, the Studio's
+  `bridge.lock`, `BUILD_INFO.json` and THIRD_PARTY_NOTICES all name it, and the bridge resolves
+  pillow 13.0.0.
+- **The accepted list.** The four `ACCEPTED` entries are removed. The list is empty, and its
+  comment keeps their history. The audit refuses every finding until one is triaged again.
+- **The record.** ROADMAP_v3 §79 slice 7 carries the amendment.
+
+**Measured before the change was trusted** (the re-measure list beside `GRADIO_VERSION`):
+
+- **Gradio's own diff, 6.30.0 to 6.32.0** (31 commits, 17 Python files):
+  - `gradio/server.py` is untouched, and `gr.Server` is exported at both tags.
+  - `launch()` takes the same arguments. Its docstring now says SSR needs Node 24, and the bridge
+    turns SSR off.
+  - The `SYSTEM=spaces` read in `gradio/utils.py` is unchanged, so `drop_spaces_flag` still
+    applies. Its docstring says so.
+  - Run history was already on by default in 6.30.
+- **The Space's install line resolves with 6.32.0 in it**, on Python 3.12: pillow 13.0.0, torch
+  2.13.0. The `mcp` extra still caps pydantic at 2.12.5, against the harness's 2.14.2, so HD2's
+  two environments stand.
+- **pip-audit finds nothing** in the Space's whole set (112 packages) or the bridge's (72).
+- **A dry run of each platform with the change** built, scanned with gitleaks from the bundle's
+  root, and audited both locks. Both were clean, and neither warned of a stale entry.
+- **The ModelScope image, run.** podman in WSL built it from the bundle's own `Dockerfile`: the
+  digest-pinned base, `bridge.lock` installed `--require-hashes --only-binary`, and the session
+  environment built in. Started, the bridge served on 6.32.0 and its confinement self-test
+  verified. `/`, `/healthz` and `/terminal` answered 200. A real session over `/ws/<ticket>`
+  drew the shared-demo banner, and the `status` API was listed. Docker Desktop was not running,
+  so `test_the_image_holds_exactly_the_bundles_files` itself did not run. The podman build
+  used the same `Dockerfile` that test builds.
+
+**A guard, added.** Nothing held THIRD_PARTY_NOTICES' gradio and spaces rows to the builder's
+pins: the platform installs both, so no requirements file carries them, and the gradio row would
+have kept saying 6.30.0. `test_the_notices_name_the_gradio_and_spaces_the_platforms_install` now
+does.
+
+**Found, not fixed.**
+
+- **TECHNICAL_DEBT 118.** On Hugging Face the audit compiles the bridge's set, not the Space's
+  install line. So 40 packages only the Space installs are never audited, among them `mcp`,
+  `authlib`, `cryptography`, `pyjwt`, torch and torch's CUDA packages, and pydantic is audited at
+  another version. Nothing in them is flagged today.
+- **podman needed SIGKILL to stop the container** after 10 s. That is most likely Python as PID 1
+  with no SIGTERM handler, not the Gradio version, but it was not compared against 6.30.0. The
+  bridge already sweeps a killed predecessor's sessions at start.
+
+**Not done here.** Nothing deploys from this branch. The Space redeploys from `main` after the
+merge, once every check on it passes. The workflow's own `rehearse` job runs only on a manual
+dispatch, and the branch is not pushed.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9423 passed, 88 skipped (9511). 4 of 4 mutations killed against a green control, each a way the notices could drift: the pin moved back, the gradio row left behind, the spaces row changed, and a second gradio row that disagrees. The pin itself is held by the rehearsal above, not by an
+offline test, because what it fixes comes from an advisory feed. ruff, bandit (no new findings,
+no baseline count grew) and gitleaks on a clean export are clean. No requirements file changed;
+pip-audit ran on the compiled bridge and Space sets instead.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.demo-gradio-6-32.r7765f43f43d1`.

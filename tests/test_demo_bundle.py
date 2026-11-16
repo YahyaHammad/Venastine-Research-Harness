@@ -238,6 +238,22 @@ class TestTheGeneratedFiles:
         >=13 -- measured 2026-10-20 -- and it has no gr.Server."""
         assert int(bundle.GRADIO_VERSION.split(".")[0]) >= 6
 
+    def test_the_notices_name_the_gradio_and_spaces_the_platforms_install(
+            self):
+        """Batch 262. The platform installs these two, so no requirements
+        file carries their pins, and nothing held THIRD_PARTY_NOTICES' rows
+        to the builder's: a row saying 6.30.0 would have outlived the move
+        to 6.32.0."""
+        text = (ROOT / "docs" / "THIRD_PARTY_NOTICES.md").read_text(
+            encoding="utf-8")
+        rows = {}
+        for line in text.splitlines():
+            cells = [c.strip() for c in line.split("|")]
+            if line.startswith("| ") and len(cells) > 3:
+                rows.setdefault(cells[1], []).append(cells[2])
+        assert rows["gradio"] == [f"`=={bundle.GRADIO_VERSION}`"]
+        assert rows["spaces"] == [f"`=={bundle.SPACES_VERSION}`"]
+
     def test_the_python_pin_clears_the_harness_floor(self):
         major, minor = map(int, bundle.PYTHON_VERSION.split("."))
         assert (major, minor) >= (3, 11)

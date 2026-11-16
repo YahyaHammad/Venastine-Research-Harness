@@ -4889,7 +4889,9 @@ could. The bridge writes those answers at every start since
   `google-genai` wants `>=13` -- and has no `gr.Server`. 6.30.0 resolves, but
   its `mcp` extra wants `mcp<2` and `pydantic<=2.12.5` against the harness's
   deliberate `mcp==2.0.0` and `pydantic==2.13.4`. One environment would run
-  the hosted harness on versions CI never tests (HD2, amended).
+  the hosted harness on versions CI never tests (HD2, amended). Re-measured
+  on 6.32.0 in batch 262: its `mcp` extra still caps pydantic at 2.12.5,
+  against the harness's 2.14.2.
 - **A ZeroGPU Space runs as root**: uid 0, `HOME=/root` at mode 700, an Amazon
   Linux 6.18 kernel on x86_64, and Docker's default capabilities less
   `NET_RAW` -- `DAC_OVERRIDE`, `KILL`, `SETUID` and `SETGID` among them,
@@ -5042,7 +5044,19 @@ Batch 166 deployed the same bundle to a private Studio,
    where a deploy can be confirmed. With this slice §79 is complete; the
    public flip of the two deployments is the owner's. Batch 170 closed
    the one gap this slice had stated: an open high or critical code
-   scanning alert on `main` now holds the deploy (HD9).
+   scanning alert on `main` now holds the deploy (HD9). **Amended in
+   batch 262 (2026-11-15), the owner's call:** three more pillow 12.3.0
+   advisories (PYSEC-2026-4363, CVE-2026-128066, CVE-2026-128067, fixed
+   in 13.0.0) refused every deploy from 2026-11-14. Gradio 6.32.0, released
+   2026-11-12, is the first to allow pillow 13 (`pillow<14`), so
+   `GRADIO_VERSION` moved to it and the bridge resolves pillow 13.0.0. The
+   four accepted entries, 39 IDs in all, were removed: `ACCEPTED` is empty,
+   and the audit refuses every finding until one is triaged again.
+   Measured with the deploy's own uv 0.13.4 and pip-audit 2.10.1 first:
+   - `gr.Server` and its module are unchanged;
+   - the Space's install line resolves with 6.32.0 in it;
+   - pip-audit finds nothing in that set or in the bridge's;
+   - a dry run of each platform built, scanned and audited clean.
 
 ### What §79 deliberately does not change
 

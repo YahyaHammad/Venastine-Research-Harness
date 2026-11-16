@@ -104,7 +104,7 @@ packages on the server and sending their assets to browsers are distinct paths.
 | textual-serve | `==1.1.3` | MIT | Yes | `deploy/hosted/requirements.txt`; its browser assets only, its server never runs |
 | uv | `==0.13.4` | MIT OR Apache-2.0 | Yes | `deploy/hosted/requirements.txt`; builds the session environment |
 | websockets | `==17.3` | BSD-3-Clause | Yes | `deploy/hosted/requirements.txt`; the websocket upgrade every session is |
-| gradio | `==6.30.0` | Apache-2.0 | Yes | installed by the Space at the README's `sdk_version`; in the Studio's `bridge.lock` |
+| gradio | `==6.32.0` | Apache-2.0 | Yes | installed by the Space at the README's `sdk_version`; in the Studio's `bridge.lock` |
 | spaces | `==0.51.3` | Apache-2.0 | Yes | installed by the Space itself; in the Studio's `bridge.lock` |
 
 ### Browser assets
