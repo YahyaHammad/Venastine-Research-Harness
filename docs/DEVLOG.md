@@ -31819,3 +31819,51 @@ no baseline count grew) and gitleaks on a clean export are clean. No requirement
 pip-audit ran on the compiled bridge and Space sets instead.
 
 - **Version:** the branch's beta identity, `0.3.16-b.1.demo-gradio-6-32.r7765f43f43d1`.
+
+## Batch 263 -- the file tools read the container's `/workspace` as the workspace (2026-11-15)
+
+**Asked.** In the 2026-11-15 bug round, on release 0.3.14 in WSL with the shell in a container,
+the owner showed the shell working in `/workspace/...` while `read` and `write` were handed the
+same paths, asked to leave the workspace, and then failed. The first diagnosis, made from one
+screenshot, read it as a Windows harness and a WSL shell. The second screenshot corrected that.
+
+**What the code said.** The container mounts the workspace at `/workspace`, so every path the
+model sees in the shell's output is spelled from there. The file tools run on the host, and
+`resolve_path` kept an absolute path as it was, so `/workspace/x` was a path outside the
+workspace: it asked (ROADMAP §6), and after a yes `read` found no such file and `write` hit a
+permission error.
+
+**The fix, the owner's choices** (ROADMAP_v3 §96, CW1-CW3). The owner chose to map
+`/workspace/x` onto the workspace in all four file tools, to keep asking about every other path
+outside it, and to gate the map on the shell being enabled, which means any tool in
+`APPROVAL_BY_SHELL_MODE`, asked through `is_tool_allowed`. The other options were a runtime probe
+and no gate. The map is in `resolve_path`, so the approval check, the handlers, the protected
+deny and the TUI's diff agree on it. The mount point is now one constant,
+`sandbox.CONTAINER_WORKSPACE`, which the container's `-v` and `-w` read too. CW2's two host rules
+are adopted defaults: the host's own reading wins when it is already inside the workspace, and a
+mapped path that lands outside keeps today's prompt. So does CW3, which keeps the protected deny
+unchanged.
+
+- **The tests:** 19 in `TestTheContainerSpellingIsTheWorkspace` (`tests/test_file_ops.py`),
+  against a real workspace on disk, on Windows and in WSL. `tests/BREAKING_CHANGES.md` has three
+  rows. The first mutation pass left one survivor: the protected deny resolving the path for
+  itself instead of through `resolve_path`. The `.venastine` segment matches anywhere in a path,
+  so the host's reading of `/workspace/.venastine/...` was refused too, and the test could not
+  tell. A hard link inside the workspace to a protected file, named through the mount, can: its
+  name has no `.venastine` in it. `test_a_hard_link_reached_through_the_mount_is_refused` kills
+  that mutation.
+- **Live check, in WSL with Podman.** The real sandbox's `pwd` printed `/workspace`. With the
+  shell tools off, `read` of `/workspace/notes.txt` asked and found no such file. With them on, it
+  read the file without asking, and a `write` to `/workspace/made.txt` was visible to `cat` inside
+  the container.
+- **Found, and left:** the shell reads `/workspace/x` as a host path too. `cat
+  /workspace/notes.txt` classifies `HOST_READ` and runs on the host after a prompt, measured on
+  both platforms. Fixing it changes what the gate auto-approves, so it is `TECHNICAL_DEBT` 119,
+  for the owner. It is numbered 119 because 117 and 118 are on the unmerged branches of batches 260
+  and 262.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9441 passed, 88 skipped (9529). 11 of 11 mutations killed against a green control, one per rule: no map, the mount point not a whole segment, one slash dropped, the bare mount point, the host's inside reading, no gate, the gate reading config.yaml, the gate asking about `shell` alone, a mapped path that leaves kept, and the deny and the approval check each resolving for themselves. ruff, bandit (no new findings, no baseline count grew)
+and gitleaks on a clean export are clean. The requirements files are unchanged, so pip-audit
+was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.container-workspace-paths.reecb5909236b`.

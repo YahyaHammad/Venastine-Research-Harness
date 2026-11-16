@@ -6535,6 +6535,24 @@ its line. Left for its own batch because it changes what refuses a deploy,
 and the accepted list would need triage for a package the bridge never
 imports.
 
+## 119. The shell reads the container's `/workspace` as a host path (open, found batch 263)
+
+**Found while building ROADMAP_v3 §96.** The file tools now map `/workspace/x`
+onto the workspace (CW1), and the shell does not. Measured on Windows and in
+WSL: `classify_command("cat /workspace/notes.txt", ws)` is `HOST_READ` with
+`escapes_workspace` True, so `_route` sends it to the host, after a prompt, and
+on the host `/workspace` is not the workspace. `cat notes.txt` is `INERT` and
+runs in the container. A model that copies a path from the container's own
+output into a read-only command is asked, then gets the host's answer about a
+different path. Severity `S3`, `coherence`.
+
+**Shape, not done here.** `_within` in `security/sandbox.py` would read a
+token spelled from the mount point as the workspace path it names, with the
+same two rules CW2 gives the file tools. Left out of batch 263 because it
+changes what the gate AUTO-APPROVES: `cat /workspace/x` would become INERT and
+run unasked in the container, which is the right answer but is the gate's
+decision (ROADMAP_v2 §28, G2) and wants the owner's yes.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both
