@@ -1009,7 +1009,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 | `attended_approval_timeout_s` | 600 | Attended prompt deadline; expiry denies that call while the run continues |
 | `subagent_review` | `false` | Shipped default for the post-pipeline review |
 | `max_review_findings` / `max_review_refinements` | 25 / 3 | Consent-fatigue caps on the review stage |
-| `max_pipeline_retries` / `max_json_retries` | 2 / 2 | Revise/re-validate rounds per claim; corrective attempts per malformed pass payload |
+| `max_pipeline_retries` / `max_json_retries` | 2 / 2 | Revise/re-validate rounds per claim; corrective attempts per malformed pass payload, or per empty Pass 1 or Final synthesis |
 | `max_iterations` | 50 | Step ceiling for a turn or pass absent an agent's own `max_steps` |
 | `subagent_max_depth` | 2 | `spawn_subagent` nesting limit |
 | `subagent_max_parallel` | 3 | How many subagents of one model response run at once; 1 makes them sequential again |
@@ -1077,7 +1077,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 9510 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
+Run the test suite with `pytest` — 9537 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
 
 ## Documentation
 

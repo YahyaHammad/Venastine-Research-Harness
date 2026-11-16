@@ -31584,3 +31584,81 @@ once-only drop warning. ruff, bandit (no new findings, no baseline count grew) a
 clean export are clean; the requirements files are unchanged, so pip-audit was not re-run.
 
 - **Version:** the branch's beta identity, `0.3.15-b.1.session-panel-ollama-404.r52f9026d5cb0`.
+
+## Batch 267 -- a research pass with no text is asked again, then fails (2026-11-16)
+
+**Asked.** The owner reported, from an older version, that when the model replied with
+reasoning only twice in one research pass, the harness gave up and let it through. That
+garbled the pipeline: the first pass's file held its whole JSON, and the later passes' `.md`
+files were empty. The report was to be checked against the current code before any fix.
+
+**Still there, measured.** Re-run on origin/main `b4fcd65` through the real loop under a
+scripted provider, with Pass 0, Pass 1 and Final synthesis each replying with reasoning only
+twice:
+
+- **Pass 0 recovered.** RO2 asked once, then ended the turn `complete` with no text. The JSON
+  retry (RO6) asked again, and the plan came back. `00_plan.md` holds the plan's JSON, which
+  is by design: Pass 0's output is the plan.
+- **Pass 1 and Final synthesis did not.** Each ended `complete` with `""`, and
+  `_check_not_truncated` returns early on `complete`. Pass 2 was handed "Response to extract
+  claims from:" and nothing else, and extracted no claims. `01_raw_response.md` and
+  `report.md` were written at 0 bytes, and the run was marked complete. Seven model calls.
+
+The JSON passes were never exposed, because an empty reply does not parse. The two prose
+passes had nothing that could fail.
+
+**The owner's choice: retry, then fail.** Pass 1, each ensemble candidate and Final
+synthesis get the corrective retries the JSON passes already get. They go into the same
+thread, within the same `max_json_retries`, in RO6's no-text wording without its JSON half.
+Still empty, the pass fails saying why, and the run is marked failed. An empty ensemble
+candidate is skipped like a failed one. RO6's row in ROADMAP_v3 §95 carries the amendment.
+
+**Built.**
+
+- **`core/reasoning/json_retry.py`.** `retry_until_text` is `retry_until_json` for a pass
+  whose contract is some text, and whitespace counts as none, as RO1 counts it. Both loops
+  now continue a thread through one `_corrective_turn`, moved out of `retry_until_json`
+  unchanged, so the continuation's arguments have one copy. `_REASONING_IS_NOT_THE_REPLY` is
+  RO6's sentence about reasoning, read by both correctives; RO6's own wording hashes the same
+  before and after. The failure names the last reply as reasoning only or empty, read from
+  the notice RO2 ends a reasoning-only turn with.
+- **`core/reasoning/orchestrator.py`.** `_run_pass` is the one entry for every prose pass,
+  and it now ends in `retry_until_text`. The ensemble loop's existing `except` skips an empty
+  candidate, and the review stage's existing containment keeps the report when a
+  re-synthesis is empty. Before, an empty re-synthesis replaced the report with nothing and
+  was traced as applied.
+
+**Two choices of the batch's own.**
+
+- **A corrective attempt is read by the first attempt's stop rule** (`_settle_text_retry`).
+  One cut off by a ceiling with no text fails, naming the stop: asking again into an
+  exhausted turn costs a call to be told the same thing, and "the last reply was empty"
+  would hide which ceiling it hit. One cut off with text is traced as truncated and used,
+  like the attempt it corrects. Its granted calls join the §25 audit trail.
+- **The corrective asks for the answer "written as the reply itself."** That is RO6's
+  wording with "so there was no JSON to parse" and "ONLY valid JSON" taken out. About tool
+  calls it says only RO6's sentence, that one written in reasoning is not run.
+
+**Gaps.** A corrective attempt is not streamed, so it shares the JSON retries' two §26
+limits. A tool call it makes shows no `tool_call` event, and a page it fetches reaches no
+corpus. Pass 1 fetches the most, so this is where the limit costs most. Each attempt is a
+fresh run with RO2's own ask, so a pass that never answers spends six calls at the default
+budget. Whether the corrective recovers the measured model is not measured. `config.yaml`'s
+`max_json_retries` comment still says only "malformed JSON", because the file is never
+staged here; README and CONFIG_ARCHITECTURE say both.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9449 passed, 88 skipped
+(9537, 27 new). 23 of 23 mutations killed, each by every test it was expected to
+fail: the pass never retrying, a still-empty pass returning empty, whitespace read as text, the
+corrective sent to no thread or replaced by the JSON one, its reasoning sentence dropped or RO6
+keeping its own copy, each forwarded argument dropped (authorization, effort, activity,
+temperature), the trace line gone, the end notice unread, one attempt short, a budget of its own,
+retries skipping `on_response`, a retry's stop or grants unread, the first stop read after the
+retry, the retry under another prompt, the pass returning its first text, and the shared hop
+dropping the JSON retry's cap or context. One run of the pipeline files, made under load, failed
+`test_what_does_not_fit_the_payload_block_can_be_scrolled_to` (6 against 8), a TUI modal this
+batch does not touch; it passed three of three alone. ruff, bandit (no new findings, no baseline
+count grew) and gitleaks on a clean export are clean; no requirements file changed, so pip-audit
+was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.empty-research-pass.r8eb5a4e08bd5`.

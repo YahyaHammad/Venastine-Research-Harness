@@ -322,6 +322,10 @@ max corrective follow-up attempts when a pass returns malformed JSON
 
 (total attempts per pass = MAX_JSON_RETRIES + 1). See ROADMAP §3.
 
+Since batch 267 the same budget covers Pass 1 and Final synthesis coming back with no
+text at all: each is asked again that many times, then the pass fails (ROADMAP_v3 §95,
+RO6 amended).
+
 ## Spend cap (batch 27, #4)
 
 There is NO default spend ceiling any more. The loop's cumulative

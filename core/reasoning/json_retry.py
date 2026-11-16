@@ -39,6 +39,13 @@ review.py:_validated for reasons that module states.
 Unrecoverable failure raises ValueError with the final parse error
 attached -- the orchestrator's try/except turns that into a durable
 status='failed' record.
+
+ROADMAP_v3 §95, amended in batch 267, added the THIRD thing worth
+correcting, for the two passes whose answer is prose (Pass 1 and Final
+synthesis): a reply with no text at all. `retry_until_text` is the same
+recovery with the same thread, the same attempt arithmetic and the same
+`max_json_retries` budget, and both loops send their corrective through
+`_corrective_turn`, so the continuation's arguments have one copy.
 """
 
 from __future__ import annotations
@@ -51,6 +58,23 @@ import config
 from core.reasoning.payload_validation import PayloadShapeError
 
 MAX_JSON_RETRIES = config.MAX_JSON_RETRIES
+
+# ROADMAP_v3 §95 (RO6). What an empty reply is told about its reasoning,
+# in ONE copy for the JSON corrective and the free-text one (batch 267):
+# the two would otherwise drift, and this sentence is the part chosen to
+# correct a model that believes its reasoning was the answer.
+_REASONING_IS_NOT_THE_REPLY = (
+    "Anything written only in your reasoning is not part of the response, "
+    "and a tool call written there is not run.")
+
+# Batch 267. RO6's no-text wording with the JSON half taken out: a prose
+# pass has no JSON to be missing, and "ONLY valid JSON" would talk it out
+# of its own output contract.
+_TEXT_CORRECTIVE = (
+    "Your last response contained no text at all. "
+    + _REASONING_IS_NOT_THE_REPLY + "\n\n"
+    "Respond again with the answer your original instructions asked for, "
+    "written as the reply itself.")
 
 
 def parse_json_response(text: str) -> Any:
@@ -134,8 +158,6 @@ def retry_until_json(
                   brackets the whole attempt-and-retry sequence, and a row
                   per correction would report one run as several.
     """
-    from core.loop import RunAgentLoop
-
     raw_text = response.text
 
     for attempt in range(max_retries):
@@ -160,32 +182,12 @@ def retry_until_json(
                 _shape_corrective(e, raw_text) if shape
                 else _parse_corrective(e, raw_text)
             )
-            retry_response = RunAgentLoop.continue_conversation(
-                thread_id=response.thread_id,
-                message=corrective,
-                system_prompt=system_prompt,
-                model=model,
-                provider_name=provider_name,
-                temperature=temperature,
-                # A retry is the SAME work continuing. Omitting this would
-                # strip the gated tools on exactly the attempt where the
-                # model is already struggling, and the only symptom would
-                # be a second malformed answer.
-                authorization=authorization,
-                context=context,
-                # Same rule, batch 25 (#139): a retry is the same pass
-                # continuing, so it carries the pass's effort too --
-                # effort_for re-validates against this thread's model.
-                effort=effort,
-                # And the same rule again for §47's sink (batch 75). This
-                # hop dropped it, so a spawn inside a corrective attempt
-                # was invisible -- and this is the one path where the
-                # channel is the ONLY route, because continue_conversation
-                # drains its own loop.
-                activity=activity,
-                **({} if max_total_tokens is None
-                   else {"max_total_tokens": max_total_tokens}),
-            )
+            retry_response = _corrective_turn(
+                response, corrective,
+                system_prompt=system_prompt, model=model,
+                provider_name=provider_name, temperature=temperature,
+                authorization=authorization, context=context, effort=effort,
+                activity=activity, max_total_tokens=max_total_tokens)
             if on_response is not None:
                 on_response(retry_response)
             raw_text = retry_response.text
@@ -193,6 +195,123 @@ def retry_until_json(
     # Last attempt: validate one more time and either return or raise.
     _check(raw_text, validate)
     return raw_text
+
+
+def retry_until_text(
+    response,
+    label: str,
+    system_prompt: str,
+    model: str,
+    provider_name: str,
+    trace: Optional[list] = None,
+    temperature: Optional[float] = None,
+    authorization=None,
+    max_retries: int = MAX_JSON_RETRIES,
+    on_response: Optional[Callable] = None,
+    effort: Optional[str] = None,
+    activity=None,
+) -> str:
+    """Returns the first response text that is not empty, retrying by
+    continuing `response`'s thread. ROADMAP_v3 §95, amended in batch 267.
+
+    The owner's report: a research pass whose model replied with reasoning
+    only twice ended `complete` with "" -- RO2 ends the TURN there, which
+    is right for a chat turn a person is watching -- and Pass 1 handed
+    Pass 2 nothing, so the run wrote an empty raw response and an empty
+    report and called itself complete. The JSON passes already survived
+    the same reply, because an empty string does not parse and RO6
+    corrects it. A prose pass had nothing that failed.
+
+    So this is retry_until_json for a pass whose contract is "some text":
+    the same thread, the same `max_retries` (config.yaml's
+    `max_json_retries`, owner's choice, rather than a second knob), and
+    the same failure shape -- ValueError once every attempt came back
+    empty, which the orchestrator turns into a failed pass and a failed
+    run. Whitespace counts as no text, as RO1 counts it.
+
+    Each corrective attempt is a fresh `continue_conversation` run, so it
+    gets RO2's own ask too: one attempt can cost two model calls.
+
+    The arguments are retry_until_json's, minus the two only its callers
+    use (`context`, `max_total_tokens`) and `validate`, which has nothing
+    to apply to.
+    """
+    current = response
+    for attempt in range(max_retries):
+        if (current.text or "").strip():
+            return current.text
+        if trace is not None:
+            trace.append(
+                f"{label}: no text on attempt {attempt + 1}/"
+                f"{max_retries + 1} ({_why_empty(current)}), "
+                f"retrying with corrective message.")
+        current = _corrective_turn(
+            response, _TEXT_CORRECTIVE,
+            system_prompt=system_prompt, model=model,
+            provider_name=provider_name, temperature=temperature,
+            authorization=authorization, context=None, effort=effort,
+            activity=activity, max_total_tokens=None)
+        if on_response is not None:
+            on_response(current)
+    if (current.text or "").strip():
+        return current.text
+    raise ValueError(
+        f"{label} returned no text after {max_retries + 1} attempt(s); the "
+        f"last reply was {_why_empty(current)}. Every later pass would be "
+        f"working from nothing, so the pass fails here (max_json_retries "
+        f"in config.yaml sets how many times it is asked again).")
+
+
+def _why_empty(response) -> str:
+    """Batch 267. The loop's own account of an empty reply, read from the
+    notice RO2 ends a reasoning-only turn with, rather than re-derived from
+    the response: that notice is the loop saying why it stopped."""
+    from core.loop import REASONING_ONLY_END
+
+    if any(isinstance(n, dict) and n.get("kind") == REASONING_ONLY_END
+           for n in getattr(response, "notices", None) or ()):
+        return "reasoning only, with no answer and no tool call"
+    return "empty"
+
+
+def _corrective_turn(response, message: str, *, system_prompt: str,
+                     model: str, provider_name: str, temperature, authorization,
+                     context, effort, activity, max_total_tokens):
+    """One corrective attempt, sent into the thread `response` came from.
+
+    Batch 267 moved this out of retry_until_json unchanged, so the JSON
+    retry and the text retry continue a thread with ONE set of arguments.
+    Every argument below was dropped at this hop once, and each comment
+    says what that cost.
+    """
+    from core.loop import RunAgentLoop
+
+    return RunAgentLoop.continue_conversation(
+        thread_id=response.thread_id,
+        message=message,
+        system_prompt=system_prompt,
+        model=model,
+        provider_name=provider_name,
+        temperature=temperature,
+        # A retry is the SAME work continuing. Omitting this would
+        # strip the gated tools on exactly the attempt where the
+        # model is already struggling, and the only symptom would
+        # be a second malformed answer.
+        authorization=authorization,
+        context=context,
+        # Same rule, batch 25 (#139): a retry is the same pass
+        # continuing, so it carries the pass's effort too --
+        # effort_for re-validates against this thread's model.
+        effort=effort,
+        # And the same rule again for §47's sink (batch 75). This
+        # hop dropped it, so a spawn inside a corrective attempt
+        # was invisible -- and this is the one path where the
+        # channel is the ONLY route, because continue_conversation
+        # drains its own loop.
+        activity=activity,
+        **({} if max_total_tokens is None
+           else {"max_total_tokens": max_total_tokens}),
+    )
 
 
 def _check(raw_text: str, validate: Optional[Callable]) -> None:
@@ -212,9 +331,7 @@ def _parse_corrective(error: ValueError, raw_text: str) -> str:
         # reasoning. Say what the harness actually received.
         return (
             "Your last response contained no text at all, so there was no "
-            "JSON to parse. Anything written only in your reasoning is not "
-            "part of the response, and a tool call written there is not "
-            "run.\n\n"
+            "JSON to parse. " + _REASONING_IS_NOT_THE_REPLY + "\n\n"
             "Respond again with ONLY valid JSON -- no preamble, no prose, "
             "no code fence, just the JSON your original instructions "
             "asked for."
