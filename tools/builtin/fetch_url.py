@@ -616,7 +616,14 @@ def run(params: dict) -> dict:
             # dropped -- fifteen consecutive "fetch_url failed" lines with
             # no URL and no reason, which is what made a run of ordinary
             # 404s indistinguishable from a broken tool.
-            logger.warning("fetch_url failed for %s: %s", url, e)
+            #
+            # INFO, not WARNING (batch 266, the owner's choice). The error
+            # below IS the result, and both shells print a failed result as
+            # its own line, so a WARNING drew the same failure twice: the
+            # owner's screenshot had both, line for line. The file keeps
+            # this one with the hop's URL, which the result does not name
+            # after a redirect.
+            logger.info("fetch_url failed for %s: %s", url, e)
             return {"error": f"Could not fetch URL: {e}"}
 
         held = _held(url, kind, raw, more, response, want)

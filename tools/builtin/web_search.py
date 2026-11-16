@@ -360,7 +360,11 @@ def run(params: dict) -> dict:
                         "The search provider is rate-limiting this harness. "
                         "Wait a minute before searching again.")}
                 last_exc = e
-                logger.warning(
+                # INFO (batch 266, the owner's choice). The last attempt's
+                # error is the result below, which both shells print as a
+                # line of its own, and an attempt that a retry recovered from
+                # is nothing to show anyone. The file keeps every attempt.
+                logger.info(
                     "web_search attempt %s/%s failed for %r: %s",
                     attempt + 1, MAX_RETRIES + 1, parsed.query, e)
         else:

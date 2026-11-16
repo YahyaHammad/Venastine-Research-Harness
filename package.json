@@ -1,6 +1,6 @@
 {
   "name": "@yahyahammad/venastine",
-  "version": "0.3.16",
+  "version": "0.3.16-b.1.tool-failure-log-level.r425b57801358",
   "description": "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline.",
   "keywords": [
     "agent",

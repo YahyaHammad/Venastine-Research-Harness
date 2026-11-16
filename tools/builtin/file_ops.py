@@ -414,7 +414,8 @@ def read_run(params: dict) -> dict:
             with open(resolved, encoding="utf-8", errors="replace") as f:
                 all_lines = f.read().splitlines()
     except Exception as e:
-        logger.exception("read tool failed on %s", parsed.path)
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("read tool failed on %s", parsed.path, exc_info=True)
         return {"error": f"Could not read file: {e}"}
 
     content, lines_returned, truncated, message = _truncate_lines(
@@ -482,7 +483,8 @@ def write_run(params: dict) -> dict:
         created = not os.path.exists(resolved)
         write_text_atomic(resolved, parsed.content)
     except Exception as e:
-        logger.exception("write tool failed on %s", parsed.path)
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("write tool failed on %s", parsed.path, exc_info=True)
         return {"error": f"Could not write file: {e}"}
 
     if created:
@@ -551,7 +553,9 @@ def edit_run(params: dict) -> dict:
         with open(resolved, encoding="utf-8", newline="") as f:
             content = f.read()
     except Exception as e:
-        logger.exception("edit tool read failed on %s", parsed.path)
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("edit tool read failed on %s", parsed.path,
+                    exc_info=True)
         return {"error": f"Could not read file: {e}"}
 
     old_text, new_text = parsed.old_text, parsed.new_text
@@ -586,7 +590,9 @@ def edit_run(params: dict) -> dict:
     try:
         write_text_atomic(resolved, content)
     except Exception as e:
-        logger.exception("edit tool write failed on %s", parsed.path)
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("edit tool write failed on %s", parsed.path,
+                    exc_info=True)
         return {"error": f"Could not write file: {e}"}
 
     return {"result": f"Replaced 1 occurrence in {parsed.path}"}
@@ -685,7 +691,8 @@ def view_image_run(params: dict, memory=None, call_id=None,
         with open(resolved, "rb") as f:
             raw = f.read(config.MAX_IMAGE_BYTES + 1)
     except OSError as e:
-        logger.exception("view_image failed on %s", parsed.path)
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("view_image failed on %s", parsed.path, exc_info=True)
         return {"error": f"Could not read file: {e}"}
     if len(raw) > config.MAX_IMAGE_BYTES:
         return {"error": (

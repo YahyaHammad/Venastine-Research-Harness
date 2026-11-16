@@ -10,6 +10,9 @@ narrow ways, by explicit product decision:
      retries survive CLI exit and process close.
   2. Level is env-overridable via AGENT_LOG_LEVEL instead of a hardcoded
      logging.INFO default. AGENT_LOG_FILE overrides the file path.
+  3. The stderr handler shows WARNING and above unless a level is asked
+     for (batch 266), so the CLI's terminal follows the TUI transcript's
+     rule while the file keeps INFO. See `_screen_level`.
 
 Idempotent on repeated calls so test runs that invoke configure_logging
 more than once don't stack duplicate handlers and double-emit lines.
@@ -77,8 +80,9 @@ class _RedactingFormatter(logging.Formatter):
     the message, the arguments and the traceback in one pass.
 
     Fixed here rather than at dispatch's call site because dispatch is
-    not the only site: `fetch_url` logs a warning naming the URL it
-    failed on, and any future `logger.*` inherits this for free. Fixing
+    not the only site: `fetch_url` logs a line naming the URL it failed
+    on (INFO since batch 266, so this file is where it lands), and any
+    future `logger.*` inherits this for free. Fixing
     the one site the issue measured would have left the class open --
     the same producer-vs-consumer argument #47 makes one file over.
     """
@@ -203,6 +207,30 @@ def _resolve_level(level):
     return int(level)
 
 
+def _screen_level(level) -> int:
+    """The stderr handler's own level: WARNING, unless a level was asked for.
+
+    Batch 266, the owner's choice. The handler used to carry no level, so
+    it printed whatever the root did -- INFO by default -- and the CLI's
+    terminal showed every INFO line in the program ("MCP server connected",
+    cache hits, compaction) while the TUI's transcript shows WARNING and
+    above (`TranscriptLogHandler`). It also showed a tool failure twice:
+    once as the tool's own log line and once as the result line the shell
+    prints for it. INFO is the file's level; the screen's is WARNING, in
+    both shells.
+
+    ASKED FOR means a caller passed `level`, or AGENT_LOG_LEVEL is set.
+    Then the handler follows the root as before, so `AGENT_LOG_LEVEL=DEBUG`
+    still puts DEBUG on the terminal -- the route `main.py` documents for
+    a configuration failure's traceback. A set but unreadable value counts
+    as asked for: `_resolve_level` has just printed that it runs at INFO,
+    and the terminal then shows what that sentence said.
+    """
+    if level is not None or os.environ.get("AGENT_LOG_LEVEL") is not None:
+        return logging.NOTSET
+    return logging.WARNING
+
+
 def configure_logging(
     level=None,
     *,
@@ -239,6 +267,10 @@ def configure_logging(
         rotating file keeps everything at full detail either way, and
         tui/app.py additionally routes WARNING+ into the transcript so
         nothing that matters is only in a file.
+
+        The handler shows WARNING and above unless a level was asked for
+        (batch 266, the owner's choice): the TUI's transcript rule, so
+        both shells put the same lines on screen. See `_screen_level`.
     """
     resolved_level = _resolve_level(level)
     formatter = _RedactingFormatter(_DEFAULT_FORMAT, datefmt=_DEFAULT_DATEFMT)
@@ -260,6 +292,7 @@ def configure_logging(
     if stderr:
         stderr_handler = logging.StreamHandler(stream=sys.stderr)
         stderr_handler.setFormatter(formatter)
+        stderr_handler.setLevel(_screen_level(level))
         root.addHandler(stderr_handler)
 
     if log_file is None:
