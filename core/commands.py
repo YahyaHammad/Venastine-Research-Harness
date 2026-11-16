@@ -163,6 +163,9 @@ _SPECS = (
     CommandSpec("trigger", "override when this chat compacts, for the "
                            "session", "[tokens|off]",
                 absent={CLI: _IN_THE_TUI}),
+    # ROADMAP_v3 §97 (UF4): both shells, one report (`core/usage_view.py`).
+    CommandSpec("usage", "token counts the provider reported for this "
+                         "thread"),
     CommandSpec("window", "override this model's context window for the "
                           "session", "[tokens|off]",
                 absent={CLI: _IN_THE_TUI}),

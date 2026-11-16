@@ -468,7 +468,8 @@ def _deliver_held(thread_id) -> None:
 
 
 def _await_sessions(thread_id, *, model, provider_name, effort,
-                    authorization, turn=None, active_skills=()) -> None:
+                    authorization, turn=None, active_skills=(),
+                    count_usage=None) -> None:
     """Between turns, wait on this conversation's live sessions and run a
     wake turn for each batch (SS2, SS5).
 
@@ -583,6 +584,10 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                 # to the sessions and takes the handler below.
                 signal.signal(signal.SIGINT, previous_sigint)
             live.finish(response)
+            # ROADMAP_v3 §97 (UF4). A wake turn's calls are this
+            # thread's too, as they are on the TUI's memory.
+            if count_usage is not None:
+                count_usage(response)
             if interrupted:
                 # The turn finished and wrote its rows; now the key does
                 # what it said. Returning to the prompt rather than waiting
@@ -825,6 +830,8 @@ def _chat_turn(session: ChatSession, user_input: str, agent,
         signal.signal(signal.SIGINT, previous_sigint)
 
     session.thread_id = response.thread_id
+    # ROADMAP_v3 §97 (UF4): this turn's calls, for /usage.
+    session.count_usage(response)
 
     # ROADMAP_v2 §21's "no silent compaction, ever": a notice printed
     # live when it happened, and one that never arrived live is printed
@@ -876,7 +883,8 @@ def _chat_turn(session: ChatSession, user_input: str, agent,
     _await_sessions(session.thread_id, model=turn.model,
                     provider_name=turn.provider_name, effort=session.effort,
                     authorization=session.authorization, turn=turn,
-                    active_skills=session.active_skills)
+                    active_skills=session.active_skills,
+                    count_usage=session.count_usage)
 
 
 def build_research_authorization(grant_spec, attended: bool = False):

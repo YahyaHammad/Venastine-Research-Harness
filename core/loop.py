@@ -2138,6 +2138,11 @@ class RunAgentLoop:
             turn_output_tokens += usage_out
             turn_prev_input = usage_in
             memory.record_billed(usage_in + usage_out)
+            # ROADMAP_v3 §97 (UF4). Beside billed, on the same object and so
+            # over the same span: what `/usage` shows, the provider's own
+            # counts with the coerced ones left out.
+            memory.record_usage(response.usage,
+                                getattr(response, "usage_unreported", ()))
             response.turn_billed_tokens = total_tokens_used
             response.turn_new_tokens = turn_new_tokens
             response.turn_output_tokens = turn_output_tokens
@@ -2402,6 +2407,10 @@ class RunAgentLoop:
             **auth_kwargs,
         ), observe)
         response.thread_id = memory.thread_id
+        # ROADMAP_v3 §97 (UF4). This memory was built for this run, so its
+        # tally is this turn's calls: the CLI's `/usage` adds them up. None
+        # from a memory that keeps none, which the CLI's tally ignores.
+        response.turn_usage = getattr(memory, "usage", None)
         return response
 
     @staticmethod
@@ -2670,4 +2679,8 @@ class RunAgentLoop:
             **auth_kwargs,
         ), observe)
         response.thread_id = memory.thread_id
+        # ROADMAP_v3 §97 (UF4). This memory was built for this run, so its
+        # tally is this turn's calls: the CLI's `/usage` adds them up. None
+        # from a memory that keeps none, which the CLI's tally ignores.
+        response.turn_usage = getattr(memory, "usage", None)
         return response

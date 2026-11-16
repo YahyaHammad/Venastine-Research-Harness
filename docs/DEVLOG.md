@@ -31867,3 +31867,58 @@ and gitleaks on a clean export are clean. The requirements files are unchanged, 
 was not re-run.
 
 - **Version:** the branch's beta identity, `0.3.16-b.1.container-workspace-paths.reecb5909236b`.
+
+## Batch 264 -- usage figures: the rate's clock, thoughts, k/M/B and `/usage` (2026-11-16)
+
+**Asked.** In the 2026-11-15 bug round, on release 0.3.14, the owner saw the completion line's
+`tok/s` read far below what the model wrote, `billed` read in thousands past a million, and asked
+for the cache counts behind it.
+
+**What the code said.** `TurnMeter.completion` divided the provider's output count by `elapsed`,
+which counts tool time; batch 118 moved only the live figure onto generating time. A turn that
+starts background sessions is held open until they finish (SS2), so its `elapsed` also held the
+whole wait between wake turns, and `_turn_output_tokens` was assigned from each terminal
+response, which kept only the last wake turn's count. The Google branch read
+`candidates_token_count`, which the pinned SDK documents as leaving the thoughts out. `UsageLine`
+wrote every figure as thousands. No branch read a cache count, though every pinned SDK reports
+one, and the Anthropic SDK's own tracing adds its cache counts to `input_tokens`, so that branch's
+input was short by them.
+
+**The fix, the owner's choices** (ROADMAP_v3 §97, UF1-UF5, a new section by the owner's choice).
+
+- **UF1, both clocks (owner: both).** The completion rate divides by `TurnMeter.generating`, and
+  `took` stays `elapsed`. A new `set_waiting` pauses the rate while `_wait_for_sessions` waits,
+  driven by `SessionWait` messages it posts when it starts waiting and when a wake turn begins.
+  One pause window serves tools and the wait, kept disjoint from a modal by `set_blocked`. The
+  line's count is now summed over the turn's terminal responses and cleared when a turn starts.
+- **UF2.** Google's output is candidates plus thoughts, each field kept per its own last report.
+- **UF3 (owner: the usage line).** `tui.meters.short_count` writes k, M and B for every figure
+  on the usage line. `/window` and `/trigger` keep their exact echo, and the CLI its commas.
+- **UF4 (owner: this thread; input, cache read, cache write, output).** `/usage` in both shells
+  prints `core/usage_view.py`'s report over the tally `ConversationMemory.record_usage` keeps
+  beside `record_billed`. A cache count is in a usage dict only when reported, and
+  `ModelResponse.usage_unreported` names the counts `_stream_usage` coerced to 0, so a row says
+  "not reported" instead of printing a zero. The CLI builds a memory per turn, so
+  `run_agent_conversation` and `wake_conversation` return their tally on the response, and
+  `ChatSession.count_usage` adds the chat and wake turns up.
+- **UF5 (owner: add them in).** The Anthropic branch adds its cache reads and writes to input,
+  so `billed`, `ctx` and the trigger mean one thing on every provider.
+- **Adopted defaults:** the summed count, UF2's per-field rule, the formatter's rounding (one
+  decimal below ten of a unit, a figure rounding to a thousand promoted) and "reported on N of M
+  calls".
+- **The tests:** 77 across eight files, including a new `tests/test_usage_view.py`, all offline.
+  `tests/test_sdk_conformance.py` asks the pinned SDKs for every new field through the wire parse
+  path, drives a real Google usage object through the branch, and holds the Anthropic SDK's own
+  tracing to counting its cache into input, which is UF5's premise. The first full run failed two
+  CLI tests whose memory spy keeps no tally, so the hand-back reads it with `getattr`, as the
+  field's "None elsewhere" says. `tests/BREAKING_CHANGES.md` has four rows.
+- **Found, and left (§97's gap register):** nothing was measured against a live provider with
+  caching on; an OpenAI-compatible provider that spells its cache counts another way reports
+  none; Google's tool-use prompt count is not added to input; a CLI turn that raises returns no
+  response, so its calls miss the CLI's `/usage`.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9499 passed, 88 skipped (9587). 50 of 50 mutations killed against a green control, each run on the tests its rule names: the meter's two clocks, the pause beside a modal and a tool, the floor, the formatter's units, the TUI's generating time, sum, clear and wait messages, each branch's thoughts, cache and coerced names, the tally and its report, and the CLI's chat turn, wake turns and counter. The first pass left one survivor, a new turn keeping a wait flag from a turn stopped mid-wait, because the test never made the new turn re-read its pause; it now runs a tool in that turn, and the mutation is killed. ruff, bandit (no new findings, no baseline count grew)
+and gitleaks on a clean export are clean. The requirements files are unchanged, so pip-audit
+was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.usage-figures.r56c47457b868`.

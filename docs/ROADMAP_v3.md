@@ -44,6 +44,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
 - **§96. The container's `/workspace`, read by the file tools** - **(BUILT in batch 263)** (the shell runs in a container that mounts the workspace at `/workspace`, so the paths the model saw there were spelled from it, while `read`, `write`, `edit` and `view_image` run on the host, where that path is not the workspace: each such call asked to leave the workspace and then failed. `resolve_path` now maps the container's spelling onto the workspace while a tool that starts commands is enabled, and every other outside path still asks; CW1-CW3)
+- **§97. Usage figures: the rate's clock, thoughts, k/M/B and `/usage`** - **(BUILT in batch 264)** (the completion line divided the output count by the whole turn, tools and the wait on background sessions included, and kept only the last wake turn's count; Google's output left out the thoughts; `billed` read in thousands past a million; and no cache count was read. The rate now divides by generating time while `took` stays the turn's time, thoughts count as output, the usage line writes k, M and B, and `/usage` shows four provider-reported rows for this thread in both shells, with input the whole prompt on every branch; UF1-UF5)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -3063,6 +3064,90 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §97. Usage figures: the rate's clock, thoughts, k/M/B and `/usage`
+
+**Added and built in batch 264, from the owner's report** (2026-11-15). Running 0.3.14, the owner
+saw the completion line's `tok/s` read far below what the model wrote, `billed` read in
+thousands past a million, and asked where the cache counts were.
+
+### What was measured (2026-11-15)
+
+- **The completion rate divided by the whole turn.** `TurnMeter.completion` divided the
+  provider's output count by `elapsed`, which counts tool time. Batch 118 took tool time out of
+  the LIVE figure only. A turn that starts background sessions is also held open until they
+  finish (SS2): `TurnFinished` is posted after `_wait_for_sessions`, so `elapsed` held every
+  second spent waiting between the wake turns too.
+- **And its count was the last wake turn's.** Each wake turn is a run of its own with its own
+  terminal response, and `_turn_output_tokens` was assigned from each, so the line divided the
+  last wake turn's count by a time that covered every one. Found in this batch.
+- **Google's output left out the thoughts.** The branch read `candidates_token_count`. The
+  pinned google-genai 2.34.0 documents `total_token_count` as prompt plus candidates plus
+  tool-use prompt plus thoughts, so thoughts are outside the candidates, and a thinking model's
+  output, rate and `billed` all read short by them.
+- **`billed` had one unit.** `UsageLine` wrote every figure as `n / 1000` with a `k`.
+- **No cache count was read.** Each pinned SDK reports one (anthropic 2.5.0, openai 3.45.0,
+  google-genai 2.34.0): the Anthropic `Usage` carries `cache_read_input_tokens` and
+  `cache_creation_input_tokens`; OpenAI's chat `prompt_tokens_details` and the Responses API's
+  `input_tokens_details` carry `cached_tokens` and `cache_write_tokens`; Google carries
+  `cached_content_token_count`. Google's `prompt_token_count` is documented as including the
+  cached content, and OpenAI's cached tokens are documented as present in the prompt. The
+  Anthropic SDK's own tracing reports a message's input as `input_tokens` plus both cache counts,
+  so its `input_tokens` leaves them out. The harness sends no cache markers, so on that branch
+  both counts are zero or absent today.
+
+### Decisions (UF1-UF5)
+
+| # | Decision |
+|---|---|
+| **UF1** | **The completion line's rate divides by generating time, and `took` stays the turn's time** (owner: both). `TurnMeter.generating` leaves out tool time, the human wait and the session wait, which `set_waiting` pauses, driven by `SessionWait` messages that `_wait_for_sessions` posts when it starts waiting and when a wake turn begins. One pause window serves a tool and the wait, and `set_blocked` keeps it disjoint from a modal, as batch 118 did for tools. The line's count is SUMMED over the turn's terminal responses, wake turns included, and cleared when a turn starts |
+| **UF2** | **Google's output is its candidates plus its thoughts.** Each field keeps its own last report, as batch 147 made the rule, and the two are added once at the end of the stream. One reported without the other is still a count, so a reply that was all thoughts is not D21's missing count |
+| **UF3** | **One k/M/B formatter for the usage line** (owner: the usage line). `tui.meters.short_count` writes `950`, `118k`, `1.2M`, `12M`, `1.5B`: one decimal below ten of a unit, and a figure that rounds up to a thousand of its unit in the next one. `/window` and `/trigger` still echo the number typed, and the CLI keeps its exact figures |
+| **UF4** | **`/usage`, in both shells, shows four provider-reported rows for this thread since it was opened** (owner: this thread; the names input, cache read, cache write and output). That is the span of the usage line's `billed`: `ConversationMemory.record_usage` sits beside `record_billed`, not persisted. A cache count is in a usage dict only when reported, and `ModelResponse.usage_unreported` names each input or output count that `_stream_usage` coerced to 0, so a row says "not reported", or "reported on N of M calls", instead of printing a zero. The CLI builds a memory per turn, so `run_agent_conversation` and `wake_conversation` hand theirs back as `ModelResponse.turn_usage`, and `ChatSession.count_usage` adds them up |
+| **UF5** | **Input is the whole prompt on every branch** (owner: add them in). The Anthropic branch adds its cache reads and writes to `input_tokens`, which leaves them out; the other branches' input counts already include their cache. So `billed`, `ctx` and the compaction trigger mean one thing on every provider, and `/usage` notes that the cache rows are part of input. A cache count alone is not an input count: an input the provider did not send is still D21's to judge |
+
+UF1's two clocks, UF3's reach, UF4's span and names, and UF5 are the owner's choices. The
+summed count, UF2's per-field rule, UF3's rounding and UF4's "reported on" wording are adopted
+defaults the owner may overturn.
+
+### What §97 deliberately does not change
+
+- **The live figure.** It already divided by `generating` (batch 118), and now the session wait
+  leaves it too, through the same pause.
+- **The CLI's per-turn line.** It prints `billed` and `ctx` with commas, exactly, and has no rate.
+- **Pricing.** Every figure is a raw count, as batch 27 decided. A cache read is cheaper than other
+  input on most providers, and `/usage` does not say by how much.
+
+### Built (batch 264)
+
+- **`tui/meters.py`**: `set_waiting`, one rate pause through `_sync_pause`, `completion(...,
+  generating)` and `short_count`.
+- **`tui/app.py`**: `SessionWait` from `_wait_for_sessions`, the summed count, `/usage`.
+- **`tui/widgets.py`**: the usage line through `short_count`.
+- **`core/client.py`**: `_stream_usage` returns the coerced keys, `CACHE_COUNTS`,
+  `_GOOGLE_COUNTS`, `_sum_reported`, `_whole_prompt`, and each branch's cache read.
+- **`core/usage_view.py`**: `UsageTally` and `report_lines`, for both shells.
+- **`core/memory.py`, `core/loop.py`, `core/commands.py`, `cli_commands.py`, `main.py`**: the
+  tally beside `billed`, the turn's tally on the response, `/usage` in the catalog and the CLI,
+  and the CLI's chat and wake turns counted.
+
+77 tests: `tests/test_meters.py`, `tests/test_usage_view.py`, `tests/test_client_streaming.py`,
+`tests/test_chatgpt_client.py`, `tests/test_sdk_conformance.py` (the pinned SDKs' fields through
+the wire parse path, and the Anthropic SDK's own tracing), `tests/test_spend_and_size.py`,
+`tests/test_tui.py` and `tests/test_session_tui.py`.
+
+### Gap register
+
+- **Not measured against a live provider.** The cache and thought reads are driven against the
+  pinned SDKs' own types and parse paths, not a live response with caching on.
+- **An OpenAI-compatible provider that spells its cache counts some other way** reports none,
+  and `/usage` says "not reported" for it.
+- **Google's `tool_use_prompt_token_count`** (input from the provider's own tool runs) is not
+  added to input. The harness calls no provider-side tools.
+- **A CLI turn that raises** returns no response, so its calls are not in the CLI's `/usage`.
+  The TUI's memory records them.
+
 ---
 
 ## §96. The container's `/workspace`, read by the file tools

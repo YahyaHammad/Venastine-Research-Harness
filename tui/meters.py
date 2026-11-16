@@ -30,15 +30,29 @@ WHAT THIS OWNS
   - `start` / `stop`      -- turn boundaries, and the elapsed time between.
   - `set_blocked`         -- the pause while a modal is waiting on a human.
   - `set_tool_running`    -- the pause while a TOOL is running (rate only).
+  - `set_waiting`         -- the pause while the turn waits on its
+                             background sessions (rate only, §97 UF1).
   - `add_output_chars`    -- the live estimate's numerator.
   - `subtitle`            -- the three live figures as one string, or None.
   - `completion`          -- the line written under the finished answer.
+  - `short_count`         -- a token count as the usage line writes it,
+                             in k, M or B (§97 UF3).
 
 TWO CLOCKS, AND THEY ANSWER DIFFERENT QUESTIONS (batch 118). `elapsed` is
 wall clock minus the human wait, because what it answers is "how long did I
 wait for this turn", and a tool taking two minutes is part of that. The RATE
 divides by elapsed minus TOOL time, because what it answers is "how fast is
 the model writing", and a tool running is not the model writing.
+
+THE COMPLETION LINE'S RATE TOO, AND THE SESSION WAIT (ROADMAP_v3 §97, UF1,
+the owner's choice). Batch 118 moved only the live figure onto `generating`;
+the line written under the answer kept dividing the provider's count by
+`elapsed`. And a turn that starts background sessions is held open until
+they finish (SS2), so its `elapsed` also held every second spent waiting on
+them, between the wake turns that answer them. Both rates now divide by
+`generating`, which leaves out the tools, the human wait and the session
+wait; `took` stays `elapsed`, wall clock minus the human wait, because how
+long the turn kept the shell is still that.
 
 Until batch 118 there was one clock and the rate used it, so the live figure
 read `~0 tok/s` on exactly the turns it exists for: it needs only fewer than
@@ -79,6 +93,39 @@ CHARS_PER_TOKEN = 4
 #: render four thousand tokens a second and then collapse, which reads as a
 #: bug rather than as a measurement settling.
 RATE_FLOOR_S = 0.5
+
+
+#: The units `short_count` steps through, smallest first.
+_COUNT_UNITS = ((1_000, "k"), (1_000_000, "M"), (1_000_000_000, "B"))
+
+
+def short_count(n) -> str:
+    """A token count in a few columns: `950`, `118k`, `1.2M`, `12M`, `1.5B`
+    (ROADMAP_v3 §97, UF3, the owner's choice).
+
+    THE ONE FORMATTER FOR THE USAGE LINE. Its `ctx`, window, fold point and
+    `billed` were each written in whole thousands, so a thread past a
+    million billed read `billed 12345k`, which is a number the eye has to
+    count digits in. One decimal below ten of a unit, where a whole number
+    would hide the difference between 1.2M and 1.9M; whole units above.
+
+    A figure that ROUNDS UP to a thousand of its unit is written in the
+    next one -- 999,600 is `1.0M`, never `1000k` -- and B is the last unit.
+    Thousands are written as before (`.0f`), so a line that read `118k`
+    still does. Not for a figure the user typed and is reading back:
+    `/window` and `/trigger` echo theirs exactly, by the owner's choice.
+    """
+    n = max(0, int(n or 0))
+    if n < 1000:
+        return str(n)
+    for index, (size, unit) in enumerate(_COUNT_UNITS):
+        value = n / size
+        whole = unit == "k" or value >= 9.95
+        text = "%.0f" % value if whole else "%.1f" % value
+        if float(text) >= 1000 and index < len(_COUNT_UNITS) - 1:
+            continue
+        return text + unit
+    return str(n)  # unreachable: the last unit always returns
 
 
 def _duration(seconds: float) -> str:
@@ -136,13 +183,17 @@ class TurnMeter:
         # how much blocked time this turn has already accumulated.
         self._blocked_at = None
         self._blocked_total = 0.0
-        # The tool pause, same shape as the modal one, plus a DEPTH --
-        # `_dispatch_parallel` can have several tools outstanding at once,
-        # so a boolean would un-pause on the first result while two were
-        # still running.
-        self._tool_at = None
-        self._tool_total = 0.0
+        # The RATE's pause, same shape as the modal one: open while a tool
+        # runs or the turn waits on its background sessions (§97 UF1), and
+        # never while a modal is up -- see set_blocked. ONE window for both,
+        # because neither is the model writing and the rate never needs to
+        # tell them apart. The tools are a DEPTH -- `_dispatch_parallel`
+        # can have several outstanding at once, so a boolean would un-pause
+        # on the first result while two were still running.
+        self._paused_at = None
+        self._paused_total = 0.0
         self._tool_depth = 0
+        self._waiting = False
         self._chars = 0
 
     # -- session ------------------------------------------------------------
@@ -173,9 +224,10 @@ class TurnMeter:
         self._turn_at = now
         self._blocked_at = None
         self._blocked_total = 0.0
-        self._tool_at = None
-        self._tool_total = 0.0
+        self._paused_at = None
+        self._paused_total = 0.0
         self._tool_depth = 0
+        self._waiting = False
         self._chars = 0
 
     def stop(self, now: float):
@@ -193,8 +245,9 @@ class TurnMeter:
         elapsed = self.elapsed(now)
         self._turn_at = None
         self._blocked_at = None
-        self._tool_at = None
+        self._paused_at = None
         self._tool_depth = 0
+        self._waiting = False
         return elapsed
 
     def set_blocked(self, blocked: bool, now: float) -> None:
@@ -216,17 +269,17 @@ class TurnMeter:
                 # that keeps them apart. Approval is asked for from inside
                 # a tool call, so a human wait sits inside a tool window;
                 # `elapsed` already removes the human wait, so letting the
-                # tool clock keep running across it would subtract the same
-                # seconds twice and could drive the rate's denominator
-                # negative. The tool clock is closed here and reopened when
-                # the modal goes away, which is `set_blocked(False)` below.
-                self._close_tool_window(now)
+                # rate's pause keep running across it would subtract the
+                # same seconds twice and could drive the rate's denominator
+                # negative. The pause is closed here and reopened when the
+                # modal goes away, which is `set_blocked(False)` below. A
+                # modal opened during the session wait is the same case.
+                self._sync_pause(now)
             return
         if self._blocked_at is not None:
             self._blocked_total += max(0.0, now - self._blocked_at)
             self._blocked_at = None
-            if self._tool_depth > 0:
-                self._tool_at = now
+            self._sync_pause(now)
 
     def set_tool_running(self, delta: int, now: float) -> None:
         """A tool started (+1) or finished (-1).
@@ -243,20 +296,41 @@ class TurnMeter:
         """
         if self._turn_at is None:
             return
-        previous = self._tool_depth
-        self._tool_depth = max(0, previous + int(delta))
-        if self._tool_depth and previous == 0:
-            # Not while a modal is up: see set_blocked.
-            if self._blocked_at is None:
-                self._tool_at = now
-        elif not self._tool_depth and previous:
-            self._close_tool_window(now)
+        self._tool_depth = max(0, self._tool_depth + int(delta))
+        self._sync_pause(now)
 
-    def _close_tool_window(self, now: float) -> None:
-        """Bank an open tool window, if there is one. Idempotent."""
-        if self._tool_at is not None:
-            self._tool_total += max(0.0, now - self._tool_at)
-            self._tool_at = None
+    def set_waiting(self, waiting: bool, now: float) -> None:
+        """The turn is (or is no longer) waiting on its background sessions
+        (ROADMAP_v3 §97, UF1).
+
+        `tui/app.py`'s `_wait_for_sessions` holds a turn open after its
+        answer until the sessions it started are done (SS2), and runs a
+        wake turn for each batch of their results. The seconds BETWEEN wake
+        turns are the shell waiting, not the model writing, so the rate
+        leaves them out; `elapsed` keeps them, as it keeps a tool's, since
+        the turn did keep the shell that long. Idempotent, like every
+        setter here.
+        """
+        if self._turn_at is None:
+            return
+        self._waiting = bool(waiting)
+        self._sync_pause(now)
+
+    def _sync_pause(self, now: float) -> None:
+        """Open or bank the rate's pause to match what is happening.
+
+        Open while a tool runs or the turn waits on its sessions, and never
+        while a modal is up (`set_blocked` keeps the two disjoint).
+        Idempotent: a second tool starting inside an open window, or a
+        second `set_waiting(True)`, leaves the window where it began.
+        """
+        paused = ((self._tool_depth > 0 or self._waiting)
+                  and self._blocked_at is None)
+        if paused and self._paused_at is None:
+            self._paused_at = now
+        elif not paused and self._paused_at is not None:
+            self._paused_total += max(0.0, now - self._paused_at)
+            self._paused_at = None
 
     def add_output_chars(self, count: int) -> None:
         """Characters the MODEL GENERATED. The live rate's numerator.
@@ -296,11 +370,13 @@ class TurnMeter:
         return max(0.0, (now - self._turn_at) - blocked)
 
     def generating(self, now: float) -> float:
-        """Active seconds with a tool NOT running: the rate's denominator.
+        """Active seconds with no tool running and no session wait: the
+        rate's denominator, live and on the completion line (§97 UF1).
 
-        `elapsed` minus tool time. See the module docstring for why these
-        are two numbers rather than one -- briefly, a tool running is part
-        of how long the turn took and no part of how fast the model writes.
+        `elapsed` minus the rate's pause. See the module docstring for why
+        these are two numbers rather than one -- briefly, a tool running is
+        part of how long the turn took and no part of how fast the model
+        writes, and so is waiting on a background session.
 
         Clamped, and the clamp is doing real work rather than being
         defensive: the two pauses are kept disjoint by `set_blocked`, and
@@ -309,10 +385,10 @@ class TurnMeter:
         """
         if self._turn_at is None:
             return 0.0
-        tool = self._tool_total
-        if self._tool_at is not None:
-            tool += max(0.0, now - self._tool_at)
-        return max(0.0, self.elapsed(now) - tool)
+        paused = self._paused_total
+        if self._paused_at is not None:
+            paused += max(0.0, now - self._paused_at)
+        return max(0.0, self.elapsed(now) - paused)
 
     def rate(self, now: float):
         """Estimated tokens per second, or None when it would be noise."""
@@ -343,7 +419,8 @@ class TurnMeter:
         parts.append(_uptime(max(0.0, now - self._session_at)))
         return "  ".join(parts)
 
-    def completion(self, elapsed: float, output_tokens=None) -> str:
+    def completion(self, elapsed: float, output_tokens=None,
+                   generating=None) -> str:
         """The line written under a finished answer.
 
         `output_tokens` is the provider's own count for the turn, or None
@@ -354,11 +431,18 @@ class TurnMeter:
         The rate here carries no tilde. It is not the same instrument as
         the live figure: that one divides characters by a constant, this
         one divides the provider's count by the measured time.
+
+        THE MEASURED TIME IS `generating` (ROADMAP_v3 §97, UF1), the
+        turn's seconds with no tool running and no session wait, which the
+        caller reads off `generating()` before it stops the turn. `took`
+        is still `elapsed`. A caller that passes no `generating` gets the
+        old division, since that is the only time it has.
         """
         text = "took %s" % _duration(elapsed)
         if not output_tokens:
             return text
         text += " · %s tokens out" % format(int(output_tokens), ",")
-        if elapsed >= RATE_FLOOR_S:
-            text += " · %d tok/s" % round(output_tokens / elapsed)
+        seconds = elapsed if generating is None else generating
+        if seconds >= RATE_FLOOR_S:
+            text += " · %d tok/s" % round(output_tokens / seconds)
         return text

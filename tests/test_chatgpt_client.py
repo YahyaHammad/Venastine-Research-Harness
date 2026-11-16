@@ -594,3 +594,41 @@ def test_a_stored_summary_shows_on_replay_and_the_ciphertext_does_not():
         "summary": [{"type": "summary_text", "text": "Counting primes."},
                     {"type": "summary_text", "text": "Seventeen."}]}]}
     assert _reasoning_text(record) == "Counting primes.\n\nSeventeen."
+
+
+# ---------------------------------------------------------------------------
+# ---- ROADMAP_v3 §97: cache counts ------------------------------------------
+# ---------------------------------------------------------------------------
+
+class TestCacheCounts:
+    """§97 UF4. This API's cached tokens are part of `input_tokens`, so
+    UF5 adds nothing to input here; the counts are only carried."""
+
+    def test_the_input_details_come_through(self):
+        plan = Plan([ev("response.created"),
+                     ev("response.output_text.delta", delta="OK"),
+                     ev("response.completed", response=SimpleNamespace(
+                         status="completed", usage=SimpleNamespace(
+                             input_tokens=40, output_tokens=9,
+                             input_tokens_details=SimpleNamespace(
+                                 cached_tokens=32,
+                                 cache_write_tokens=0))))])
+        _tokens, final = drain(plan)
+        assert final.usage == {"input_tokens": 40, "output_tokens": 9,
+                               "cache_read_tokens": 32,
+                               "cache_write_tokens": 0}
+        assert final.usage_unreported == ()
+
+    def test_no_details_means_no_cache_counts(self):
+        _tokens, final = drain(Plan(answer()))
+        assert final.usage == {"input_tokens": 12, "output_tokens": 3}
+
+    def test_a_count_not_sent_is_named(self, monkeypatch):
+        """The flag off, so D21 coerces instead of raising, and says so."""
+        monkeypatch.setattr(client, "load_provider_data", lambda: {
+            "CHATGPT": {"API_KEY": "", "API_URL": chatgpt_auth.RESOURCE,
+                        "is_v1_compatible": False}})
+        _tokens, final = drain(Plan([ev("response.created"),
+                                     completed(output_tokens=None)]))
+        assert final.usage == {"input_tokens": 12, "output_tokens": 0}
+        assert final.usage_unreported == ("output_tokens",)

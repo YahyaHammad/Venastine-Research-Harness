@@ -30,7 +30,13 @@ import pytest
 
 from core import shell_sessions as ss
 from core.session_wake import build_wake
-from tui.app import SessionNote, VenastineApp, _cmd_kill, _kill_rows
+from tui.app import (
+    SessionNote,
+    SessionWait,
+    VenastineApp,
+    _cmd_kill,
+    _kill_rows,
+)
 
 THREAD = "tui-thread"
 
@@ -366,6 +372,33 @@ class TestTheWaitLoop:
         kinds = [type(m).__name__ for m in app.posted]
         assert kinds.index("SessionNote") < kinds.index("LoopEventMessage"), \
             "the answer landed above the harness row that prompted it"
+
+    def test_the_wait_tells_the_meter_and_the_wake_resumes_it(
+            self, manager, session_starter):
+        """ROADMAP_v3 §97 (UF1). The rate leaves out the seconds between
+        wake turns, so the worker says when they begin and end -- and the
+        resume lands before the wake turn's own events, in posting order."""
+        app = _bare_app()
+        _start(manager)
+        session_starter.started[0]["process"].exit(0)
+
+        def wake(text, record):
+            return iter([SimpleNamespace(kind="answer")])
+
+        app._wait_for_sessions(THREAD, wake)
+        waits = [(i, m.waiting) for i, m in enumerate(app.posted)
+                 if isinstance(m, SessionWait)]
+        kinds = [type(m).__name__ for m in app.posted]
+        assert [w for _i, w in waits][:2] == [True, False]
+        resumed = waits[1][0]
+        assert resumed < kinds.index("SessionNote") \
+            < kinds.index("LoopEventMessage")
+
+    def test_nothing_to_wait_for_says_nothing_to_the_meter(self, manager):
+        """A turn that started no session never pauses its clock."""
+        app = _bare_app()
+        app._wait_for_sessions(THREAD, lambda t, r: iter(()))
+        assert not [m for m in app.posted if isinstance(m, SessionWait)]
 
     def test_the_limit_stops_waking_and_says_where_results_went(
             self, manager, session_starter, monkeypatch):
