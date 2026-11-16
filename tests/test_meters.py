@@ -430,3 +430,141 @@ class TestAToolRunningIsNotTheModelWriting:
         m.start(10.0)
         m.add_output_chars(400)
         assert m.generating(20.0) == pytest.approx(10.0)
+
+
+# ---------------------------------------------------------------------------
+# ---- ROADMAP_v3 §97: the completion rate's clock, and k/M/B ---------------
+# ---------------------------------------------------------------------------
+
+class TestTheCompletionRateDividesByGeneratingTime:
+    """§97 UF1, the owner's choice: the line under the answer divides the
+    provider's count by the seconds the model was writing, and `took`
+    stays the turn's elapsed time. Until batch 264 it divided by `took`,
+    so a turn that ran a two-minute tool or waited on a background session
+    read a few tokens a second."""
+
+    def test_the_rate_uses_generating_and_took_uses_elapsed(self):
+        line = TurnMeter().completion(100.0, 600, generating=4.0)
+        assert line == "took 1m40s · 600 tokens out · 150 tok/s"
+
+    def test_a_caller_with_no_generating_time_keeps_the_old_division(self):
+        assert (TurnMeter().completion(10.0, 100)
+                == "took 10.0s · 100 tokens out · 10 tok/s")
+
+    def test_generating_below_the_floor_shows_no_rate(self):
+        """The floor reads the time the rate divides by, not `took`: a
+        rate over a third of a second is noise however long the turn."""
+        line = TurnMeter().completion(100.0, 600, generating=0.3)
+        assert line == "took 1m40s · 600 tokens out"
+
+    def test_a_zero_generating_time_is_not_a_division_by_zero(self):
+        assert (TurnMeter().completion(5.0, 50, generating=0.0)
+                == "took 5.0s · 50 tokens out")
+
+
+class TestTheSessionWaitIsNotTheModelWriting:
+    """§97 UF1. A turn that starts background sessions is held open until
+    they are done (SS2), and the seconds between its wake turns were
+    counted as generating time."""
+
+    def test_the_wait_leaves_generating_and_stays_in_elapsed(self):
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.set_waiting(True, 10.0)
+        m.set_waiting(False, 70.0)          # a wake turn begins
+        assert m.elapsed(80.0) == pytest.approx(80.0)
+        assert m.generating(80.0) == pytest.approx(20.0)
+
+    def test_a_wait_still_open_is_excluded_as_it_runs(self):
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.set_waiting(True, 5.0)
+        assert m.generating(65.0) == pytest.approx(5.0)
+
+    def test_a_second_true_does_not_restart_the_window(self):
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.set_waiting(True, 5.0)
+        m.set_waiting(True, 50.0)
+        m.set_waiting(False, 60.0)
+        assert m.generating(60.0) == pytest.approx(5.0)
+
+    def test_a_tool_inside_the_wait_is_not_subtracted_twice(self):
+        """One window for both: a tool finishing during a wait must not
+        close the pause the wait still holds, and the overlap counts once."""
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.set_waiting(True, 10.0)
+        m.set_tool_running(1, 20.0)
+        m.set_tool_running(-1, 30.0)        # the wait is still on
+        m.set_waiting(False, 40.0)
+        assert m.generating(50.0) == pytest.approx(20.0)
+
+    def test_a_modal_during_the_wait_is_subtracted_once(self):
+        """`set_blocked`'s disjointness, for the new pause: the human wait
+        already leaves `elapsed`, so the session wait across it must not
+        take the same seconds again."""
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.set_waiting(True, 10.0)
+        m.set_blocked(True, 20.0)
+        m.set_blocked(False, 120.0)         # a hundred seconds of human
+        m.set_waiting(False, 130.0)
+        # Wall 140, minus 100 human = 40 elapsed; the wait held 10->20
+        # and 120->130, so 20 seconds, which leaves 20 to generate in.
+        assert m.elapsed(140.0) == pytest.approx(40.0)
+        assert m.generating(140.0) == pytest.approx(20.0)
+
+    def test_waiting_outside_a_turn_is_ignored(self):
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.set_waiting(True, 1.0)
+        m.start(10.0)
+        assert m.generating(20.0) == pytest.approx(10.0)
+
+    def test_a_new_turn_is_not_waiting(self):
+        """A turn stopped mid-wait -- a quit, an escape -- must not leave
+        the next turn's clock paused from its first second."""
+        m = TurnMeter()
+        m.begin_session(0.0)
+        m.start(0.0)
+        m.set_waiting(True, 5.0)
+        m.stop(10.0)
+        m.start(20.0)
+        # A tool makes the new turn re-read its pause: a wait flag left
+        # over would hold the pause open after the tool had finished.
+        m.set_tool_running(1, 22.0)
+        m.set_tool_running(-1, 24.0)
+        assert m.generating(30.0) == pytest.approx(8.0)
+
+
+class TestTokenCountsReadInKMAndB:
+    """§97 UF3, the owner's choice: one formatter for the usage line, so a
+    thread past a million billed stops reading `billed 12345k`."""
+
+    @pytest.mark.parametrize("n,expected", [
+        (0, "0"),
+        (950, "950"),
+        (1_000, "1k"),
+        (41_234, "41k"),
+        (118_000, "118k"),
+        (999_499, "999k"),
+        (999_600, "1.0M"),      # rounds up into the next unit
+        (1_200_000, "1.2M"),
+        (9_940_000, "9.9M"),
+        (9_960_000, "10M"),     # one decimal only below ten of a unit
+        (12_000_000, "12M"),
+        (999_700_000, "1.0B"),
+        (1_500_000_000, "1.5B"),
+        (12_000_000_000, "12B"),
+    ])
+    def test_each_scale(self, n, expected):
+        assert meters.short_count(n) == expected
+
+    def test_b_is_the_last_unit(self):
+        assert meters.short_count(4_000_000_000_000) == "4000B"

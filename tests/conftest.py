@@ -22,6 +22,7 @@ from uuid import uuid4
 import pytest
 
 from core.client import ModelResponse, StreamToken, ToolCallRequest
+from core.usage_view import UsageTally
 
 # ---------------------------------------------------------------------------
 # ---- Generator draining (ROADMAP_v2 §22) ---------------------------------
@@ -422,6 +423,10 @@ class FakeStdinReader:
         self.prompts = []
         self.timeouts = []
         self.masked_prompts = []
+        # Batch 265: what is typed while the chat waits on sessions, and
+        # each wait read's deadline. See `poll`.
+        self.during_wait = []
+        self.polls = []
 
     def _next(self):
         if not self.lines:
@@ -469,6 +474,32 @@ class FakeStdinReader:
             return self._next()
         except EOFError:
             return None
+
+    def poll(self, timeout):
+        """The session wait's read (ROADMAP_v3 §49, SS2 as amended in batch
+        265): the next of `during_wait`, or None when nothing was typed.
+
+        A SEPARATE LIST, because a test cannot type in time: every line in
+        `lines` is already there when the turn starts, so a fake that
+        served them here as well would have every chat test type its next
+        message during the wait instead of at the prompt it was written
+        for. A test types into the wait by filling this list, and an
+        exception in it is raised as in `lines` -- `EOFError` is a stdin
+        that ended while the chat waited. None is a read that found
+        nothing typed, and a callable is called and its answer served, a
+        test's way of making something happen at an exact read.
+        """
+        self.polls.append(timeout)
+        if not self.during_wait:
+            return None
+        item = self.during_wait.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        if isinstance(item, type) and issubclass(item, BaseException):
+            raise item()
+        if callable(item):
+            return item()
+        return item
 
 
 @pytest.fixture
@@ -1442,6 +1473,7 @@ class FakeMemory:
         # accumulator -- same shape, same scope (per object, never
         # persisted), so growth tests can assert the thread total.
         self.billed_tokens = 0
+        self.usage = UsageTally()
         self.checkpoints_applied = 0
         # Batch 91. What the loop recorded as this run's failure, in order.
         self.failures = []
@@ -1477,6 +1509,10 @@ class FakeMemory:
 
     def record_billed(self, tokens):
         self.billed_tokens += int(tokens or 0)
+
+    def record_usage(self, usage, unreported=()):
+        # ROADMAP_v3 §97 (UF4): the real tally, since it is pure.
+        self.usage.add(usage, unreported)
 
     def apply_checkpoint(self):
         self.checkpoints_applied += 1
@@ -2343,6 +2379,27 @@ def rebind_posture(monkeypatch):
 # survival IS the leak). The needle differs from the text for the shapes
 # because their whole point is to preserve the surrounding structure: a
 # redacted `<password>` element still has its tags.
+
+
+#: The signature of the fake below, named because a row and a test each
+#: need the part a pattern taking only some of the token would leave.
+STATELESS_SIGNATURE = "q1W2-e3R4_" * 30
+
+
+def fake_stateless_github_token(prefix: str = "ghs_") -> str:
+    """A FAKE GitHub token in the stateless `ghs_APPID_JWT` form (batch 260).
+
+    The shape is GitHub's own: an app id, then a JWT whose header and
+    payload open the way base64url JSON does, 526 characters with two dots,
+    where GitHub gives about 520. BUILT from pieces like every value below,
+    so that no source line holds a run a secret scanner reads as a JWT. The
+    signature is no signature, and the header is the standard one for
+    `{"alg":"RS256","typ":"JWT"}`."""
+    return (prefix + "1234567_" + "eyJhbGciOiJSUzI1" + "NiIsInR5cCI6IkpXVCJ9"
+            + "." + "eyJpc3MiOiJmYWtl" + "a1b2c3d4" * 20 + "."
+            + STATELESS_SIGNATURE)
+
+
 REDACTION_CASES = [
     ("openai key",
      "401 from https://api.example/v1?key=sk-a1b2c3d4a1b2c3d4a1b2c3",
@@ -2394,6 +2451,13 @@ REDACTION_CASES = [
     ("github oauth token",
      "token refresh returned gho_" + "a1b2c3d4" * 4 + "a1b2",
      "gho_" + "a1b2c3d4" * 4 + "a1b2"),
+    # Batch 260: the stateless form every installation token has had since
+    # GitHub's rollout finished, which the 40-character pattern behind the
+    # row above cannot see. The needle is the signature: it comes last, so
+    # it is what a pattern that took only part of the token leaves standing.
+    ("github stateless token",
+     "git push failed with " + fake_stateless_github_token() + " (exit 128)",
+     STATELESS_SIGNATURE),
     ("openai project key",
      "401 for sk-proj-" + "a1b2c3d4_" * 3 + "a1b2",
      "sk-proj-" + "a1b2c3d4_" * 3 + "a1b2"),

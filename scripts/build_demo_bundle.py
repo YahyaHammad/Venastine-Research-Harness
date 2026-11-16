@@ -69,8 +69,12 @@ ROOT = Path(__file__).resolve().parents[1]
 #   pip install -r requirements.txt "torch<=2.13.0" gradio[oauth,mcp]==6.30.0
 #       "uvicorn>=0.14.0" "websockets>=10.4" spaces==0.51.3
 # (`uv pip compile` reproduces it; deploy/hosted/requirements.txt says why
-# the harness's own pins are not in that command).
-GRADIO_VERSION = "6.30.0"
+# the harness's own pins are not in that command). 6.32.0, batch 262: the
+# first release to allow pillow 13, which fixes the advisories 12.3.0 had.
+# Re-measured with uv 0.13.4 on 2026-11-15: `gr.Server` is unchanged, that
+# line resolves with 6.32.0 in it (pillow 13.0.0), and pip-audit finds
+# nothing in what it resolves.
+GRADIO_VERSION = "6.32.0"
 # ModelScope's image is ours, and app.py imports `spaces`; off ZeroGPU it is
 # a no-op. The version a Hugging Face ZeroGPU build installed on 2026-10-20.
 SPACES_VERSION = "0.51.3"

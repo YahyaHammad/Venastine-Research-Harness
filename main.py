@@ -467,10 +467,46 @@ def _deliver_held(thread_id) -> None:
     print(f"— {ansi.for_display(text.splitlines()[0])} —")
 
 
+class _WaitEnd:
+    """How `_await_sessions` ended (ROADMAP_v3 §49, SS2 as amended in batch
+    265), which `run_chat` needs to know to carry on.
+
+    `line` is what the user sent while it waited, which `run_chat` runs
+    exactly as if it had been typed at the prompt; `resume` is the same
+    wait, to go back to once a COMMAND sent that way has run (a message
+    ends in a wait of its own). `prompt_open` says "You: " is already on
+    screen with nothing typed after it, so the next read prints none.
+    """
+
+    __slots__ = ("line", "resume", "prompt_open")
+
+    def __init__(self, line=None, resume=None, prompt_open=False):
+        self.line = line
+        self.resume = resume
+        self.prompt_open = prompt_open
+
+
+#: How often the CLI's session wait looks for a typed line, in seconds
+#: (batch 265). A message takes at most this long to be picked up, and a
+#: session's result at most this long longer to wake than it used to.
+_WAIT_POLL_S = 0.2
+
+
 def _await_sessions(thread_id, *, model, provider_name, effort,
-                    authorization, turn=None, active_skills=()) -> None:
+                    authorization, turn=None, active_skills=(),
+                    count_usage=None) -> _WaitEnd:
     """Between turns, wait on this conversation's live sessions and run a
     wake turn for each batch (SS2, SS5).
+
+    THE PROMPT IS OPEN WHILE IT WAITS (batch 265, SS2 as amended, the
+    owner's choice). A line typed here ends the wait with the sessions
+    still running and goes back to `run_chat`, which runs it as it runs
+    one typed at the prompt -- a message gets a turn of its own, whose
+    own wait is where what landed meanwhile wakes. A line typed while a
+    wake turn runs is type-ahead, read once the turn has finished, as it
+    is during the user's own turn. A line and a result arriving together
+    go message first: the batch is put back. At the end of stdin -- a
+    piped run -- the wait carries on without reading, as it always did.
 
     Ctrl+C here stops the SESSIONS and returns to the prompt: the interrupt
     is aimed at what is running, not at the conversation. Their results are
@@ -514,10 +550,45 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
     from core.session_wake import build_wake
 
     if thread_id is None:
-        return
+        return _WaitEnd()
     as_agent = ({} if turn is None else {
         "context": turn.context, "system_prompt": turn.system_prompt,
         "max_steps": turn.max_steps})
+
+    def _again():
+        # The same wait re-entered, so it counts into the same thread's
+        # usage (§97 UF4): a wake after the user's line is still this
+        # thread's call.
+        return _await_sessions(
+            thread_id, model=model, provider_name=provider_name,
+            effort=effort, authorization=authorization, turn=turn,
+            active_skills=active_skills, count_usage=count_usage)
+
+    reader = _stdin_reader()
+    # Batch 265. `reading` goes False for good at the end of stdin, and
+    # `prompted` is whether "You: " is on screen waiting for a line.
+    reading = [True]
+    prompted = [False]
+
+    def _typed(timeout):
+        """The line sent, "" for Enter on nothing, or None."""
+        if not reading[0]:
+            return None
+        try:
+            line = reader.poll(timeout)
+        except EOFError:
+            reading[0] = False
+            if prompted[0]:
+                print()
+                prompted[0] = False
+            return None
+        return None if line is None else line.strip()
+
+    def _close_prompt():
+        if prompted[0]:
+            print()
+            prompted[0] = False
+
     announced = False
     # §64 A21. Set by the handler below instead of an unwind; read after the
     # wake turn has finished. A list rather than a `nonlocal` because the
@@ -541,21 +612,48 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
 
     try:
         while True:
-            live = sessions.live_for(thread_id)
+            # `waited_on`, not `live_for` (batch 265): an interactive shell
+            # is not waited on (SS25), and counting one spun this loop for
+            # as long as it stayed open, `wait_for_wake` answering None at
+            # once each time.
+            live = sessions.waited_on(thread_id)
             if not live and not sessions.pending(thread_id):
-                return
+                return _WaitEnd(prompt_open=prompted[0])
             if not announced:
-                print(f"[waiting on {live} background session(s) — "
-                      f"Ctrl+C stops them]")
+                print(f"[waiting on {live} background session(s) — type "
+                      f"a message to send it now; Ctrl+C stops them]")
                 announced = True
-            batch = sessions.wait_for_wake(thread_id, timeout=1.0)
+            if reading[0] and not prompted[0]:
+                print("You: ", end="", flush=True)
+                prompted[0] = True
+            line = _typed(_WAIT_POLL_S)
+            if line:
+                prompted[0] = False
+                return _WaitEnd(line=line, resume=_again)
+            if line == "":
+                # Enter on nothing, which the prompt answers with itself.
+                prompted[0] = False
+                continue
+            batch = sessions.wait_for_wake(
+                thread_id, timeout=_WAIT_POLL_S if reading[0] else 1.0)
             if batch is None:
                 if sessions.suspended(thread_id):
+                    _close_prompt()
                     print("[no further automatic replies until you say "
                           "something — results will arrive with your next "
                           "message]")
-                    return
+                    return _WaitEnd()
                 continue
+            line = _typed(0)
+            if line:
+                # The owner's rule: a message and a result arriving
+                # together go message first.
+                sessions.put_back(thread_id, batch)
+                prompted[0] = False
+                return _WaitEnd(line=line, resume=_again)
+            if line == "":
+                prompted[0] = False
+            _close_prompt()
             text, record = build_wake(batch)
             previous_sigint = signal.signal(signal.SIGINT, _SecondPress(
                 "_stop_sessions_after_this_turn",
@@ -576,13 +674,17 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
             except Exception as e:
                 logger.exception("Wake turn failed")
                 print(f"\n[Error: {ansi.for_display(e)}]")
-                return
+                return _WaitEnd()
             finally:
                 # Before anything else can be printed or read, and on the
                 # error path too: outside a wake turn the interrupt belongs
                 # to the sessions and takes the handler below.
                 signal.signal(signal.SIGINT, previous_sigint)
             live.finish(response)
+            # ROADMAP_v3 §97 (UF4). A wake turn's calls are this
+            # thread's too, as they are on the TUI's memory.
+            if count_usage is not None:
+                count_usage(response)
             if interrupted:
                 # The turn finished and wrote its rows; now the key does
                 # what it said. Returning to the prompt rather than waiting
@@ -592,10 +694,11 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                 killed = sessions.kill_owned(thread_id,
                                              shell_sessions.KILL_USER)
                 print(f"\n[stopped {len(killed)} background session(s)]")
-                return
+                return _WaitEnd()
     except KeyboardInterrupt:
         killed = sessions.kill_owned(thread_id, shell_sessions.KILL_USER)
         print(f"\n[stopped {len(killed)} background session(s)]")
+        return _WaitEnd()
 
 
 def _close_sessions() -> None:
@@ -686,18 +789,30 @@ def run_chat(
     print("Ctrl+C twice stops the current turn; Ctrl+C or Ctrl+D at the "
           "prompt exits. /help lists commands.\n")
 
+    # Batch 265 (SS2 as amended). How the last session wait ended: a line
+    # the user sent while it waited runs below exactly as one typed at the
+    # prompt would, and a COMMAND sent that way goes back to the wait it
+    # interrupted (a message ends in a wait of its own).
+    waited = _WaitEnd()
     while True:
+        from_wait = None
         if first_message is not None:
             user_input = first_message
             first_message = None
+        elif waited.line is not None:
+            from_wait, user_input = waited, waited.line
         else:
+            # "You: " is already on screen when the wait ended with it
+            # open, and printing a second would put two on one line.
+            prompt = "" if waited.prompt_open else "You: "
+            waited = _WaitEnd()
             try:
                 # §29 (N1). Audit #100: this was input(), a SECOND reader
                 # on the stdin the approval pump already owns, so from the
                 # first gated call onwards the pump took this line and
                 # input() blocked forever. EOFError still arrives here --
                 # readline() raises it on Ctrl+D exactly as input() did.
-                user_input = _stdin_reader().readline("You: ").strip()
+                user_input = _stdin_reader().readline(prompt).strip()
             except (KeyboardInterrupt, EOFError):
                 # ROADMAP_v3 §49 (SS6). Quitting with sessions still
                 # running confirms first -- they are killed on the way out
@@ -708,6 +823,7 @@ def run_chat(
                     continue
                 print("\nExiting.")
                 break
+        waited = _WaitEnd()
 
         if not user_input:
             continue
@@ -715,15 +831,22 @@ def run_chat(
         agent = session.active_agent
         one_shot = False
         if user_input.startswith("/"):
-            run_command(session, user_input)
+            # `waiting`: the commands the TUI refuses while a turn's
+            # sessions run are refused here too, when this one was sent
+            # during the wait (SS2 as amended, the owner's choice).
+            run_command(session, user_input, waiting=from_wait is not None)
             if session.quit_requested:
                 # /quit takes Ctrl+D's route, confirmation and all.
                 session.quit_requested = False
                 if _quit_confirmed():
                     print("Exiting.")
                     break
+                if from_wait is not None:
+                    waited = from_wait.resume()
                 continue
             if session.one_shot is None:
+                if from_wait is not None:
+                    waited = from_wait.resume()
                 continue
             # /grill-me: one turn in this thread under that agent's prompt,
             # run like a typed message so it prints live and stops the same
@@ -731,12 +854,15 @@ def run_chat(
             agent, session.one_shot = session.one_shot, None
             user_input, one_shot = GRILL_ME_TASK, True
 
-        _chat_turn(session, user_input, agent, one_shot=one_shot)
+        waited = _chat_turn(session, user_input, agent, one_shot=one_shot)
 
 
 def _chat_turn(session: ChatSession, user_input: str, agent,
-               one_shot: bool = False) -> None:
+               one_shot: bool = False) -> _WaitEnd:
     """One turn of `run_chat`'s conversation, and the wake turns after it.
+
+    Returns how the wait after it ended (`_WaitEnd`), since batch 265 a
+    line the user sent during it among other things.
 
     `agent` is the session's active agent, or /grill-me's for its one turn
     (`one_shot`). What the agent changes about the turn is
@@ -820,11 +946,13 @@ def _chat_turn(session: ChatSession, user_input: str, agent,
     except Exception as e:
         logger.exception("Chat turn failed")
         print(f"\n[Error: {ansi.for_display(e)}]")
-        return
+        return _WaitEnd()
     finally:
         signal.signal(signal.SIGINT, previous_sigint)
 
     session.thread_id = response.thread_id
+    # ROADMAP_v3 §97 (UF4): this turn's calls, for /usage.
+    session.count_usage(response)
 
     # ROADMAP_v2 §21's "no silent compaction, ever": a notice printed
     # live when it happened, and one that never arrived live is printed
@@ -871,12 +999,14 @@ def _chat_turn(session: ChatSession, user_input: str, agent,
     # SS2/SS5. The turn is over, but this conversation may not be: a
     # session it started reports later, and that report starts a turn
     # of its own -- under the same agent, prompt and skills, because it
-    # IS this turn continuing. Nothing is read from the user until they
-    # are done.
-    _await_sessions(session.thread_id, model=turn.model,
-                    provider_name=turn.provider_name, effort=session.effort,
-                    authorization=session.authorization, turn=turn,
-                    active_skills=session.active_skills)
+    # IS this turn continuing. Since batch 265 the user can type while it
+    # waits (SS2 as amended): a line sent then comes back from here.
+    return _await_sessions(
+        session.thread_id, model=turn.model,
+        provider_name=turn.provider_name, effort=session.effort,
+        authorization=session.authorization, turn=turn,
+        active_skills=session.active_skills,
+        count_usage=session.count_usage)
 
 
 def build_research_authorization(grant_spec, attended: bool = False):
@@ -1297,6 +1427,39 @@ class _StdinReader:
         if self._ended():
             raise EOFError
         line = self._lines.get()
+        if line is self._EOF:
+            raise EOFError
+        return line.rstrip("\r\n")
+
+    def poll(self, timeout: float):
+        """A line typed while the chat waits on background sessions, or
+        None if none arrived within *timeout* (ROADMAP_v3 §49, SS2 as
+        amended in batch 265). Raises EOFError once stdin has ended.
+
+        readline()'s discipline, with ask()'s deadline: it KEEPS
+        type-ahead, because a line typed during the turn that started the
+        sessions is a message meant for the prompt this wait now shows,
+        and it drains nothing for the same reason. It takes no prompt, as
+        it is called again every fraction of a second; the wait prints the
+        prompt once.
+
+        IT STARTS THE PUMP, which readline() takes care not to do: a read
+        with a deadline cannot be made on a thread that might never come
+        back, which is the reason the pump exists at all. Chat mode is the
+        only caller and never hands the terminal to Textual afterwards, so
+        batch 121's parked-reader hazard does not reach it.
+        """
+        import queue as _queue
+
+        if self._released:
+            raise EOFError
+        self._start()
+        if self._ended():
+            raise EOFError
+        try:
+            line = self._lines.get(timeout=timeout)
+        except _queue.Empty:
+            return None
         if line is self._EOF:
             raise EOFError
         return line.rstrip("\r\n")

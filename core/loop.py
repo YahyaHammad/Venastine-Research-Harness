@@ -683,11 +683,18 @@ def _already_said(notices, kind: str) -> bool:
 # reasoning-only reply ends the turn with a notice. The row's first line is
 # also the live notice's text, so the line a person sees while the turn
 # runs is the line its replay draws (RO5).
+#
+# The first line says what did not run is THAT reply, and that results
+# returned before it are real (RO2 as amended in batch 261, the owner's
+# choice). It corrects a model that acts as though calls written in its
+# reasoning took effect, and a bare "nothing ran" could also be read as
+# "the calls earlier in this turn did not run either".
 HARNESS_REASONING_ONLY = "reasoning_only"
 REASONING_ONLY_END = "reasoning_only_end"
 REASONING_ONLY_HEADER = (
     "[harness] The last reply was reasoning only: no answer and no tool "
-    "call reached the harness, so nothing ran.")
+    "call reached the harness, so nothing in that reply ran. Results "
+    "returned before it are real.")
 _REASONING_ONLY_NUDGE = (
     REASONING_ONLY_HEADER + "\n"
     "A tool call written inside reasoning is not run. Make the call through "
@@ -2131,6 +2138,11 @@ class RunAgentLoop:
             turn_output_tokens += usage_out
             turn_prev_input = usage_in
             memory.record_billed(usage_in + usage_out)
+            # ROADMAP_v3 §97 (UF4). Beside billed, on the same object and so
+            # over the same span: what `/usage` shows, the provider's own
+            # counts with the coerced ones left out.
+            memory.record_usage(response.usage,
+                                getattr(response, "usage_unreported", ()))
             response.turn_billed_tokens = total_tokens_used
             response.turn_new_tokens = turn_new_tokens
             response.turn_output_tokens = turn_output_tokens
@@ -2395,6 +2407,10 @@ class RunAgentLoop:
             **auth_kwargs,
         ), observe)
         response.thread_id = memory.thread_id
+        # ROADMAP_v3 §97 (UF4). This memory was built for this run, so its
+        # tally is this turn's calls: the CLI's `/usage` adds them up. None
+        # from a memory that keeps none, which the CLI's tally ignores.
+        response.turn_usage = getattr(memory, "usage", None)
         return response
 
     @staticmethod
@@ -2663,4 +2679,8 @@ class RunAgentLoop:
             **auth_kwargs,
         ), observe)
         response.thread_id = memory.thread_id
+        # ROADMAP_v3 §97 (UF4). This memory was built for this run, so its
+        # tally is this turn's calls: the CLI's `/usage` adds them up. None
+        # from a memory that keeps none, which the CLI's tally ignores.
+        response.turn_usage = getattr(memory, "usage", None)
         return response

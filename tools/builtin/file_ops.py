@@ -21,6 +21,12 @@ SECURITY MODEL (ROADMAP §6, deviated per user decision):
   resolved via os.path.realpath before any check, so a path that looks
   inside the workspace but resolves outside it is treated as outside.
 
+  `/workspace/x` IS INSIDE (ROADMAP_v3 §96, batch 263): it is the
+  container's name for `<workspace>/x`, and resolve_path maps it there
+  while a tool that starts shell commands is enabled. Every other path
+  outside the workspace still asks, the owner's choice: a prompt is how
+  this layer avoids saying whether a file exists before anyone said yes.
+
   PROTECTED SEGMENTS (security/protected_paths.py) are the one hard
   deny, and the exception to both rules above: any path -- inside or
   outside the workspace -- that resolves into `.venastine/` is refused
@@ -84,6 +90,7 @@ from pydantic import BaseModel, Field
 import config
 from json_store import write_text_atomic
 from security.protected_paths import hardlinked_segment, protected_segment
+from security.sandbox import CONTAINER_WORKSPACE
 from tools.base import invalid_params
 
 logger = logging.getLogger(__name__)
@@ -113,13 +120,65 @@ def resolve_path(user_path: str) -> str:
     ``os.path.join(WORKSPACE_ROOT, ...)`` at the call site is this
     project's canonical producer/consumer bug, and here it would mean a
     diff of one file beside an edit to another.
+
+    THE CONTAINER'S SPELLING (ROADMAP_v3 §96, CW1-CW3). The shell runs
+    in a container that mounts the workspace at `/workspace`, so the
+    paths the model sees there -- `pwd`, a build's error lines -- name
+    workspace files as `/workspace/x`. These tools run on the host, where
+    that path is somewhere else or nowhere: until batch 263 such a call
+    asked to leave the workspace and then failed on a file that was
+    there all along. So `/workspace/x` resolves to `<workspace>/x`, here
+    and nowhere else, which is what makes the approval check, the four
+    handlers, the protected deny and the TUI's diff agree on it.
+
+    Only while a tool that starts commands is enabled (CW1), because that
+    is where the model learns the spelling. Only when the host's own
+    reading of the path lands OUTSIDE the workspace, so a host whose
+    workspace really lives under `/workspace` keeps its meaning, and only
+    when the mapped path lands INSIDE it, so `..` or a link out of it
+    keeps the prompt it had (CW2).
     """
-    return os.path.realpath(os.path.join(WORKSPACE_ROOT, user_path))
+    host = os.path.realpath(os.path.join(WORKSPACE_ROOT, user_path))
+    rest = _container_remainder(user_path)
+    if rest is None or _inside(host) or not _shell_starts_commands():
+        return host
+    mapped = os.path.realpath(os.path.join(WORKSPACE_ROOT, rest))
+    return mapped if _inside(mapped) else host
+
+
+def _container_remainder(user_path: str) -> Optional[str]:
+    """What follows the container's mount point in *user_path*, or None
+    when the path is not spelled from it.
+
+    The mount point is a whole SEGMENT: `/workspace` and `/workspace/x`
+    are the container's spelling and `/workspacefoo` is not. Leading
+    slashes are dropped from the remainder because POSIX folds a run of
+    them into one -- `/workspace//x` is `/workspace/x` in the container --
+    while `os.path.join` would read the second as a new root.
+    """
+    if user_path == CONTAINER_WORKSPACE:
+        return ""
+    if user_path.startswith(CONTAINER_WORKSPACE + "/"):
+        return user_path[len(CONTAINER_WORKSPACE):].lstrip("/")
+    return None
+
+
+def _shell_starts_commands() -> bool:
+    """Whether any tool that runs a command in the container may be
+    called (§96 CW1): the same four `shell_approval_mode` governs, asked
+    through `is_tool_allowed`, so a hosted deployment that refuses them
+    maps nothing either."""
+    from security.permissions import APPROVAL_BY_SHELL_MODE, is_tool_allowed
+
+    return any(is_tool_allowed(name) for name in APPROVAL_BY_SHELL_MODE)
+
+
+def _inside(resolved: str) -> bool:
+    return resolved == WORKSPACE_ROOT or resolved.startswith(WORKSPACE_ROOT + os.sep)
 
 
 def _is_within_workspace(user_path: str) -> bool:
-    resolved = resolve_path(user_path)
-    return resolved == WORKSPACE_ROOT or resolved.startswith(WORKSPACE_ROOT + os.sep)
+    return _inside(resolve_path(user_path))
 
 
 def _file_approval_check(tool_name: str, params: dict) -> bool:
@@ -414,7 +473,8 @@ def read_run(params: dict) -> dict:
             with open(resolved, encoding="utf-8", errors="replace") as f:
                 all_lines = f.read().splitlines()
     except Exception as e:
-        logger.exception("read tool failed on %s", parsed.path)
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("read tool failed on %s", parsed.path, exc_info=True)
         return {"error": f"Could not read file: {e}"}
 
     content, lines_returned, truncated, message = _truncate_lines(
@@ -482,7 +542,8 @@ def write_run(params: dict) -> dict:
         created = not os.path.exists(resolved)
         write_text_atomic(resolved, parsed.content)
     except Exception as e:
-        logger.exception("write tool failed on %s", parsed.path)
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("write tool failed on %s", parsed.path, exc_info=True)
         return {"error": f"Could not write file: {e}"}
 
     if created:
@@ -551,7 +612,9 @@ def edit_run(params: dict) -> dict:
         with open(resolved, encoding="utf-8", newline="") as f:
             content = f.read()
     except Exception as e:
-        logger.exception("edit tool read failed on %s", parsed.path)
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("edit tool read failed on %s", parsed.path,
+                    exc_info=True)
         return {"error": f"Could not read file: {e}"}
 
     old_text, new_text = parsed.old_text, parsed.new_text
@@ -586,7 +649,9 @@ def edit_run(params: dict) -> dict:
     try:
         write_text_atomic(resolved, content)
     except Exception as e:
-        logger.exception("edit tool write failed on %s", parsed.path)
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("edit tool write failed on %s", parsed.path,
+                    exc_info=True)
         return {"error": f"Could not write file: {e}"}
 
     return {"result": f"Replaced 1 occurrence in {parsed.path}"}
@@ -685,7 +750,8 @@ def view_image_run(params: dict, memory=None, call_id=None,
         with open(resolved, "rb") as f:
             raw = f.read(config.MAX_IMAGE_BYTES + 1)
     except OSError as e:
-        logger.exception("view_image failed on %s", parsed.path)
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("view_image failed on %s", parsed.path, exc_info=True)
         return {"error": f"Could not read file: {e}"}
     if len(raw) > config.MAX_IMAGE_BYTES:
         return {"error": (

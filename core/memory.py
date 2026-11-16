@@ -46,6 +46,7 @@ PERSISTENCE, AND WHY THERE'S NO NORMALIZATION STEP HERE:
 from typing import Optional
 from uuid import UUID
 
+from core.usage_view import UsageTally
 from storage import (
     THREAD_KIND_CHAT,
     create_thread,
@@ -127,6 +128,8 @@ class ConversationMemory:
         # resumed -- see record_billed for why this one is deliberately not
         # extra_data like its neighbour.
         self.billed_tokens = 0
+        # ROADMAP_v3 §97 (UF4). Its neighbour's scope, for its reason.
+        self.usage = UsageTally()
         # ROADMAP_v3 §81 (IM3). Images a tool attached for a call whose
         # result has not been written yet, keyed by the call's id.
         # add_tool_result takes them into the row it writes; nothing else
@@ -258,6 +261,16 @@ class ConversationMemory:
         this session, not as a ledger.
         """
         self.billed_tokens += int(tokens or 0)
+
+    def record_usage(self, usage, unreported=()) -> None:
+        """One model call's provider-reported counts, for `/usage`
+        (ROADMAP_v3 §97, UF4).
+
+        record_billed's scope and its reason: not persisted, zero on every
+        construction, so `/usage` covers exactly the span the usage line's
+        `billed` does. `unreported` is `ModelResponse.usage_unreported`.
+        """
+        self.usage.add(usage, unreported)
 
     def completed_turns(self) -> int:
         """How many turns of this thread are already finished (§21 M5/M11).

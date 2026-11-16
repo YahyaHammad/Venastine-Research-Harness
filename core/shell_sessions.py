@@ -72,7 +72,9 @@ KIND_BACKGROUND = "background"
 KIND_MONITOR = "monitor"
 KIND_INTERACTIVE = "interactive"
 
-# The kinds whose being live BLOCKS the user's prompt (SS2). Not the same
+# The kinds a post-turn wait waits on, and whose being live holds the
+# shell's commands (SS2; a plain message is not held since batch 265,
+# SS2 as amended). Not the same
 # question as which kinds occupy the 4-live cap, which is all of them: the
 # cap is about resources, which an idle shell does hold, and the block is
 # about whether the agent is waiting on work it cannot proceed without,
@@ -1063,14 +1065,34 @@ class SessionManager:
         with self._lock:
             return self._live_locked(owner_thread)
 
+    def waited_on(self, owner_thread) -> int:
+        """How many of this thread's sessions a post-turn wait is waiting
+        on: the live background and monitor ones (SS25).
+
+        BATCH 265. Both shells' waits asked `live_for`, which counts every
+        kind, while `wait_for_wake` answers for the blocking kinds alone --
+        so with only an interactive shell open, each loop asked again at
+        once, for as long as the shell stayed open. Measured: 37,154 calls
+        in two seconds on the TUI's worker and 38,195 in the CLI's, the turn
+        held open the whole while, until the shell's idle timeout ended it.
+        SS25 is the rule that broke, and this is the count both loops meant.
+        """
+        with self._lock:
+            return self._live_locked(owner_thread, BLOCKING_KINDS)
+
     def blocks(self, owner_thread) -> bool:
-        """Whether this thread's input is blocked (SS2): it has a live
-        BLOCKING session and waking has not been suspended by the
+        """Whether this thread's sessions hold the shell (SS2): it has a
+        live BLOCKING session and waking has not been suspended by the
         consecutive-wake limit.
 
         An interactive session is deliberately not counted (SS25): the
         block exists because the agent is waiting on work the user cannot
         usefully interrupt, and an open shell is not that.
+
+        SINCE BATCH 265 IT HOLDS COMMANDS, NOT MESSAGES (SS2 as amended).
+        A plain message sent while the shell waits gets a turn of its own;
+        what this still refuses is the commands that would change what the
+        wait is waiting FOR -- another thread, another model -- under it.
         """
         with self._lock:
             inbox = self._inboxes.get(str(owner_thread))
@@ -1115,16 +1137,28 @@ class SessionManager:
         return batch
 
     def wait_for_wake(self, owner_thread,
-                      timeout: Optional[float] = None
+                      timeout: Optional[float] = None,
+                      stop: Optional[Callable[[], bool]] = None,
                       ) -> Optional[list[WakeEvent]]:
         """Block until there is a batch to wake this thread with. None when
         there is nothing left to wait for: no live session and nothing
-        pending, waking suspended, the harness quitting, or *timeout* gone.
-        Waits in `poll_s` slices, so a KeyboardInterrupt still lands."""
+        pending, waking suspended, the harness quitting, *timeout* gone, or
+        *stop* answering true. Waits in `poll_s` slices, so a
+        KeyboardInterrupt still lands.
+
+        `stop` (batch 265) is the consumer's own reason to stop waiting --
+        the TUI's, a message the user sent while it waited (SS2 as
+        amended). Asked BEFORE anything is taken, so a stop that is already
+        true never hands out a batch; one that comes true later is read at
+        the next slice, or at once after `nudge`. It is called under this
+        manager's lock, so it must read state and take no lock of its own.
+        """
         deadline = None if timeout is None else self._clock() + timeout
         rows = None
         with self._changed:
             while True:
+                if stop is not None and stop():
+                    break
                 batch, suspended_now = self._take_locked(owner_thread)
                 if batch is not None:
                     return batch
@@ -1146,6 +1180,33 @@ class SessionManager:
         if rows is not None:
             self._post(rows)
         return None
+
+    def nudge(self) -> None:
+        """Wake every `wait_for_wake` at once, so a `stop` that has just
+        come true is read now rather than at the end of a poll slice."""
+        with self._changed:
+            self._changed.notify_all()
+
+    def put_back(self, owner_thread, batch: list[WakeEvent]) -> None:
+        """Return a batch `wait_for_wake` handed out that no turn woke with
+        (SS2 as amended in batch 265).
+
+        The user's message and a session's result can reach a waiting shell
+        together, and the owner's rule is that the message goes first: it
+        gets its own turn, and the result wakes after it. So the consumer
+        that took the batch hands it back rather than answering it.
+
+        AT THE FRONT, so these results stay ahead of anything that arrived
+        since, and the wake it was counted as is uncounted, since no turn
+        answered it.
+        """
+        if not batch:
+            return
+        with self._lock:
+            inbox = self._inboxes.setdefault(str(owner_thread), _Inbox())
+            inbox.events[:0] = batch
+            inbox.consecutive_wakes = max(0, inbox.consecutive_wakes - 1)
+            self._changed.notify_all()
 
     def note_user_input(self, owner_thread) -> None:
         """A message from the user resets the consecutive-wake count and

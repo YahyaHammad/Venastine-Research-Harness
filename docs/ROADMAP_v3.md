@@ -43,6 +43,8 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
+- **§96. The container's `/workspace`, read by the file tools** - **(BUILT in batch 263)** (the shell runs in a container that mounts the workspace at `/workspace`, so the paths the model saw there were spelled from it, while `read`, `write`, `edit` and `view_image` run on the host, where that path is not the workspace: each such call asked to leave the workspace and then failed. `resolve_path` now maps the container's spelling onto the workspace while a tool that starts commands is enabled, and every other outside path still asks; CW1-CW3)
+- **§97. Usage figures: the rate's clock, thoughts, k/M/B and `/usage`** - **(BUILT in batch 264)** (the completion line divided the output count by the whole turn, tools and the wait on background sessions included, and kept only the last wake turn's count; Google's output left out the thoughts; `billed` read in thousands past a million; and no cache count was read. The rate now divides by generating time while `took` stays the turn's time, thoughts count as output, the usage line writes k, M and B, and `/usage` shows four provider-reported rows for this thread in both shells, with input the whole prompt on every branch; UF1-UF5)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -328,7 +330,7 @@ read.
 | # | Decision |
 |---|---|
 | **SS1** | **WSL and SSH are UNCONTAINED backends.** Under `tiered` and `contained` only a read-only in-workspace command runs unasked; `never` asks nothing and `always` everything; the badge names the backend. Neither withholds network or confines the filesystem, and WSL reaches the harness's own authority files |
-| **SS2** | **Input is blocked while a background or monitor session is live, and the kill switch is not.** A plain prompt and every command refused while `_busy` are refused, between turns too; modal answers, non-interruptive commands, a kill command and key, and quit stay usable. After a set number of consecutive wakes with no user input, waking stops, the plain-prompt block lifts, and held results arrive with the user's next message |
+| **SS2** | **Input is blocked while a background or monitor session is live, and the kill switch is not.** A plain prompt and every command refused while `_busy` are refused, between turns too; modal answers, non-interruptive commands, a kill command and key, and quit stay usable. After a set number of consecutive wakes with no user input, waking stops, the plain-prompt block lifts, and held results arrive with the user's next message **Amended in batch 265 (2026-11-16), the owner's choice:** live sessions no longer hold a plain message back. While the post-turn wait is between replies, a message the user sends is taken; the wait ends with the sessions still running, the message gets a turn of its own, and whatever lands meanwhile wakes after it -- never two turns at once. Sent while a wake turn runs, it is refused as during any turn (`Still working`, the text left in the box). Sent just as a result arrives, the message goes first: the batch the wait had just taken goes back (`SessionManager.put_back`) and wakes after the message's turn. The commands that would change what the wait is waiting for -- another thread, another model, a compaction, a research run, a provider -- are still held, with the same message and ctrl+b as the way out. Both shells: the CLI's wait shows `You:`, a line typed there runs as one typed at the prompt and the wait resumes after a command, the commands the TUI holds are refused there too (`cli_commands.REFUSED_WHILE_WAITING`, held to the TUI's refusal sites by an AST guard), and Ctrl+C still stops the sessions. The block was measured wrong in use: `shell_background` returns at once, and the user then watched a wait they could not type into for as long as the command ran. The same batch found both waits spinning when an interactive shell was the only session open, against SS25: 37,154 `wait_for_wake` calls in two seconds on the TUI's worker and 38,195 on the CLI's, the turn held open until the shell's idle timeout. Both now count `waited_on`, the background and monitor sessions alone |
 | **SS3** | **Sudo is harness-run elevation only.** The agent marks a command as needing root and the harness runs it through sudo with the password on sudo's stdin -- never argv, the environment, or a shell the agent controls, where a fake prompt or a `sudo` function captures it. Approval follows `shell_approval_mode` |
 | **SS4** | **Slices, in order:** background and monitor; interactive; WSL; SSH; sudo |
 | **SS5** | **A wake is a persisted harness turn.** A user-role `MessageLog` row marked by a column (batch 91's rule: a column, never a role) starts a turn. Resume and compaction see an ordinary turn; the transcript draws a harness line, not `you ›`; the content passes the real `check_output_policy`; the row never carries `tool_call_id` |
@@ -3064,6 +3066,160 @@ leaked PID.
   `AGENTS.md` names by name.
 ---
 
+## §97. Usage figures: the rate's clock, thoughts, k/M/B and `/usage`
+
+**Added and built in batch 264, from the owner's report** (2026-11-15). Running 0.3.14, the owner
+saw the completion line's `tok/s` read far below what the model wrote, `billed` read in
+thousands past a million, and asked where the cache counts were.
+
+### What was measured (2026-11-15)
+
+- **The completion rate divided by the whole turn.** `TurnMeter.completion` divided the
+  provider's output count by `elapsed`, which counts tool time. Batch 118 took tool time out of
+  the LIVE figure only. A turn that starts background sessions is also held open until they
+  finish (SS2): `TurnFinished` is posted after `_wait_for_sessions`, so `elapsed` held every
+  second spent waiting between the wake turns too.
+- **And its count was the last wake turn's.** Each wake turn is a run of its own with its own
+  terminal response, and `_turn_output_tokens` was assigned from each, so the line divided the
+  last wake turn's count by a time that covered every one. Found in this batch.
+- **Google's output left out the thoughts.** The branch read `candidates_token_count`. The
+  pinned google-genai 2.34.0 documents `total_token_count` as prompt plus candidates plus
+  tool-use prompt plus thoughts, so thoughts are outside the candidates, and a thinking model's
+  output, rate and `billed` all read short by them.
+- **`billed` had one unit.** `UsageLine` wrote every figure as `n / 1000` with a `k`.
+- **No cache count was read.** Each pinned SDK reports one (anthropic 2.5.0, openai 3.45.0,
+  google-genai 2.34.0): the Anthropic `Usage` carries `cache_read_input_tokens` and
+  `cache_creation_input_tokens`; OpenAI's chat `prompt_tokens_details` and the Responses API's
+  `input_tokens_details` carry `cached_tokens` and `cache_write_tokens`; Google carries
+  `cached_content_token_count`. Google's `prompt_token_count` is documented as including the
+  cached content, and OpenAI's cached tokens are documented as present in the prompt. The
+  Anthropic SDK's own tracing reports a message's input as `input_tokens` plus both cache counts,
+  so its `input_tokens` leaves them out. The harness sends no cache markers, so on that branch
+  both counts are zero or absent today.
+
+### Decisions (UF1-UF5)
+
+| # | Decision |
+|---|---|
+| **UF1** | **The completion line's rate divides by generating time, and `took` stays the turn's time** (owner: both). `TurnMeter.generating` leaves out tool time, the human wait and the session wait, which `set_waiting` pauses, driven by `SessionWait` messages that `_wait_for_sessions` posts when it starts waiting and when a wake turn begins. One pause window serves a tool and the wait, and `set_blocked` keeps it disjoint from a modal, as batch 118 did for tools. The line's count is SUMMED over the turn's terminal responses, wake turns included, and cleared when a turn starts |
+| **UF2** | **Google's output is its candidates plus its thoughts.** Each field keeps its own last report, as batch 147 made the rule, and the two are added once at the end of the stream. One reported without the other is still a count, so a reply that was all thoughts is not D21's missing count |
+| **UF3** | **One k/M/B formatter for the usage line** (owner: the usage line). `tui.meters.short_count` writes `950`, `118k`, `1.2M`, `12M`, `1.5B`: one decimal below ten of a unit, and a figure that rounds up to a thousand of its unit in the next one. `/window` and `/trigger` still echo the number typed, and the CLI keeps its exact figures |
+| **UF4** | **`/usage`, in both shells, shows four provider-reported rows for this thread since it was opened** (owner: this thread; the names input, cache read, cache write and output). That is the span of the usage line's `billed`: `ConversationMemory.record_usage` sits beside `record_billed`, not persisted. A cache count is in a usage dict only when reported, and `ModelResponse.usage_unreported` names each input or output count that `_stream_usage` coerced to 0, so a row says "not reported", or "reported on N of M calls", instead of printing a zero. The CLI builds a memory per turn, so `run_agent_conversation` and `wake_conversation` hand theirs back as `ModelResponse.turn_usage`, and `ChatSession.count_usage` adds them up |
+| **UF5** | **Input is the whole prompt on every branch** (owner: add them in). The Anthropic branch adds its cache reads and writes to `input_tokens`, which leaves them out; the other branches' input counts already include their cache. So `billed`, `ctx` and the compaction trigger mean one thing on every provider, and `/usage` notes that the cache rows are part of input. A cache count alone is not an input count: an input the provider did not send is still D21's to judge |
+
+UF1's two clocks, UF3's reach, UF4's span and names, and UF5 are the owner's choices. The
+summed count, UF2's per-field rule, UF3's rounding and UF4's "reported on" wording are adopted
+defaults the owner may overturn.
+
+### What §97 deliberately does not change
+
+- **The live figure.** It already divided by `generating` (batch 118), and now the session wait
+  leaves it too, through the same pause.
+- **The CLI's per-turn line.** It prints `billed` and `ctx` with commas, exactly, and has no rate.
+- **Pricing.** Every figure is a raw count, as batch 27 decided. A cache read is cheaper than other
+  input on most providers, and `/usage` does not say by how much.
+
+### Built (batch 264)
+
+- **`tui/meters.py`**: `set_waiting`, one rate pause through `_sync_pause`, `completion(...,
+  generating)` and `short_count`.
+- **`tui/app.py`**: `SessionWait` from `_wait_for_sessions`, the summed count, `/usage`.
+- **`tui/widgets.py`**: the usage line through `short_count`.
+- **`core/client.py`**: `_stream_usage` returns the coerced keys, `CACHE_COUNTS`,
+  `_GOOGLE_COUNTS`, `_sum_reported`, `_whole_prompt`, and each branch's cache read.
+- **`core/usage_view.py`**: `UsageTally` and `report_lines`, for both shells.
+- **`core/memory.py`, `core/loop.py`, `core/commands.py`, `cli_commands.py`, `main.py`**: the
+  tally beside `billed`, the turn's tally on the response, `/usage` in the catalog and the CLI,
+  and the CLI's chat and wake turns counted.
+
+77 tests: `tests/test_meters.py`, `tests/test_usage_view.py`, `tests/test_client_streaming.py`,
+`tests/test_chatgpt_client.py`, `tests/test_sdk_conformance.py` (the pinned SDKs' fields through
+the wire parse path, and the Anthropic SDK's own tracing), `tests/test_spend_and_size.py`,
+`tests/test_tui.py` and `tests/test_session_tui.py`.
+
+### Gap register
+
+- **Not measured against a live provider.** The cache and thought reads are driven against the
+  pinned SDKs' own types and parse paths, not a live response with caching on.
+- **An OpenAI-compatible provider that spells its cache counts some other way** reports none,
+  and `/usage` says "not reported" for it.
+- **Google's `tool_use_prompt_token_count`** (input from the provider's own tool runs) is not
+  added to input. The harness calls no provider-side tools.
+- **A CLI turn that raises** returns no response, so its calls are not in the CLI's `/usage`.
+  The TUI's memory records them.
+
+---
+
+## §96. The container's `/workspace`, read by the file tools
+
+**Added and built in batch 263, from the owner's report** (2026-11-15). Running 0.3.14 in WSL,
+with the shell in a container, the owner saw the shell work in `/workspace/...` while `read` and
+`write` were handed those same paths, asked to leave the workspace, and then failed.
+
+### What was measured (2026-11-15)
+
+- **The two halves see different machines.** The container mounts the workspace with
+  `-v <workspace>:/workspace -w /workspace` (`security/sandbox.py`), so `pwd` and every path a
+  build prints there begin `/workspace`. The file tools run on the host. `resolve_path` joined the
+  path onto the workspace with `os.path.join`, which keeps an absolute path as it is, so
+  `/workspace/notes.txt` stayed `/workspace/notes.txt` on POSIX and became
+  `C:\workspace\notes.txt` on Windows.
+- **So every such call asked, then failed.** A path outside the workspace always asks (ROADMAP
+  §6, which the owner kept on 2026-11-15). After a yes, `read` found no such file and `write` hit a
+  permission error: in WSL, `/` is not writable and `/workspace` does not exist.
+- **The model is told the spelling whatever the runtime.** `shell`'s description says the
+  workspace is mounted at `/workspace`. `shell_background`, `shell_monitor` and
+  `shell_interactive` start their commands in the same container.
+- **Live, in WSL with Podman** (batch 263). The real sandbox's `pwd` printed `/workspace`. With
+  the shell tools off, `read` of `/workspace/notes.txt` asked and then found no such file. With
+  them on, it read the file without asking, and a `write` to `/workspace/made.txt` was visible
+  to `cat` inside the container.
+- **The shell has the same gap from its side.** Measured on Windows and in WSL:
+  `cat /workspace/notes.txt` classifies `HOST_READ` and routes to the host, where the path is not
+  the workspace, while `cat notes.txt` is `INERT` and runs in the container. §96 leaves the shell
+  alone (see below).
+
+### Decisions (CW1-CW3)
+
+| # | Decision |
+|---|---|
+| **CW1** | **`/workspace/x` is `<workspace>/x` to `read`, `write`, `edit` and `view_image` while a tool that starts commands is enabled** (owner: map it, gated on the shell being enabled). Those tools are `APPROVAL_BY_SHELL_MODE`, asked through `is_tool_allowed`, so a shared hosted deployment, which refuses them, maps nothing. There is no runtime probe: the model learns the spelling from the tool descriptions, which say it whatever a probe would find, and a probe here could put up to 10 s per CLI on the TUI's UI thread, where a `write`'s diff resolves its path. The map lives in `file_ops.resolve_path`, so the approval check, the four handlers, the protected deny and the TUI's diff all resolve the path the same way. The mount point is one constant, `sandbox.CONTAINER_WORKSPACE`, which the container's `-v` and `-w` read too |
+| **CW2** | **Only the container's spelling of a workspace file is mapped.** `/workspace` is a whole segment, so `/workspacefoo` is not it, and a run of slashes after it counts as one, as POSIX reads it. The host's own reading wins when it already lands inside the workspace, so a host whose workspace really lives under `/workspace` keeps its meaning. A mapped path that lands outside the workspace (through `..` or a link) is not mapped, and the call asks about the path the host reads, as before. Every other path outside the workspace still asks (owner: keep asking, so no tool says whether a file exists before a yes) |
+| **CW3** | **The protected deny is unchanged.** `/workspace/.venastine/...` maps onto the workspace's own `.venastine/` and is refused before approval, in the words a relative path gets. The deny reads the mapped path, so a hard link inside the workspace to a protected file, named through the mount, is refused as well |
+
+CW1's gate and map are the owner's choice. CW2's two host rules and CW3 are adopted defaults the
+owner may overturn.
+
+### What §96 deliberately does not change
+
+- **The shell's classifier.** `cat /workspace/x` still reads as leaving the workspace, and runs
+  on the host after a prompt. The classifier reads tokens on the host and does not parse
+  (ROADMAP_v2 §28, G2), and mapping a token there would change what the gate auto-approves, which
+  wants its own decision. Recorded as `TECHNICAL_DEBT` 119.
+- **The tool descriptions.** `path` still says relative to the workspace, or absolute. The
+  change makes the spelling the model already uses work, and tells it nothing new.
+- **The WSL and SSH backends.** They run on the user's machine or a remote one, and mount
+  nothing.
+
+### Built (batch 263)
+
+- **`security/sandbox.py`**: `CONTAINER_WORKSPACE`, read by `_docker_argv`.
+- **`tools/builtin/file_ops.py`**: `resolve_path` maps the container's spelling, through
+  `_container_remainder`, `_shell_starts_commands` and `_inside`.
+
+19 tests in `tests/test_file_ops.py`, against a real workspace on disk, on Windows and in WSL:
+the four handlers, the approval check, `registry.dispatch` with no approval callback, the
+protected deny and a hard link to a protected file reached through the mount, each tool that turns the map on, and each rule in CW2.
+
+### Gap register
+
+- **Not driven in the owner's own install.** The live check used this branch's code against the
+  real sandbox, in WSL with Podman. The TUI's diff was not driven, and it reads `resolve_path`
+  as the handlers do.
+- **The shell side** is `TECHNICAL_DEBT` 119.
+
+---
+
 ## §95. A reply that was all reasoning
 
 **Added and built in batch 256, from the owner's report** (2026-11-14). On a WSL install, one
@@ -3117,18 +3273,19 @@ install's `app.db` and `app.log`, and fixed in a pull request if it was the harn
   with nothing after it, and a turn with several calls holds them back to back. The owner also
   reports a cost beyond the pause: the model carries on as though its unrun writes and
   commands took effect, then spends calls finding out what did. That is the belief the
-  ask's first line, "nothing ran", corrects.
+  ask's first line corrects: "nothing ran" as built, "nothing in that reply ran" since RO2 was
+  amended in batch 261.
 
 ### Decisions (RO1-RO8)
 
 | # | Decision |
 |---|---|
 | **RO1** | **A reasoning-only reply** is readable reasoning, through replay's own reader, with no text (whitespace counts as none) and no tool call. A step whose record holds only `redacted_thinking` or a signature lost nothing anyone could read, and completes exactly as before |
-| **RO2** | **The loop asks once per run** (owner: a notice and one nudge). A harness row says nothing ran and that a call written inside reasoning is not run, and the next step runs. A second reasoning-only reply, or one on the last step `max_steps` allows, ends the turn as `complete` with a notice. The ask is a billed step and counts against `max_steps`; the budget stop stays above it, so an exhausted turn is not asked |
+| **RO2** | **The loop asks once per run** (owner: a notice and one nudge). A harness row says nothing ran and that a call written inside reasoning is not run, and the next step runs. A second reasoning-only reply, or one on the last step `max_steps` allows, ends the turn as `complete` with a notice. The ask is a billed step and counts against `max_steps`; the budget stop stays above it, so an exhausted turn is not asked **Amended in batch 261 (2026-11-15), the owner's choice:** the row's first line says "nothing in that reply ran. Results returned before it are real." instead of "nothing ran". The owner had seen the ask follow a reply that was only thinking, with no call written in it, and was concerned that a bare "nothing ran" could leave the model unsure whether the calls earlier in the turn had gone through. Scoped to the reply, the line keeps the correction it was chosen for, and says the turn's earlier results stand |
 | **RO3** | **The ask is a user row that opens no turn.** Its harness record carries `mid_turn: true`, and `storage.starts_turn` is the one rule for which user rows open a turn. Six readers had spelled it `role == "user"`, and each now calls it: the turn list behind `completed_turns`, `compactable_span`'s fold boundaries, the pin cap, the request a cut turn reopens with, and the row a failure is recorded on, in storage and in memory. Read as a turn start, the ask moves the current-turn floor past the turn's own earlier steps while the turn runs -- the floor the mid-turn compaction valve calls safe by construction -- and a cut turn would reopen with the ask instead of the request |
 | **RO4** | **Nothing is parsed out of reasoning.** Call markup there is not run, and `</thinking>` is not split at. The markup is each model's own, and a call the harness lifted from text would be one the model never made through the interface. The provider's own parser, which knows the markup, is the place to recover such a call. This decision first also said reasoning is not a commitment, and the later snapshot showed that was wrong here: the lost calls were complete and ended their generations, so they were calls, not drafts. Measured, the split would not have run the call anyway |
 | **RO5** | **Shown where it happened, the way replay shows it.** The ask's first line is the live notice's text: the TUI draws it in the `wake` role and the CLI prints it as `Harness:`, which is how replay draws the row. The CLI prints the step the notice describes first, and `finish` does not print it again. The end notice is an ordinary system line and, like every notice, is not replayed |
-| **RO6** | **The research JSON retry calls an empty reply empty.** It says there was no text at all, that reasoning is not part of the response, and that a call written there is not run, instead of quoting nothing under "Start of your failed output" |
+| **RO6** | **The research JSON retry calls an empty reply empty.** It says there was no text at all, that reasoning is not part of the response, and that a call written there is not run, instead of quoting nothing under "Start of your failed output" **Amended in batch 267 (2026-11-16), the owner's choice:** the two prose passes get the same recovery. The owner saw a research pass whose model replied with reasoning only twice. RO2 ended that turn `complete` with no text, which in chat ends one turn a person is watching. In Pass 1 it handed Pass 2 nothing: measured on the current code, the run wrote an empty `01_raw_response.md` and an empty `report.md`, extracted no claims, and was marked complete. The JSON passes were never exposed, because an empty reply does not parse. Now Pass 1, each ensemble candidate and Final synthesis are asked again in their own thread when they come back with no text (`retry_until_text`), up to `max_json_retries` times, in this row's wording without its JSON half. Still empty, the pass fails saying why, and the run is marked failed. An empty ensemble candidate is skipped like a failed one, and an empty §20 re-synthesis is contained like a failed one, so the run keeps the report its passes produced. RO2 is unchanged: the loop still ends its turn, and the pass is what asks again |
 | **RO7** | **`echoes_reasoning` stays opt-in per provider**, so §44 WS4 is unchanged. On an OpenAI-compatible provider that does not echo, the first reasoning-only reply logs one WARNING per (provider, model) naming the flag. The flag is read with the truthiness the request itself gives it |
 | **RO8** | **The pipeline trace labels a notice by what it is.** A compaction notice keeps `compaction during <pass>`, and every other notice reads `notice during <pass>`. Before, every notice was called a compaction, `todo_write`'s and `approval_reused` included |
 
@@ -3168,6 +3325,15 @@ which a sibling test caught first, was re-run against its own test and killed th
   ask; the tests drive a scripted provider. A plain instruction did not stop the behaviour (four
   more lost turns in 34 minutes), so the ask is expected to recover each occurrence, not to
   prevent the next.
+- **Batch 267: a prose pass's corrective attempts are not streamed.** They share the JSON
+  passes' two §26 limits: a tool call one makes produces no `tool_call` event, and a page one
+  fetches reaches no corpus, so a source cited only from such a fetch scores with
+  `similarity_method: "llm"`. Pass 1 fetches more than any other pass, so the limit now applies
+  where it costs most.
+- **Batch 267: one corrective attempt can cost two model calls.** Each is a fresh
+  `continue_conversation` run and gets RO2's own ask, so a pass that never answers spends six
+  calls at the default `max_json_retries: 2`. Whether the corrective recovers the measured model
+  is not measured: the tests drive the real loop under a scripted provider.
 - **A reasoning-only reply cut off by the token limit is asked about the same way.**
   `ModelResponse` carries no provider finish reason, and a step cut off mid-reasoning gets the
   same ask, which is still a reasonable thing to ask.
@@ -3603,7 +3769,8 @@ now print and attach through the same helpers as their commands.
 
 **The fifteen the CLI still lacks.** Four by design: `/theme`, `/copy`,
 `/mentions` and `/kill`, the last because the CLI's prompt waits until
-background sessions finish. The other eleven are catalogued as not yet
+background sessions finish (**amended in batch 265:** it no longer waits, by SS2 as amended, and
+Ctrl+C during the wait still stops them, which is why `/kill` stays out). The other eleven are catalogued as not yet
 built, and the CLI's `/help` lists them with where to go instead. (This
 said fourteen until batch 232 counted the catalog.)
 
@@ -4888,7 +5055,9 @@ could. The bridge writes those answers at every start since
   `google-genai` wants `>=13` -- and has no `gr.Server`. 6.30.0 resolves, but
   its `mcp` extra wants `mcp<2` and `pydantic<=2.12.5` against the harness's
   deliberate `mcp==2.0.0` and `pydantic==2.13.4`. One environment would run
-  the hosted harness on versions CI never tests (HD2, amended).
+  the hosted harness on versions CI never tests (HD2, amended). Re-measured
+  on 6.32.0 in batch 262: its `mcp` extra still caps pydantic at 2.12.5,
+  against the harness's 2.14.2.
 - **A ZeroGPU Space runs as root**: uid 0, `HOME=/root` at mode 700, an Amazon
   Linux 6.18 kernel on x86_64, and Docker's default capabilities less
   `NET_RAW` -- `DAC_OVERRIDE`, `KILL`, `SETUID` and `SETGID` among them,
@@ -5041,7 +5210,19 @@ Batch 166 deployed the same bundle to a private Studio,
    where a deploy can be confirmed. With this slice §79 is complete; the
    public flip of the two deployments is the owner's. Batch 170 closed
    the one gap this slice had stated: an open high or critical code
-   scanning alert on `main` now holds the deploy (HD9).
+   scanning alert on `main` now holds the deploy (HD9). **Amended in
+   batch 262 (2026-11-15), the owner's call:** three more pillow 12.3.0
+   advisories (PYSEC-2026-4363, CVE-2026-128066, CVE-2026-128067, fixed
+   in 13.0.0) refused every deploy from 2026-11-14. Gradio 6.32.0, released
+   2026-11-12, is the first to allow pillow 13 (`pillow<14`), so
+   `GRADIO_VERSION` moved to it and the bridge resolves pillow 13.0.0. The
+   four accepted entries, 39 IDs in all, were removed: `ACCEPTED` is empty,
+   and the audit refuses every finding until one is triaged again.
+   Measured with the deploy's own uv 0.13.4 and pip-audit 2.10.1 first:
+   - `gr.Server` and its module are unchanged;
+   - the Space's install line resolves with 6.32.0 in it;
+   - pip-audit finds nothing in that set or in the bridge's;
+   - a dry run of each platform built, scanned and audited clean.
 
 ### What §79 deliberately does not change
 

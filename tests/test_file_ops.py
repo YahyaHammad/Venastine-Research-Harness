@@ -1012,3 +1012,186 @@ class TestAHardlinkCannotReachTheProtectedFile:
         assert "error" in result and "resolves into" in result["error"]
         assert _raw(protected) == b'{"original": true}'
 
+
+# ===========================================================================
+# ---- ROADMAP_v3 §96: the container's `/workspace` is the workspace --------
+# ===========================================================================
+
+def _shell_tools(monkeypatch, *enabled):
+    """Turn on exactly *enabled* of the tools that start shell commands,
+    and leave every other permission as config.yaml has it."""
+    from security.permissions import APPROVAL_BY_SHELL_MODE
+
+    permissions = config.ToolPermissions()
+    for name in APPROVAL_BY_SHELL_MODE:
+        setattr(permissions, name, name in enabled)
+    monkeypatch.setattr(config, "ToolPermissions", lambda: permissions)
+
+
+def _no_approvals(monkeypatch, **forced):
+    """No file tool asks inside the workspace, except those in *forced*.
+    A real instance, because importing the registry checks every field."""
+    approvals = config.ToolApprovals()
+    for name in ("read", "write", "edit", "view_image"):
+        setattr(approvals, name, forced.get(name, False))
+    monkeypatch.setattr(config, "ToolApprovals", lambda: approvals)
+
+
+class TestTheContainerSpellingIsTheWorkspace:
+    """The owner's 2026-11-15 report: the shell, in the container, showed
+    `/workspace/...`; `read` and `write` were handed those paths, asked to
+    leave the workspace, and then failed -- `/workspace` does not exist on
+    the host, where these tools run. CW1-CW3 map the container's spelling
+    back to the workspace in `resolve_path`, the one place every file tool
+    and the TUI's diff resolve a path."""
+
+    @pytest.fixture(autouse=True)
+    def _shell_on(self, workspace, monkeypatch):
+        _shell_tools(monkeypatch, "shell")
+        _no_approvals(monkeypatch)
+
+    def test_read_finds_the_workspace_file(self, workspace):
+        _write(workspace, "notes.txt", "seen from the container")
+        result = file_ops.read_run({"path": "/workspace/notes.txt"})
+        assert result.get("content") == "seen from the container", result
+
+    def test_write_lands_in_the_workspace(self, workspace):
+        result = file_ops.write_run(
+            {"path": "/workspace/out/new.txt", "content": "made here"})
+        assert "error" not in result, result
+        with open(os.path.join(workspace, "out", "new.txt"),
+                  encoding="utf-8") as f:
+            assert f.read() == "made here"
+
+    def test_edit_changes_the_workspace_file(self, workspace):
+        full = _write(workspace, "e.txt", "old line")
+        result = file_ops.edit_run({"path": "/workspace/e.txt",
+                                    "old_text": "old", "new_text": "new"})
+        assert "error" not in result, result
+        with open(full, encoding="utf-8") as f:
+            assert f.read() == "new line"
+
+    def test_the_approval_check_reads_it_as_inside(self, workspace):
+        """The prompt the owner saw, gone: inside the workspace a call is
+        auto-approved unless its ToolApprovals boolean says otherwise."""
+        _write(workspace, "notes.txt", "x")
+        assert file_ops._file_approval_check(
+            "read", {"path": "/workspace/notes.txt"}) is False
+
+    def test_the_registry_writes_it_without_asking(self, workspace):
+        """The owner's symptom at the layer that asks: dispatch with no
+        approval callback raises ToolCallDenied for a call that needs one."""
+        from tools.registry import registry
+
+        # The instance _shell_tools installed, so `write` may be called.
+        config.ToolPermissions().write = True
+        result = registry.dispatch(
+            "write", {"path": "/workspace/w.txt", "content": "x"})
+        assert "error" not in result, result
+        assert os.path.isfile(os.path.join(workspace, "w.txt"))
+
+    def test_a_tool_set_to_ask_still_asks(self, workspace, monkeypatch):
+        """Mapped means inside, not approved: the boolean still decides."""
+        _no_approvals(monkeypatch, write=True)
+        assert file_ops._file_approval_check(
+            "write", {"path": "/workspace/notes.txt", "content": "x"}) is True
+
+    def test_the_mount_point_itself_is_the_workspace_root(self, workspace):
+        assert file_ops.resolve_path("/workspace") == file_ops.WORKSPACE_ROOT
+
+    def test_a_doubled_slash_stays_inside(self, workspace):
+        """POSIX reads `/workspace//x` as `/workspace/x`; os.path.join
+        would read the second slash as a new root and land on `/x`."""
+        assert file_ops.resolve_path("/workspace//notes.txt") == os.path.join(
+            file_ops.WORKSPACE_ROOT, "notes.txt")
+
+    def test_the_protected_segment_is_still_refused(self, workspace):
+        """CW3. Mapped onto the workspace, `.venastine/` is the workspace's
+        own protected directory, and the deny answers before approval."""
+        path = "/workspace/.venastine/mcp.json"
+        refusal = file_ops._refusal_for("write")({"path": path, "content": "x"})
+        assert refusal is not None and "resolves into" in refusal
+        result = file_ops.write_run({"path": path, "content": "x"})
+        assert "error" in result and "resolves into" in result["error"]
+        assert not os.path.exists(
+            os.path.join(workspace, ".venastine", "mcp.json"))
+
+    def test_a_hard_link_reached_through_the_mount_is_refused(self, workspace):
+        """CW3, the case the segment test alone cannot see. The name carries
+        no `.venastine`, so only the MAPPED path shows the deny it is the
+        protected file under another name. A deny that resolved the path for
+        itself would look at the host's `/workspace/notes.md`, find nothing,
+        and let the read through to the file the map then opens."""
+        protected = _put_bytes(workspace,
+                               os.path.join(".venastine", "settings.json"),
+                               b'{"secret": "value"}')
+        try:
+            os.link(protected, os.path.join(workspace, "notes.md"))
+        except OSError:                                   # pragma: no cover
+            pytest.skip("hardlinks unavailable here")
+        result = file_ops.read_run({"path": "/workspace/notes.md"})
+        assert "content" not in result, result
+        assert "hard link" in result["error"]
+
+    def test_a_name_that_only_starts_the_same_is_not_the_mount(self, workspace):
+        """The mount point is a whole segment, for the reason
+        TestSiblingDirectoryPrefix gives about the workspace itself."""
+        _write(workspace, "x.txt", "x")
+        assert not file_ops._is_within_workspace("/workspacefoo/x.txt")
+        assert file_ops._file_approval_check(
+            "read", {"path": "/workspacefoo/x.txt"}) is True
+
+    def test_leaving_the_mount_keeps_the_host_reading(self, workspace):
+        """CW2. A mapped path that lands outside the workspace is not
+        mapped at all: the call asks, as it did, about the path the host
+        reads -- not about a sibling of the workspace nobody named."""
+        path = "/workspace/../outside.txt"
+        assert file_ops.resolve_path(path) == os.path.realpath(
+            os.path.join(file_ops.WORKSPACE_ROOT, path))
+        assert file_ops._file_approval_check("read", {"path": path}) is True
+
+    def test_nothing_is_mapped_while_no_shell_tool_is_enabled(
+            self, workspace, monkeypatch):
+        """CW1. With no tool that starts a command, the model has not been
+        told about `/workspace`, so it stays an outside path that asks."""
+        _shell_tools(monkeypatch)
+        _write(workspace, "notes.txt", "x")
+        assert not file_ops._is_within_workspace("/workspace/notes.txt")
+        assert file_ops._file_approval_check(
+            "read", {"path": "/workspace/notes.txt"}) is True
+
+    @pytest.mark.parametrize("starter", ["shell", "shell_background",
+                                         "shell_monitor", "shell_interactive"])
+    def test_any_tool_that_starts_a_command_turns_it_on(
+            self, workspace, monkeypatch, starter):
+        """A background session runs in the same container as `shell`."""
+        _shell_tools(monkeypatch, starter)
+        assert file_ops._is_within_workspace("/workspace/notes.txt")
+
+    def test_a_deployment_that_refuses_the_shell_maps_nothing(
+            self, workspace, monkeypatch):
+        """Asked through is_tool_allowed, so a shared hosted deployment --
+        which refuses every shell tool whatever config.yaml says -- maps
+        nothing either."""
+        from security import hosted
+
+        monkeypatch.setattr(hosted, "MODE", hosted.SHARED)
+        assert not file_ops._is_within_workspace("/workspace/notes.txt")
+
+    def test_a_host_workspace_under_the_mount_keeps_its_meaning(
+            self, tmp_path, monkeypatch):
+        """CW2. A host whose workspace really lives below a directory
+        spelled like the mount point -- `/workspace/project` on a hosted
+        IDE -- must not have `/workspace/project/x` doubled into
+        `/workspace/project/project/x`. The host has no `/workspace` here,
+        so the mount point is moved to the workspace's parent to make the
+        two spellings meet."""
+        parent = tmp_path / "mnt"
+        ws = parent / "project"
+        ws.mkdir(parents=True)
+        monkeypatch.setattr(file_ops, "WORKSPACE_ROOT", os.path.realpath(ws))
+        monkeypatch.setattr(file_ops, "CONTAINER_WORKSPACE", parent.as_posix())
+        path = f"{parent.as_posix()}/project/notes.txt"
+        assert file_ops.resolve_path(path) == os.path.join(
+            os.path.realpath(ws), "notes.txt")
+

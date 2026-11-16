@@ -187,6 +187,14 @@ DIFF_SNAPSHOT_MAX_BYTES = 512_000
 #: to guess at.
 QUIT_CONFIRM_S = 2.0
 
+#: Where the turn worker's post-turn session wait is (ROADMAP_v3 §49, SS2
+#: as amended in batch 265): between replies, where a message the user
+#: sends is taken and gets a turn of its own, or inside a wake turn, where
+#: it is refused as it is during any turn. None (`_wait_phase`'s default)
+#: means the worker is not waiting at all.
+_WAIT_IDLE = "idle"
+_WAIT_WAKE = "wake"
+
 
 class LoopEventMessage(Message):
     """One LoopEvent, forwarded from the worker thread to the UI thread.
@@ -343,6 +351,22 @@ class SessionNote(Message):
     def __init__(self, role: str, text: str) -> None:
         self.role = role
         self.text = text
+        super().__init__()
+
+
+class SessionWait(Message):
+    """The turn worker began (or stopped) waiting on its background
+    sessions (ROADMAP_v3 §97, UF1).
+
+    Posted by `_wait_for_sessions` for the meter, which runs on the UI
+    thread: the seconds between wake turns are the shell waiting, not the
+    model writing, so the completion line's rate leaves them out. FIFO from
+    the one worker, like SessionNote, so a wake turn's events always land
+    after the `False` that resumes the clock for them.
+    """
+
+    def __init__(self, waiting: bool) -> None:
+        self.waiting = waiting
         super().__init__()
 
 
@@ -869,6 +893,20 @@ class VenastineApp(App):
     # setter runs on bare-built apps across the suite.
     _pending_restart = None
 
+    # Batch 265 (SS2 as amended). The post-turn session wait's phase
+    # (`_WAIT_IDLE`, `_WAIT_WAKE`, or None when the worker is not waiting)
+    # and the message the user sent while it was idle, which the wait hands
+    # to a turn of its own once the worker is free. Both change under
+    # `_wait_lock`, because the UI thread takes a message on the strength
+    # of the phase and the worker starts a wake on the strength of the
+    # message, and those two decisions must not cross. CLASS attributes for
+    # `_shutting_down`'s reason -- bare-built apps run the wait loop and the
+    # submit handler across the suite -- with a class-wide lock that
+    # __init__ replaces with the instance's own.
+    _wait_phase = None
+    _handed_message = None
+    _wait_lock = threading.Lock()
+
     # §79 (HD5). The stop signal of the one sign-in that may be waiting for
     # approval, or None. A CLASS attribute for `_shutting_down`'s reason:
     # `on_unmount` and `exit()` stop it, and both run on bare-built apps
@@ -887,6 +925,7 @@ class VenastineApp(App):
     _meter_timer = None
     _meter_last = None
     _last_turn_elapsed = None
+    _last_turn_generating = None
     _turn_output_tokens = None
     _history = None
     # ROADMAP_v3 §61 (CN9). The live turn's CancelToken, or None between
@@ -1104,6 +1143,9 @@ class VenastineApp(App):
         # Per-thread state: `reset()`'s list, beside `_spawn_threads`.
         self._session_calls: dict = {}
         self._permission_channel: queue.Queue | None = None
+        # Batch 265: this app's own, rather than the class-wide default
+        # bare-built apps share.
+        self._wait_lock = threading.Lock()
         # Batch 61. BEFORE the `_busy` assignment below, which is a
         # property setter now and drives this object.
         self._meter = meters.TurnMeter()
@@ -1115,6 +1157,10 @@ class VenastineApp(App):
         #: at the exits, because `_busy` is also cleared on paths
         #: where no turn ever ran.
         self._last_turn_elapsed = None
+        #: The same turn's seconds with no tool running and no session
+        #: wait: the completion line's rate divides by this, `took` by
+        #: the one above (ROADMAP_v3 §97, UF1).
+        self._last_turn_generating = None
         #: The finished turn's OUTPUT tokens, off the terminal
         #: response. None where the provider reports no usage, which
         #: is twelve of the fifteen configured ones -- and None is
@@ -1645,7 +1691,13 @@ class VenastineApp(App):
         now = monotonic()
         if value:
             self._meter.start(now)
+            # §97 (UF1). Summed per terminal response since this batch, so
+            # it starts at the turn: a count left by a turn whose line was
+            # never written must not join the next one's.
+            self._turn_output_tokens = None
         else:
+            # Read BEFORE stop, which closes the turn and zeroes it.
+            self._last_turn_generating = self._meter.generating(now)
             self._last_turn_elapsed = self._meter.stop(now)
         self._sync_meter_timer()
         self._refresh_meter()
@@ -1664,8 +1716,17 @@ class VenastineApp(App):
         """
         return getattr(self._memory, "thread_id", None)
 
-    def refuse_if_occupied(self, action: str) -> bool:
+    def refuse_if_occupied(self, action: str, *, by_sessions: bool = True
+                           ) -> bool:
         """Whether `action` must be refused right now, saying why.
+
+        `by_sessions=False` is a plain MESSAGE's question since batch 265
+        (SS2 as amended, the owner's choice): live sessions do not hold a
+        message back, only a running turn does. A message sent while the
+        wait is between replies never reaches this -- `_hand_to_wait`
+        takes it first -- so what this still refuses for one is a turn
+        actually running, a wake turn included, with the words any turn
+        gets.
 
         SS2 gives the shell a SECOND way to be occupied. Before this, one
         condition (`_busy`) was checked at eight sites with the same three
@@ -1688,8 +1749,12 @@ class VenastineApp(App):
         are typed into it.
         """
         thread_id = self._session_thread
-        if thread_id is not None and shell_sessions.sessions.blocks(thread_id):
-            live = shell_sessions.sessions.live_for(thread_id)
+        if by_sessions and thread_id is not None \
+                and shell_sessions.sessions.blocks(thread_id):
+            # `waited_on`, not `live_for` (batch 265): an interactive
+            # shell does not hold the shell (SS25), so it is not one of
+            # the sessions this sentence asks the user to wait for.
+            live = shell_sessions.sessions.waited_on(thread_id)
             plural = "" if live == 1 else "s"
             self._transcript.write_error(
                 f"{live} background session{plural} still running — "
@@ -1700,6 +1765,46 @@ class VenastineApp(App):
                 "Still working — wait for this turn to finish.")
             return True
         return False
+
+    def _hand_to_wait(self, text: str) -> bool:
+        """Take a message sent while the session wait is between replies
+        (ROADMAP_v3 §49, SS2 as amended in batch 265). Whether it was taken.
+
+        TAKEN means it will run: the worker sees it, leaves the wait with
+        the sessions still running, and `on_turn_finished` starts its turn
+        -- a turn of its own, with its own clock, escape and held results,
+        because that is what the owner asked for and because it IS a user
+        turn. The results that land meanwhile wake after it (`put_back`,
+        and the wait its own turn ends in).
+
+        NOT taken while a wake turn runs, or once one message is already
+        waiting: the owner's choice is that a send then is refused as it
+        is during any turn, and the caller asks the funnel for the words.
+
+        UNDER `_wait_lock`, beside the worker's own read of it: the phase
+        is what this decides on, and the worker decides to start a wake on
+        the strength of what this writes. The nudge is outside the lock.
+        The order, wherever both are held, is `_wait_lock` and then the
+        manager's (the worker's `put_back`); `wait_for_wake` reads
+        `_handed_message` under the manager's alone, with no lock of ours.
+        """
+        with self._wait_lock:
+            if self._wait_phase != _WAIT_IDLE or \
+                    self._handed_message is not None:
+                return False
+            self._handed_message = text
+        shell_sessions.sessions.nudge()
+        return True
+
+    def _message_is_waiting(self) -> bool:
+        """`wait_for_wake`'s stop: a plain attribute read, because it is
+        called under the manager's lock."""
+        return self._handed_message is not None
+
+    def _take_handed_message(self):
+        with self._wait_lock:
+            text, self._handed_message = self._handed_message, None
+        return text
 
     def _sync_meter_timer(self) -> None:
         """Tick only while a turn is running (ThinkingIndicator's rule).
@@ -1781,9 +1886,12 @@ class VenastineApp(App):
         if elapsed is None:
             # `_busy` was cleared without a turn having run.
             return
+        generating = self._last_turn_generating
+        self._last_turn_generating = None
         self._transcript.write_role(
             'system',
-            self._meter.completion(elapsed, self._turn_output_tokens))
+            self._meter.completion(elapsed, self._turn_output_tokens,
+                                   generating))
         self._turn_output_tokens = None
 
     def refresh_status(self) -> None:
@@ -3082,8 +3190,17 @@ class VenastineApp(App):
         # Clear AFTER the busy check, not before. /research holds _busy
         # for a whole ten-pass pipeline, so a follow-up typed during one
         # was wiped and had to be retyped from memory.
-        if not text.startswith("/") and self.refuse_if_occupied(
-                "send a message"):
+        #
+        # BATCH 265 (SS2 as amended, the owner's choice). A message sent
+        # while the turn's background sessions run is no longer held back
+        # by them: between replies the wait takes it and it gets a turn of
+        # its own, and during a reply it is refused as during any turn.
+        # Taken FIRST, because `_busy` is true through the whole wait and
+        # the funnel would otherwise refuse it for that.
+        handed = (not text.startswith("/")
+                  and self._hand_to_wait(text))
+        if not text.startswith("/") and not handed and \
+                self.refuse_if_occupied("send a message", by_sessions=False):
             return
         event.prompt.value = ""
         # Batch 63. AFTER the busy refusal above, which returns without
@@ -3100,6 +3217,11 @@ class VenastineApp(App):
             # reason. Guarded on the transition because that is the only
             # time the answer changes: a history never empties.
             self.refresh_bindings()
+        if handed:
+            # The worker leaves the wait and `on_turn_finished` runs it,
+            # so nothing is drawn here: its `you ›` line is the turn's
+            # own, written when the turn starts and not before.
+            return
         if text.startswith("/"):
             name = text[1:].split(" ")[0]
             # CONTAINED HERE, not inside CommandRegistry.dispatch, and the
@@ -3315,8 +3437,11 @@ class VenastineApp(App):
 
         The wait is INSIDE the worker and before `TurnFinished`, which is
         what keeps `_busy` true across it. That is not a side effect but
-        the mechanism: SS2 wants input blocked while sessions are live, and
-        `_busy` already blocks it everywhere `refuse_if_occupied` asks.
+        the mechanism: SS2 holds the commands that would change what the
+        wait is waiting for, and `_busy` already refuses them everywhere
+        `refuse_if_occupied` asks. A plain message is the exception since
+        batch 265 (SS2 as amended): `_hand_to_wait` takes it between
+        replies, and it gets a turn of its own once this frame returns.
         """
         error = None
         try:
@@ -3347,12 +3472,38 @@ class VenastineApp(App):
         event like any other, and the loop keeps going until nothing is
         live and nothing is pending, so the results of what the user
         stopped are still delivered rather than dropped on the floor.
+
+        A MESSAGE DOES (batch 265, SS2 as amended). One sent between replies
+        is taken by `_hand_to_wait`, and the loop leaves with the sessions
+        still running so `on_turn_finished` can give it a turn of its own;
+        that turn ends in this loop again, which is where what landed in
+        the meantime wakes. The phase says which side of a reply the loop
+        is on, and it is set under `_wait_lock` because the UI thread takes
+        a message on the strength of it.
         """
+        with self._wait_lock:
+            self._wait_phase = _WAIT_IDLE
+        try:
+            self._wait_until_done(thread_id, wake)
+        finally:
+            with self._wait_lock:
+                self._wait_phase = None
+
+    def _wait_until_done(self, thread_id, wake) -> None:
+        """`_wait_for_sessions`'s loop, with its phase already set."""
         from core.session_wake import build_wake
 
         sessions = shell_sessions.sessions
+        # ROADMAP_v3 §97 (UF1). Whether the meter has been told this stretch
+        # is a wait, so it is told once per stretch rather than per second.
+        waiting = False
         while True:
-            if not sessions.live_for(thread_id) and not sessions.pending(thread_id):
+            # `waited_on`, not `live_for` (batch 265): an interactive shell
+            # is not waited on (SS25), and `wait_for_wake` already answers
+            # None at once for one -- so counting it here spun this loop
+            # for as long as the shell stayed open.
+            if not sessions.waited_on(thread_id) and \
+                    not sessions.pending(thread_id):
                 return
             # BATCH 145. The SAME rule as `sessions.closing`
             # below, one step earlier in the same teardown: the flag means
@@ -3409,7 +3560,18 @@ class VenastineApp(App):
                     "and their results will arrive with your next "
                     "message —"))
                 return
-            batch = sessions.wait_for_wake(thread_id, timeout=1.0)
+            if self._message_is_waiting():
+                # Batch 265. The user's message is next, and this loop is
+                # not where it runs: `on_turn_finished` gives it a turn.
+                # The meter may be left paused (§97 UF1), as on every
+                # return below: TurnFinished stops it, and the message's
+                # turn starts a fresh one.
+                return
+            if not waiting:
+                self.post_message(SessionWait(True))
+                waiting = True
+            batch = sessions.wait_for_wake(
+                thread_id, timeout=1.0, stop=self._message_is_waiting)
             if batch is None:
                 if sessions.suspended(thread_id):
                     # SS2's consecutive-wake limit. The block lifts here,
@@ -3423,7 +3585,19 @@ class VenastineApp(App):
                         "message —"))
                     return
                 continue
+            with self._wait_lock:
+                if self._handed_message is not None:
+                    # Batch 265. The message and this batch reached the
+                    # shell together, and the owner's rule is that the
+                    # message goes first: the batch goes back, and wakes
+                    # after the turn the message gets.
+                    sessions.put_back(thread_id, batch)
+                    return
+                self._wait_phase = _WAIT_WAKE
             text, record = build_wake(batch)
+            # §97 (UF1). The wake turn is the model writing again.
+            self.post_message(SessionWait(False))
+            waiting = False
             # ITS FIRST LINE, matching core/replay.py's rule for the same
             # row: the rest is program output the model was given, which
             # can run to thousands of lines and would bury the
@@ -3434,9 +3608,18 @@ class VenastineApp(App):
                 "wake", text.split("\n", 1)[0].strip()))
             for event in wake(text, record):
                 self.post_message(LoopEventMessage(event))
+            with self._wait_lock:
+                self._wait_phase = _WAIT_IDLE
 
     def on_session_note(self, message: SessionNote) -> None:
         self._transcript.write_role(message.role, message.text)
+
+    def on_session_wait(self, message: SessionWait) -> None:
+        """ROADMAP_v3 §97 (UF1): pause or resume the rate's clock."""
+        if self._meter is None:
+            return
+        self._meter.set_waiting(message.waiting, monotonic())
+        self._refresh_meter()
 
     def _deliver_held(self, thread_id) -> None:
         """Results held for the user's next message (§49, SS2/SS19): past
@@ -4056,8 +4239,17 @@ class VenastineApp(App):
             # input deltas a tool-using turn brings in). Dividing
             # either by a duration yields a number that looks like
             # tok/s and is not.
-            self._turn_output_tokens = getattr(
+            #
+            # SUMMED, since ROADMAP_v3 §97 (UF1): a turn held open for its
+            # background sessions ends with one line, after every wake
+            # turn, and each wake turn is a run of its own with its own
+            # terminal response. Assigning kept only the LAST wake turn's
+            # count, divided by a time that covered them all.
+            reported = getattr(
                 event.final_response, 'turn_output_tokens', None)
+            if reported is not None:
+                self._turn_output_tokens = (
+                    (self._turn_output_tokens or 0) + reported)
             transcript.flush_stream()
             if event.stop_reason and event.stop_reason != "complete":
                 transcript.write_system(f"[stopped early: {event.stop_reason}]")
@@ -4411,7 +4603,16 @@ class VenastineApp(App):
                    for worker in self.workers)
 
     def _fire_pending_restart(self) -> None:
-        """The queued restart, once the turn that blocked it has ended."""
+        """The queued restart, once the turn that blocked it has ended.
+
+        BATCH 265. Not while a turn runs: a message sent during the session
+        wait starts its turn in `on_turn_finished`, the same pass that
+        scheduled this, so by the time it fires another turn may already
+        be running. Left queued, it fires when that turn ends -- the
+        `_busy` setter schedules it again.
+        """
+        if self._busy_state:
+            return
         key, self._pending_restart = self._pending_restart, None
         if key is None or self._shutting_down:
             return
@@ -5083,6 +5284,16 @@ class VenastineApp(App):
         self._raven.state = ravens.IDLE
         if message.error is not None:
             self._write_failure(message.error)
+        # Batch 265 (SS2 as amended). A message the user sent while this
+        # turn waited on its sessions gets its turn NOW, as the last thing
+        # here: the line under the answer above is the finished turn's, and
+        # on the UI thread nothing else can run between this and the turn
+        # starting. After a failure too -- the box was cleared when it was
+        # taken, so dropping it here would lose what the user wrote. Not on
+        # the way out, where nothing will answer it.
+        handed = self._take_handed_message()
+        if handed is not None and not self._shutting_down:
+            self.run_agent_turn(handed)
 
     def _write_failure(self, error, label: str = "error") -> None:
         """A turn, a one-shot or a research run that failed, on one line.
@@ -6238,6 +6449,22 @@ def _cmd_network(app: VenastineApp, args: str) -> None:
     for line in _net_common.network_report():
         app._transcript.write_system(line)
     app.refresh_network_line(force=True)
+
+
+def _cmd_usage(app: VenastineApp, args: str) -> None:
+    """ROADMAP_v3 §97 (UF4): this thread's provider-reported counts.
+
+    The lines are `core.usage_view.report_lines`'s, which the CLI prints
+    too, over the tally `ConversationMemory.record_usage` keeps beside
+    `billed` -- so this and the usage line cover one span. `_memory`, not
+    `memory`: a thread with no turn yet has nothing to count, and the
+    public property would write a thread row to say so.
+    """
+    from core.usage_view import report_lines
+
+    memory = app._memory
+    for line in report_lines(getattr(memory, "usage", None)):
+        app._transcript.write_system(line)
 
 
 def _cmd_trigger(app: VenastineApp, args: str) -> None:
@@ -8415,6 +8642,7 @@ def register_builtin_commands() -> None:
         bind("window", _cmd_window),
         bind("trigger", _cmd_trigger),
         bind("network", _cmd_network),
+        bind("usage", _cmd_usage),
         bind("classifier", _cmd_classifier),
         bind("config", _cmd_config, complete=_config_rows),
         bind("secrets", _cmd_secrets),

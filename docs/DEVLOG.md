@@ -31584,3 +31584,636 @@ once-only drop warning. ruff, bandit (no new findings, no baseline count grew) a
 clean export are clean; the requirements files are unchanged, so pip-audit was not re-run.
 
 - **Version:** the branch's beta identity, `0.3.15-b.1.session-panel-ollama-404.r52f9026d5cb0`.
+
+## Batch 260 -- GitHub's stateless tokens are redacted and refused (2026-11-14)
+
+**Asked.** Batch 259 evaluated a GitHub persona for the harness's commits, which the
+owner then scrapped. On the way it measured a gap that stands on its own: the redactor's
+GitHub pattern, `gh[ousr]_[A-Za-z0-9]{36}`, is the classic 40-character shape, and
+GitHub's installation tokens no longer have it. So a user who pastes an installation
+token, or a tool result that carries one, reaches the model and the log unredacted. The
+brief was to re-read GitHub's documentation first, measure the shape, cover it without
+redacting ordinary text, and ask the owner whether to cover `ghu_` and `ghr_` too.
+
+**What GitHub says, read on 2026-11-14.** The docs page "Generating an installation
+access token for a GitHub App" carries a note. Since 2026-04-27, a staged rollout has
+given newly minted installation tokens a stateless format, `ghs_APPID_JWT`. Three
+changelog posts say more:
+
+- **2026-04-24, the notice.** About 520 characters, varying with the data inside. A
+  GitHub-internal issuer signs the JWT, and clients must not depend on its contents. The
+  prefixes do not change. The change covers installation tokens only, Actions'
+  `GITHUB_TOKEN` included. Format changes for user-to-server tokens are planned but
+  "not in scope yet".
+- **2026-05-15, a per-request header.** A stateless token has two dots after the prefix,
+  and the classic token has none. The post suggests `ghs_[A-Za-z0-9\.\-_]{36,}` for
+  matching both.
+- **2026-10-02, the rollout is complete.** Every newly minted installation token is
+  stateless, and the header is no longer respected after 2026-11-30.
+
+No page gives an example token, defines APPID or names the JWT's algorithm. No later post
+on these pages' related lists changes the format of another prefix.
+
+**Measured before the fix.** The fake was built to that shape: an app id, the standard
+RS256 header, then a payload and a signature in base64url. It took twelve variants, 332
+to 705 characters long. Each passed `redact_output_text` whole, and `check_input_policy`
+let each through. The classic 40-character `ghs_` was redacted and refused. The classic
+pattern stops at the underscore after the app id. The structural JWT shape misses the
+token too, because its `\b` before `eyJ` fails after an underscore.
+
+**The owner's two choices.**
+
+- **The pattern.** Three candidates were measured against the twelve fakes, five settings
+  around a token, eight lines of code and prose that name `ghs_`, and five hostile
+  megabytes. GitHub's suggestion took every fake whole. It also took three of the eight
+  lines: a variable named `ghs_installation_access_token_for_the_release_job`, a method
+  call and a file name. Since the vendor list refuses inputs, a `write` carrying any of
+  them would be refused. It also took a sentence's final period. A strict JWT shape,
+  with a numeric app id and `eyJ` on the header and the payload, was as clean, but it
+  depends on the contents GitHub says not to rely on. **The owner chose the two-dot
+  structural pattern**: three base64url runs of at least 20 characters joined by two
+  dots, and nothing about what the JWT holds.
+- **The prefixes.** **All four `gh[ousr]_`**, the set the classic pattern covers. The
+  two-dot tail is what anchors the match, so the wider prefix costs nothing on ordinary
+  text, and GitHub says user-to-server tokens are next. The other choices were `ghs_`
+  alone, and `ghs_` with `ghu_`.
+
+**Found while building it.**
+
+- **Linearity needs a lookbehind.** Without one, every `ghs_` inside one long run of token
+  characters is a start that scans to the end of the run. That took 99 s on a megabyte of
+  `ghs_1_eyJ` repeated, against 0.03 s with `(?<![A-Za-z0-9_-])` in front. Possessive
+  quantifiers changed nothing measurable, so they were left out.
+- **A plain lookbehind misses escaped tokens.** A URL-encoded token (`%3Dghs_...`), and a
+  JSON-escaped one after `\n`, have a token character before the prefix. The classic
+  pattern has always caught those. So the lookbehind also lets a token character through
+  when it closes `%XX`, `\n`, `\r` or `\t`. Each such start sits two characters after a
+  `%` or a `\`, which ends every run, so the scan stays linear: 0.03 s on each hostile
+  megabyte, including one built to defeat an escape loosened to its second half.
+- **Order matters.** The segments are base64url, so `ghs_` and 36 alphanumerics can sit
+  inside one, and the classic pattern has no lookbehind. If the classic pattern ran first,
+  it would cut that piece out of the payload, and the rest would be too short to match.
+  So the stateless pattern runs first.
+
+**Found, not fixed: TECHNICAL_DEBT 117.** The linearity test first sent one alphanumeric
+megabyte through `check_input_policy` too, and took 441 s. This pattern is not the cause:
+`redact_output_text` takes 0.008 s on 100 KB of the same text. `_input_leaf`'s URL scan,
+`_URL_RE.findall`, is quadratic on any long run of letters and digits, and takes 4.8 s at
+100 KB. Item 117 records it, with a shape measured standalone: bound the scheme to 32
+characters. That finds every URL the scan finds today and takes 0.05 s on a megabyte.
+The test's long run now carries a `_`, so it measures this pattern alone.
+
+**Found, not changed: the repository's own secret scan has the same gap.** gitleaks
+8.30.1, the version CI pins, was run with its default rules on two scratch files. It
+flagged the classic `ghs_` as `github-app-token`, and found nothing in the stateless
+fake: its JWT rule also needs a word boundary before `eyJ`. So CI would not catch a
+stateless token committed to this repository. A custom rule in `.github/gitleaks.toml`
+would close that, and whether to add one is the owner's call.
+
+**Tests.** `TestTheStatelessGitHubTokenShape` drives the real `redact_output_text` and
+`check_input_policy`, with nothing patched:
+
+- the exact output for each of the four prefixes;
+- the refusal, with the token absent from its reason;
+- six settings around a token: a sentence's end, URL userinfo, JSON, an env line,
+  URL-encoded and JSON-escaped;
+- seven lines of code and prose that name the prefix, which survive on both sides;
+- a classic run inside a segment;
+- five hostile megabytes.
+
+`tests/conftest.py` gains `fake_stateless_github_token()` and a `REDACTION_CASES` row,
+whose needle is the signature, the part a partial match would leave. So the log sinks and
+the derivation check cover the pattern as well. The fake is built from pieces like every
+value in that list, so `.gitleaksignore` stays empty, as it has since #238.
+TECHNICAL_DEBT 52's closure listed `ghs_` among the formats it covered, and it now says
+how that went stale and how batch 260 covers it again.
+
+**Verified.** The full suite on Windows, with `AGENT_WORKSPACE` unset: 9451 passed, 88
+skipped (9539). The pattern is plain `re` with no platform branch, so no WSL run was made.
+10 of 10 mutations were killed, each by the test written for it: the pattern deleted,
+the lookbehind dropped, the escapes refused, the prefix narrowed to `ghs_`, the floor
+lowered to one, a dot let into the runs, the dots no longer required, the classic
+pattern moved first, and each escape loosened to its second half. ruff is clean. bandit
+1.9.4 reports no finding the baseline lacks, and no baseline count grew. gitleaks 8.30.1
+on an export of the tracked files finds nothing. The requirements files are unchanged,
+so pip-audit was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.stateless-ghs-redaction.r1e297c60e5bb`.
+
+## Batch 261 -- the reasoning-only ask says what did not run was that reply (2026-11-15)
+
+**Asked.** In the 2026-11-15 bug round, on release 0.3.14, the owner reported that a reply
+that was only thinking, with no call written in it, still drew §95's ask and its "nothing
+ran". The owner guessed this "might confuse the model about whether earlier tool calls went
+through or not", and asked whether the line needed rewording. It was to be checked against
+the code before any fix.
+
+**What the code said.** The ask's first line was `[harness] The last reply was reasoning
+only: no answer and no tool call reached the harness, so nothing ran.` §95 chose "nothing
+ran" on purpose. The owner had seen the model carry on as though calls written in its
+reasoning had taken effect, and the line corrects that belief. But it says nothing about the
+turn's earlier steps, and the ask always follows a tool result in the measured case. So "nothing
+ran" can be read as covering those steps too. A reply that is only thinking, with no call markup
+in it, gets the same ask, because RO1 counts readable reasoning with no text and no call. That
+is RO1 as decided, not a fault.
+
+**The fix, the owner's choice** (the other option was to keep the wording). The first line now
+ends "so nothing in that reply ran. Results returned before it are real.", the example the
+owner approved, word for word. The rest of the row is unchanged. That line is also the live
+notice, which the TUI draws in the `wake` role and the CLI prints as `Harness:`, and the line
+replay draws (RO5). All three read `REASONING_ONLY_HEADER`, so they changed together. A thread
+recorded before this keeps its row as written, and replay draws what the row says.
+
+- **ROADMAP_v3 §95:** RO2's row carries the amendment. The measurements' closing sentence now
+  names both wordings.
+- **AGENTS.md:** the §95 paragraph names the new words.
+- **The test:** `test_the_ask_scopes_what_did_not_run_to_that_reply` drives the measured case
+  through the real loop: a real call, its result, then a reasoning-only reply. It checks that
+  the row's first line scopes the claim to that reply, states that the earlier results stand,
+  and is the notice a person sees. `tests/BREAKING_CHANGES.md` has its row.
+
+**Not measured.** Whether the new words change what the model does. The ask itself never was
+measured (§95's gap register), and the test holds the words and where they appear, not their
+effect.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9423 passed, 88 skipped (9511). 5 of 5 mutations killed against a green control, each undoing one part of the fix: the old unscoped line, the earlier-results sentence dropped, the claim scoped to the turn, that sentence moved below the first line where no person sees it, and the notice showing the whole row. ruff, bandit (no new findings, no baseline count grew)
+and gitleaks on a clean export are clean. The requirements files are unchanged, so pip-audit
+was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.reasoning-only-wording.r9440d8cb7de0`.
+
+## Batch 262 -- the demo deploys again: Gradio 6.32.0 lets the bridge have pillow 13 (2026-11-15)
+
+**Asked.** In the 2026-11-15 bug round the owner noticed that the demo deployment on GitHub was
+failing. It was checked against the code first, and the owner chose the fix:
+
+- bump Gradio to 6.32.0;
+- drop the accepted pillow entries;
+- rehearse before anything deploys.
+
+**Why it failed.** Every `deploy-hf` run since 2026-11-14 stopped at the same line:
+`pip-audit refused bridge.lock`. That covers 47d7616 (run 43570477939) and b4fcd65 (run
+43592431355). The audit refused three pillow 12.3.0 advisories, PYSEC-2026-4363, CVE-2026-128066
+and CVE-2026-128067, all fixed in 13.0.0. It had already ignored the 39 accepted IDs.
+
+Gradio up to 6.31.0 requires `pillow<13`, so no lock could reach a fix. Each new pillow advisory
+had to be read against what the bridge reaches and accepted by ID, four triages since batch
+169. The failure was reproduced locally before anything changed, with the deploy's own uv 0.13.4
+and pip-audit 2.10.1: the same three IDs, and 39 ignored.
+
+**The fix.** Gradio 6.32.0, released 2026-11-12, is the first to allow pillow 13. Its notes say
+"Allow Pillow 13 on 6.x", and it requires `pillow<14`.
+
+- **The pin.** `GRADIO_VERSION` is 6.32.0. So the Space's `sdk_version`, the Studio's
+  `bridge.lock`, `BUILD_INFO.json` and THIRD_PARTY_NOTICES all name it, and the bridge resolves
+  pillow 13.0.0.
+- **The accepted list.** The four `ACCEPTED` entries are removed. The list is empty, and its
+  comment keeps their history. The audit refuses every finding until one is triaged again.
+- **The record.** ROADMAP_v3 §79 slice 7 carries the amendment.
+
+**Measured before the change was trusted** (the re-measure list beside `GRADIO_VERSION`):
+
+- **Gradio's own diff, 6.30.0 to 6.32.0** (31 commits, 17 Python files):
+  - `gradio/server.py` is untouched, and `gr.Server` is exported at both tags.
+  - `launch()` takes the same arguments. Its docstring now says SSR needs Node 24, and the bridge
+    turns SSR off.
+  - The `SYSTEM=spaces` read in `gradio/utils.py` is unchanged, so `drop_spaces_flag` still
+    applies. Its docstring says so.
+  - Run history was already on by default in 6.30.
+- **The Space's install line resolves with 6.32.0 in it**, on Python 3.12: pillow 13.0.0, torch
+  2.13.0. The `mcp` extra still caps pydantic at 2.12.5, against the harness's 2.14.2, so HD2's
+  two environments stand.
+- **pip-audit finds nothing** in the Space's whole set (112 packages) or the bridge's (72).
+- **A dry run of each platform with the change** built, scanned with gitleaks from the bundle's
+  root, and audited both locks. Both were clean, and neither warned of a stale entry.
+- **The ModelScope image, run.** podman in WSL built it from the bundle's own `Dockerfile`: the
+  digest-pinned base, `bridge.lock` installed `--require-hashes --only-binary`, and the session
+  environment built in. Started, the bridge served on 6.32.0 and its confinement self-test
+  verified. `/`, `/healthz` and `/terminal` answered 200. A real session over `/ws/<ticket>`
+  drew the shared-demo banner, and the `status` API was listed. Docker Desktop was not running,
+  so `test_the_image_holds_exactly_the_bundles_files` itself did not run. The podman build
+  used the same `Dockerfile` that test builds.
+
+**A guard, added.** Nothing held THIRD_PARTY_NOTICES' gradio and spaces rows to the builder's
+pins: the platform installs both, so no requirements file carries them, and the gradio row would
+have kept saying 6.30.0. `test_the_notices_name_the_gradio_and_spaces_the_platforms_install` now
+does.
+
+**Found, not fixed.**
+
+- **TECHNICAL_DEBT 118.** On Hugging Face the audit compiles the bridge's set, not the Space's
+  install line. So 40 packages only the Space installs are never audited, among them `mcp`,
+  `authlib`, `cryptography`, `pyjwt`, torch and torch's CUDA packages, and pydantic is audited at
+  another version. Nothing in them is flagged today.
+- **podman needed SIGKILL to stop the container** after 10 s. That is most likely Python as PID 1
+  with no SIGTERM handler, not the Gradio version, but it was not compared against 6.30.0. The
+  bridge already sweeps a killed predecessor's sessions at start.
+
+**Not done here.** Nothing deploys from this branch. The Space redeploys from `main` after the
+merge, once every check on it passes. The workflow's own `rehearse` job runs only on a manual
+dispatch, and the branch is not pushed.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9423 passed, 88 skipped (9511). 4 of 4 mutations killed against a green control, each a way the notices could drift: the pin moved back, the gradio row left behind, the spaces row changed, and a second gradio row that disagrees. The pin itself is held by the rehearsal above, not by an
+offline test, because what it fixes comes from an advisory feed. ruff, bandit (no new findings,
+no baseline count grew) and gitleaks on a clean export are clean. No requirements file changed;
+pip-audit ran on the compiled bridge and Space sets instead.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.demo-gradio-6-32.r7765f43f43d1`.
+
+## Batch 263 -- the file tools read the container's `/workspace` as the workspace (2026-11-15)
+
+**Asked.** In the 2026-11-15 bug round, on release 0.3.14 in WSL with the shell in a container,
+the owner showed the shell working in `/workspace/...` while `read` and `write` were handed the
+same paths, asked to leave the workspace, and then failed. The first diagnosis, made from one
+screenshot, read it as a Windows harness and a WSL shell. The second screenshot corrected that.
+
+**What the code said.** The container mounts the workspace at `/workspace`, so every path the
+model sees in the shell's output is spelled from there. The file tools run on the host, and
+`resolve_path` kept an absolute path as it was, so `/workspace/x` was a path outside the
+workspace: it asked (ROADMAP §6), and after a yes `read` found no such file and `write` hit a
+permission error.
+
+**The fix, the owner's choices** (ROADMAP_v3 §96, CW1-CW3). The owner chose to map
+`/workspace/x` onto the workspace in all four file tools, to keep asking about every other path
+outside it, and to gate the map on the shell being enabled, which means any tool in
+`APPROVAL_BY_SHELL_MODE`, asked through `is_tool_allowed`. The other options were a runtime probe
+and no gate. The map is in `resolve_path`, so the approval check, the handlers, the protected
+deny and the TUI's diff agree on it. The mount point is now one constant,
+`sandbox.CONTAINER_WORKSPACE`, which the container's `-v` and `-w` read too. CW2's two host rules
+are adopted defaults: the host's own reading wins when it is already inside the workspace, and a
+mapped path that lands outside keeps today's prompt. So does CW3, which keeps the protected deny
+unchanged.
+
+- **The tests:** 19 in `TestTheContainerSpellingIsTheWorkspace` (`tests/test_file_ops.py`),
+  against a real workspace on disk, on Windows and in WSL. `tests/BREAKING_CHANGES.md` has three
+  rows. The first mutation pass left one survivor: the protected deny resolving the path for
+  itself instead of through `resolve_path`. The `.venastine` segment matches anywhere in a path,
+  so the host's reading of `/workspace/.venastine/...` was refused too, and the test could not
+  tell. A hard link inside the workspace to a protected file, named through the mount, can: its
+  name has no `.venastine` in it. `test_a_hard_link_reached_through_the_mount_is_refused` kills
+  that mutation.
+- **Live check, in WSL with Podman.** The real sandbox's `pwd` printed `/workspace`. With the
+  shell tools off, `read` of `/workspace/notes.txt` asked and found no such file. With them on, it
+  read the file without asking, and a `write` to `/workspace/made.txt` was visible to `cat` inside
+  the container.
+- **Found, and left:** the shell reads `/workspace/x` as a host path too. `cat
+  /workspace/notes.txt` classifies `HOST_READ` and runs on the host after a prompt, measured on
+  both platforms. Fixing it changes what the gate auto-approves, so it is `TECHNICAL_DEBT` 119,
+  for the owner. It is numbered 119 because 117 and 118 are on the unmerged branches of batches 260
+  and 262.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9441 passed, 88 skipped (9529). 11 of 11 mutations killed against a green control, one per rule: no map, the mount point not a whole segment, one slash dropped, the bare mount point, the host's inside reading, no gate, the gate reading config.yaml, the gate asking about `shell` alone, a mapped path that leaves kept, and the deny and the approval check each resolving for themselves. ruff, bandit (no new findings, no baseline count grew)
+and gitleaks on a clean export are clean. The requirements files are unchanged, so pip-audit
+was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.container-workspace-paths.reecb5909236b`.
+
+## Batch 264 -- usage figures: the rate's clock, thoughts, k/M/B and `/usage` (2026-11-16)
+
+**Asked.** In the 2026-11-15 bug round, on release 0.3.14, the owner saw the completion line's
+`tok/s` read far below what the model wrote, `billed` read in thousands past a million, and asked
+for the cache counts behind it.
+
+**What the code said.** `TurnMeter.completion` divided the provider's output count by `elapsed`,
+which counts tool time; batch 118 moved only the live figure onto generating time. A turn that
+starts background sessions is held open until they finish (SS2), so its `elapsed` also held the
+whole wait between wake turns, and `_turn_output_tokens` was assigned from each terminal
+response, which kept only the last wake turn's count. The Google branch read
+`candidates_token_count`, which the pinned SDK documents as leaving the thoughts out. `UsageLine`
+wrote every figure as thousands. No branch read a cache count, though every pinned SDK reports
+one, and the Anthropic SDK's own tracing adds its cache counts to `input_tokens`, so that branch's
+input was short by them.
+
+**The fix, the owner's choices** (ROADMAP_v3 §97, UF1-UF5, a new section by the owner's choice).
+
+- **UF1, both clocks (owner: both).** The completion rate divides by `TurnMeter.generating`, and
+  `took` stays `elapsed`. A new `set_waiting` pauses the rate while `_wait_for_sessions` waits,
+  driven by `SessionWait` messages it posts when it starts waiting and when a wake turn begins.
+  One pause window serves tools and the wait, kept disjoint from a modal by `set_blocked`. The
+  line's count is now summed over the turn's terminal responses and cleared when a turn starts.
+- **UF2.** Google's output is candidates plus thoughts, each field kept per its own last report.
+- **UF3 (owner: the usage line).** `tui.meters.short_count` writes k, M and B for every figure
+  on the usage line. `/window` and `/trigger` keep their exact echo, and the CLI its commas.
+- **UF4 (owner: this thread; input, cache read, cache write, output).** `/usage` in both shells
+  prints `core/usage_view.py`'s report over the tally `ConversationMemory.record_usage` keeps
+  beside `record_billed`. A cache count is in a usage dict only when reported, and
+  `ModelResponse.usage_unreported` names the counts `_stream_usage` coerced to 0, so a row says
+  "not reported" instead of printing a zero. The CLI builds a memory per turn, so
+  `run_agent_conversation` and `wake_conversation` return their tally on the response, and
+  `ChatSession.count_usage` adds the chat and wake turns up.
+- **UF5 (owner: add them in).** The Anthropic branch adds its cache reads and writes to input,
+  so `billed`, `ctx` and the trigger mean one thing on every provider.
+- **Adopted defaults:** the summed count, UF2's per-field rule, the formatter's rounding (one
+  decimal below ten of a unit, a figure rounding to a thousand promoted) and "reported on N of M
+  calls".
+- **The tests:** 77 across eight files, including a new `tests/test_usage_view.py`, all offline.
+  `tests/test_sdk_conformance.py` asks the pinned SDKs for every new field through the wire parse
+  path, drives a real Google usage object through the branch, and holds the Anthropic SDK's own
+  tracing to counting its cache into input, which is UF5's premise. The first full run failed two
+  CLI tests whose memory spy keeps no tally, so the hand-back reads it with `getattr`, as the
+  field's "None elsewhere" says. `tests/BREAKING_CHANGES.md` has four rows.
+- **Found, and left (§97's gap register):** nothing was measured against a live provider with
+  caching on; an OpenAI-compatible provider that spells its cache counts another way reports
+  none; Google's tool-use prompt count is not added to input; a CLI turn that raises returns no
+  response, so its calls miss the CLI's `/usage`.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9499 passed, 88 skipped (9587). 50 of 50 mutations killed against a green control, each run on the tests its rule names: the meter's two clocks, the pause beside a modal and a tool, the floor, the formatter's units, the TUI's generating time, sum, clear and wait messages, each branch's thoughts, cache and coerced names, the tally and its report, and the CLI's chat turn, wake turns and counter. The first pass left one survivor, a new turn keeping a wait flag from a turn stopped mid-wait, because the test never made the new turn re-read its pause; it now runs a tool in that turn, and the mutation is killed. ruff, bandit (no new findings, no baseline count grew)
+and gitleaks on a clean export are clean. The requirements files are unchanged, so pip-audit
+was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.usage-figures.r56c47457b868`.
+
+## Batch 265 -- typing while background sessions run: SS2 amended (2026-11-16)
+
+**Asked.** In the owner's 2026-11-15 bug round, `shell_background` returned at once and the
+shell then sat "waiting": nothing typed was accepted until the command ended. The diagnosis
+(recorded with the round) was SS2 itself, working as designed -- plain prompts are refused
+while a background or monitor session is live, because the TUI's turn worker holds in
+`_wait_for_sessions` and `_busy` stays true through it. The owner chose to amend SS2: a plain
+prompt is accepted while sessions run after the turn, the user's message gets its own turn,
+and the session's result wakes after it, never two turns at once. Two forks were asked before
+building. A message sent while the agent is replying to a result is **refused, as during any
+turn** (the owner's pick of the two offered; the other queued it). And the change applies to
+**both shells**, with the commands the TUI refuses while sessions run refused in the CLI too.
+The doc home follows the standing rule: SS2 is amended inline, as batch 258 amended SS14.
+
+**The TUI.** The wait has a phase, `_WAIT_IDLE` between replies and `_WAIT_WAKE` while a wake
+turn runs, and it and the handed message change under `_wait_lock`, because the UI thread
+takes a message on the strength of the phase and the worker starts a wake on the strength of
+the message. `_hand_to_wait` takes a plain message only when the phase is idle and no other is
+waiting, and nudges the manager; the wait reads it at the top of the loop and through
+`wait_for_wake`'s new `stop`, and returns with the sessions still running. `on_turn_finished`
+then starts the message's turn as its last act, after the finished turn's own line, and also
+after a failure, since the box was cleared when the message was taken. Not on the way out. A
+message sent during a reply falls through to the funnel, which now takes `by_sessions=False`
+for a message: live sessions no longer refuse it, a running turn still does, with the words
+any turn gets. Commands keep SS2's answer. One more thing had to move: `_fire_pending_restart`
+is scheduled by the `_busy` setter in the same pass that starts the message's turn, so it now
+waits while a turn runs instead of exiting under it.
+
+**The race.** A result and a message can reach a waiting shell together: the worker has taken a
+batch, and the message lands before it starts the wake. The owner's answer to the edge case was
+that the message wins. So the worker, holding `_wait_lock`, finds the message and hands the
+batch back (`SessionManager.put_back`): at the front, so it keeps its place ahead of anything
+newer, and with its wake uncounted, since no turn answered it. The lock order is `_wait_lock`
+then the manager's, and `stop` is a plain attribute read with no lock of ours.
+
+**The CLI.** Its wait read no input at all, and Ctrl+C there stopped the sessions. Now it prints
+`You:` once per stretch and polls the one reader (`_StdinReader.poll`, readline()'s discipline
+with ask()'s deadline -- type-ahead kept, nothing drained -- which starts the pump). A line
+typed there ends the wait as a `_WaitEnd`, and `run_chat` runs it exactly as one typed at the
+prompt. A message's turn ends in a wait of its own; a command goes back to the wait it
+interrupted (`resume`). A line and a result together go message first, as in the TUI. The
+commands in `cli_commands.REFUSED_WHILE_WAITING` (compact, grill-me, model, new, resume,
+submodel with an argument, threads) are refused when sent from the wait, in the TUI's words
+with Ctrl+C as the way out. An AST test maps every TUI `refuse_if_occupied` site to its command
+and holds the table to it. At the end of stdin -- a piped run -- the wait stops reading and
+carries on as before; Ctrl+C still stops the sessions. A line typed while a wake turn runs is
+type-ahead, read once the turn ends, as during the user's own turn. When the wait ends with
+`You:` open and nothing typed, the next read prints no second one.
+
+**Found on the way: both waits spun on an interactive shell.** The two loops counted every live
+kind (`live_for`) and asked `wait_for_wake`, which waits for the blocking kinds alone. With only
+an interactive shell open, each asked again at once. Measured before the fix: 37,154 calls in
+two seconds on the TUI's worker and 38,195 in the CLI's. The turn stayed open (the TUI said
+"Still working", the CLI never returned to its prompt) until the shell's idle timeout, against
+SS25. Both now count `SessionManager.waited_on`, the background and monitor sessions alone,
+and so does the funnel's session count.
+
+**What the model is told.** The two tool descriptions that said "the user's prompt is blocked"
+now say the user can still message the agent, each message is a turn of its own, and a result
+that lands meanwhile wakes it after. README's `/kill` row, CONFIG_ARCHITECTURE's two passages and
+the CLI's `/kill` absence reason are corrected the same way. **Not corrected: `config.yaml`'s
+comments** ("does not block your prompt", "the prompt unblocks"), which stay as they are because
+`config.yaml` is never staged here. They read as true of the commands the wait holds.
+
+**Not measured live against a provider.** The TUI half is driven end to end through a mounted app
+with a scripted model (a real turn starts a session, the user types into the wait, the model is
+called in the owner's order); the CLI half through its chat loop with the fake reader; and the
+real reader's `poll` against a pipe. Then the reader was measured in real terminals, because
+the CLI's wait now leaves a reader thread on the console where it left none: in a Windows
+console of its own (Ctrl+C from `GenerateConsoleCtrlEvent`, keys written with
+`WriteConsoleInputW`) and in WSL under a pty (0x03 through the line discipline). On both, a
+line typed during the wait arrived; Ctrl+C reached the wait as `KeyboardInterrupt` within one
+0.2 s read (0.21 s measured on Windows); the reader thread survived it with stdin not marked
+ended; and a line typed after it still arrived. One cost, stated rather than fixed: a line
+typed while a wake reply runs that then asks for approval is discarded by the prompt's drain
+(§88's A83), exactly as type-ahead during the user's own turn always was.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9475 passed, 88 skipped
+(9563, 53 new). The seven touched test files pass in WSL (1025). 46 of 46 mutations killed,
+each reverting one piece: the manager's `stop`, `nudge`, `put_back` (its order, its uncounted
+wake, an empty batch) and `waited_on`; the TUI's phase test, the second message, the nudge, the
+loop's own check, the race and its put-back, both phases, the finished turn's start and its
+way-out rule, the submit handler's routes, the funnel's `by_sessions` and count, the wait's count
+and the restart guard; the CLI's read, its race, the empty line, an ended stdin, the count, the
+resumed wait, the refusal, the open prompt, the banner and the reader's pump and deadline; and
+the refusal table. The first pass stalled on the CLI rows, though nothing survived: those
+tests gave their session a 600 s timeout, so a mutant that stopped the wait reading sat each one
+out. They use 5 s now, which a working wait never reaches. ruff, bandit (no new findings, no
+baseline count grew) and gitleaks on a clean export are clean; no requirements file changed, so
+pip-audit was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.ss2-type-during-sessions.r881d0b00dc0e`.
+
+## Batch 266 -- a tool failure is said once: INFO for what the result already says, WARNING on both screens (2026-11-16)
+
+**Asked.** The owner reported, from an earlier version, that a failed `fetch_url` showed twice in
+the transcript: a `[warning] fetch_url failed for <url>: <e>` line and then the `x fetch_url
+Could not fetch URL: <e>` result line, with httpx's "For more information check" in both. Asked
+to check it against the current code before fixing it. **Still there, measured** with real httpx,
+the real `fetch_url.run`, the real `TranscriptLogHandler` and the real `_translate`: one 403 gave
+one log line and one result line, the same text. `fetch_url.py` logged a WARNING and returned the
+same error, `TranscriptLogHandler` routes WARNING+ to the transcript, and both shells print a
+failed result as a line of its own.
+
+**Three answers, because two of my claims did not survive measuring.**
+- **First:** a failure the tool returns as its result logs at **INFO**, app.log only, at every
+  site of that shape -- `fetch_url`, `read_project_doc`, `write_project_doc` (refused, failed),
+  and `web_search`'s and `arxiv_search`'s retry lines, whose last attempt repeated the result.
+  The registry already logs a refusal it returns at INFO (`refused before approval`).
+- **Second, after a correction.** The question said INFO would also leave the CLI's terminal. It
+  would not: `configure_logging`'s stderr handler carried no level, so it printed the root's INFO
+  -- measured, an INFO line reached stderr beside the file. Asked again, the owner chose **the
+  CLI's stderr at WARNING**, the TUI transcript's rule, so both shells put the same lines on
+  screen. An explicit `AGENT_LOG_LEVEL` (or a `level` a caller passes) still reaches the terminal,
+  so `main.py`'s documented `AGENT_LOG_LEVEL=DEBUG` route keeps working; a set but unreadable value
+  counts as asked for, since `_resolve_level` has just said it runs at INFO.
+- **Third, after a scan.** An AST scan of `tools/` for the shape found nine more the first answer
+  had not named: `read`, `write`, both halves of `edit`, `view_image`, and `shell`'s catch-all,
+  which used `logger.exception` (so the TUI drew a red `[error] ... (reason)` line above the
+  result), and `isolation.py`'s two WARNINGs and `arxiv_search`'s oversized feed. The owner
+  chose the same rule, **keeping the tracebacks**: the six `logger.exception` sites log at INFO
+  with `exc_info=True`, so app.log still holds the stack for an unexpected failure.
+
+**Not changed, on purpose.** `arxiv_search`'s hostile-feed line keeps the exception, which carries
+a string the feed chose, while the result names only its category (batch 116's review): the two
+do not say the same thing, and the guard's one allowance names why. The registry's `Tool %s
+raised` line (batch 91 put its reason on screen deliberately) and its input-policy refusal (raised,
+not returned) are outside the shape and were left alone.
+
+**The guard.** `tests/test_tool_failure_lines.py` parses every module under `tools/` and fails on
+a statement list that both logs at WARNING or above and returns `{"error": ...}`, and on a retry
+loop whose `except` logs loudly while its `else` returns the error. It is shown both shapes as
+they stood, the fixed form, and arxiv's "kept N of M" WARNING in a retry loop's body, which says
+something the result does not and is not flagged. An allowance that stops matching fails too.
+
+**What it costs.** The CLI's terminal no longer shows INFO lines: about fifty sites, among them
+"MCP server connected", "Registered N MCP tool(s)", cache hits, compaction and "refused before
+approval". All of them stay in app.log, and `AGENT_LOG_LEVEL=INFO` brings them back. The hosted
+bridge configures its own logging (`deploy/hosted/app.py`) and is unaffected.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9474 passed, 88 skipped
+(9562, 52 new). 28 of 28 mutations killed, each reverting one piece: every one of the
+fifteen sites back to its old level, three of the kept tracebacks dropped, the screen level
+following the root again, the handler's level never set, the variable ignored, a caller's level
+ignored, an empty variable read as unset, and five cuts to the guard itself (each shape's rule, the
+retry rule widened to the whole loop, the allowance, `exception` not counted as loud). One WIP
+run, made while bandit ran beside it, failed `test_a_timed_out_call_is_STOPPED_not_merely_abandoned`
+by one byte (26 against 25): a tick on the timeout path, which this batch does not touch. It passed
+five of five alone and on the final run. ruff, bandit (no new findings, no baseline count grew) and
+gitleaks on a clean export are clean; no requirements file changed, so pip-audit was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.tool-failure-log-level.r425b57801358`.
+
+## Batch 267 -- a research pass with no text is asked again, then fails (2026-11-16)
+
+**Asked.** The owner reported, from an older version, that when the model replied with
+reasoning only twice in one research pass, the harness gave up and let it through. That
+garbled the pipeline: the first pass's file held its whole JSON, and the later passes' `.md`
+files were empty. The report was to be checked against the current code before any fix.
+
+**Still there, measured.** Re-run on origin/main `b4fcd65` through the real loop under a
+scripted provider, with Pass 0, Pass 1 and Final synthesis each replying with reasoning only
+twice:
+
+- **Pass 0 recovered.** RO2 asked once, then ended the turn `complete` with no text. The JSON
+  retry (RO6) asked again, and the plan came back. `00_plan.md` holds the plan's JSON, which
+  is by design: Pass 0's output is the plan.
+- **Pass 1 and Final synthesis did not.** Each ended `complete` with `""`, and
+  `_check_not_truncated` returns early on `complete`. Pass 2 was handed "Response to extract
+  claims from:" and nothing else, and extracted no claims. `01_raw_response.md` and
+  `report.md` were written at 0 bytes, and the run was marked complete. Seven model calls.
+
+The JSON passes were never exposed, because an empty reply does not parse. The two prose
+passes had nothing that could fail.
+
+**The owner's choice: retry, then fail.** Pass 1, each ensemble candidate and Final
+synthesis get the corrective retries the JSON passes already get. They go into the same
+thread, within the same `max_json_retries`, in RO6's no-text wording without its JSON half.
+Still empty, the pass fails saying why, and the run is marked failed. An empty ensemble
+candidate is skipped like a failed one. RO6's row in ROADMAP_v3 §95 carries the amendment.
+
+**Built.**
+
+- **`core/reasoning/json_retry.py`.** `retry_until_text` is `retry_until_json` for a pass
+  whose contract is some text, and whitespace counts as none, as RO1 counts it. Both loops
+  now continue a thread through one `_corrective_turn`, moved out of `retry_until_json`
+  unchanged, so the continuation's arguments have one copy. `_REASONING_IS_NOT_THE_REPLY` is
+  RO6's sentence about reasoning, read by both correctives; RO6's own wording hashes the same
+  before and after. The failure names the last reply as reasoning only or empty, read from
+  the notice RO2 ends a reasoning-only turn with.
+- **`core/reasoning/orchestrator.py`.** `_run_pass` is the one entry for every prose pass,
+  and it now ends in `retry_until_text`. The ensemble loop's existing `except` skips an empty
+  candidate, and the review stage's existing containment keeps the report when a
+  re-synthesis is empty. Before, an empty re-synthesis replaced the report with nothing and
+  was traced as applied.
+
+**Two choices of the batch's own.**
+
+- **A corrective attempt is read by the first attempt's stop rule** (`_settle_text_retry`).
+  One cut off by a ceiling with no text fails, naming the stop: asking again into an
+  exhausted turn costs a call to be told the same thing, and "the last reply was empty"
+  would hide which ceiling it hit. One cut off with text is traced as truncated and used,
+  like the attempt it corrects. Its granted calls join the §25 audit trail.
+- **The corrective asks for the answer "written as the reply itself."** That is RO6's
+  wording with "so there was no JSON to parse" and "ONLY valid JSON" taken out. About tool
+  calls it says only RO6's sentence, that one written in reasoning is not run.
+
+**Gaps.** A corrective attempt is not streamed, so it shares the JSON retries' two §26
+limits. A tool call it makes shows no `tool_call` event, and a page it fetches reaches no
+corpus. Pass 1 fetches the most, so this is where the limit costs most. Each attempt is a
+fresh run with RO2's own ask, so a pass that never answers spends six calls at the default
+budget. Whether the corrective recovers the measured model is not measured. `config.yaml`'s
+`max_json_retries` comment still says only "malformed JSON", because the file is never
+staged here; README and CONFIG_ARCHITECTURE say both.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9449 passed, 88 skipped
+(9537, 27 new). 23 of 23 mutations killed, each by every test it was expected to
+fail: the pass never retrying, a still-empty pass returning empty, whitespace read as text, the
+corrective sent to no thread or replaced by the JSON one, its reasoning sentence dropped or RO6
+keeping its own copy, each forwarded argument dropped (authorization, effort, activity,
+temperature), the trace line gone, the end notice unread, one attempt short, a budget of its own,
+retries skipping `on_response`, a retry's stop or grants unread, the first stop read after the
+retry, the retry under another prompt, the pass returning its first text, and the shared hop
+dropping the JSON retry's cap or context. One run of the pipeline files, made under load, failed
+`test_what_does_not_fit_the_payload_block_can_be_scrolled_to` (6 against 8), a TUI modal this
+batch does not touch; it passed three of three alone. ruff, bandit (no new findings, no baseline
+count grew) and gitleaks on a clean export are clean; no requirements file changed, so pip-audit
+was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.empty-research-pass.r8eb5a4e08bd5`.
+
+## The 2026-11-15 bug round on one branch: batches 260-267 merged (2026-11-16)
+
+**Asked.** The owner asked for one pull request carrying the round's eight branches, as the
+bugfixes branch carried batches 218-233, rather than eight PRs that would each conflict with
+the last and each cut a release.
+
+**How.** Each branch was one commit on `b4fcd65`. They were merged in batch order with
+`--no-ff`, so each batch's commit is the one that was verified, and every resolution is in a
+merge commit.
+
+**Resolved by rule.**
+
+- **The suite total:** ours plus theirs minus the base, at each merge. The full suite on
+  the result is the check.
+- **The appended tails** of DEVLOG and BREAKING_CHANGES: both, in batch order.
+- **ROADMAP_v3:** §97 sits above §96, because sections run newest first with `---` between
+  them, and the index above them runs oldest first.
+- **Status lines:** AGENTS.md's document map and README's status line name §96 and §97, and
+  `TECHNICAL_DEBT` items 117, 118 and 119. Items 118 and 119 lost the sentences saying
+  their neighbours' branches were not merged yet.
+- **AGENTS.md's §95 paragraph:** 261's wording with 267's rule after it.
+- **`test_session_tui.py`'s tree line:** both batches' text, and the count the file now
+  collects.
+- **The version:** the combined branch's beta identity.
+
+**One seam needed code: 264 and 265.** Batch 265 rebuilt both session waits that 264 had
+instrumented.
+
+- **The TUI.** 264's pause (`SessionWait(True)`) goes after 265's message check and before
+  its stop-aware `wait_for_wake`. A hand-over returns with the clock paused, as the
+  suspended and stopped returns do. TurnFinished stops that turn's meter, and the message's
+  turn starts a fresh one.
+- **The CLI.** `_await_sessions` keeps 264's `count_usage`, returns 265's `_WaitEnd`, and
+  `_again` re-enters the wait with the same counter.
+
+**Two of 264's CLI tests had been written against the old wait.**
+
+- `test_the_wake_turns_count_in_the_cli_too` scripted `live_for` and read the real stdin.
+  Under xdist the worker died on it, because its stdin is the runner's channel, and with
+  `-n0` it hung.
+- `test_the_cli_hands_its_counter_to_the_session_wait` patched `_await_sessions` with a bare
+  mock, whose `.line` `run_chat` now reads as typed input.
+
+Both now use 265's shapes: `waited_on`, `cli_stdin`, and a real `_WaitEnd`.
+
+**A new test pins the seam** (`test_a_hand_over_leaves_the_turns_clock_paused_and_the_next_fresh`):
+
+- A hand-over leaves exactly one `SessionWait(True)`.
+- Replayed into a real `TurnMeter`, the wait stays out of the turn's rate and out of the
+  next turn's.
+
+Its first version passed with both meter resets removed. `start()` never re-syncs the pause,
+so a stale wait flag shows only at the next change to it. A tool now runs in the next turn,
+and the test fails with both resets gone. It also fails when the pause is never posted. With
+only `start()`'s reset gone it still passes, because `stop()` clears the same flag, so that
+mutation is equivalent.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset, on the merged branch: 9682 passed,
+88 skipped (9770: the 9510 on `b4fcd65`, each batch's new tests, and the seam test). ruff,
+bandit (no new findings, no baseline count grew) and gitleaks on a clean export are clean. No
+workflow file and no `config.yaml` is in the diff.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.bug-round-2026-11-15.r7070c89b1d87`.

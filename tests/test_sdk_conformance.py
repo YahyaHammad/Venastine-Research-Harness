@@ -972,6 +972,98 @@ def test_the_GOOGLE_usage_read_against_a_REAL_nullable_usage_object(
             drain([chunk(gt.GenerateContentResponseUsageMetadata())])
 
 
+def test_the_cache_and_thought_counts_the_client_reads_are_on_the_pins(
+        monkeypatch):
+    """ROADMAP_v3 §97 (UF2, UF4, UF5). Every usage field `core/client.py`
+    began reading in batch 264, asked of the pinned packages through the
+    path wire JSON takes: `construct_type` for the two SDKs that parse with
+    it, and the camelCase wire names for google-genai. A renamed field
+    would leave each branch reading None, which `/usage` would show as
+    "not reported" with nothing to say why."""
+    with real_package("anthropic", "httpx"):
+        from anthropic._models import construct_type
+        from anthropic.types import Usage
+
+        parsed = construct_type(value={
+            "input_tokens": 2, "output_tokens": 7,
+            "cache_read_input_tokens": 90,
+            "cache_creation_input_tokens": 5}, type_=Usage)
+        assert (parsed.cache_read_input_tokens,
+                parsed.cache_creation_input_tokens) == (90, 5)
+
+    with real_package("openai", "httpx"):
+        from openai._models import construct_type
+        from openai.types import CompletionUsage
+        from openai.types.responses import ResponseUsage
+
+        chat = construct_type(value={
+            "prompt_tokens": 50, "completion_tokens": 3, "total_tokens": 53,
+            "prompt_tokens_details": {"cached_tokens": 40,
+                                      "cache_write_tokens": 6}},
+            type_=CompletionUsage)
+        assert (chat.prompt_tokens_details.cached_tokens,
+                chat.prompt_tokens_details.cache_write_tokens) == (40, 6)
+        responses = construct_type(value={
+            "input_tokens": 40, "output_tokens": 9, "total_tokens": 49,
+            "input_tokens_details": {"cached_tokens": 32,
+                                     "cache_write_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 0}},
+            type_=ResponseUsage)
+        assert (responses.input_tokens_details.cached_tokens,
+                responses.input_tokens_details.cache_write_tokens) == (32, 0)
+
+    monkeypatch.setattr("core.client.load_provider_data",
+                        lambda: {"GOOGLE": {"supports_stream_usage": True}})
+    with real_package("google", "httpx"):
+        from google.genai import types as gt
+
+        import core.client as client
+
+        fields = gt.GenerateContentResponseUsageMetadata.model_fields
+        for name in client._GOOGLE_COUNTS:
+            assert name in fields, (
+                f"google-genai no longer carries {name}; the GOOGLE usage "
+                f"read in core/client.py names it")
+        usage = gt.GenerateContentResponseUsageMetadata.model_validate({
+            "promptTokenCount": 21, "candidatesTokenCount": 9,
+            "thoughtsTokenCount": 30, "cachedContentTokenCount": 16})
+        reply = gt.GenerateContentResponse(
+            candidates=[gt.Candidate(content=gt.Content(
+                role="model", parts=[gt.Part(text="hi")]))],
+            usage_metadata=usage)
+        models = _SimpleNamespace(
+            generate_content_stream=lambda **kw: iter([reply]))
+        final = None
+        for token in client.call_model_stream(
+                _SimpleNamespace(models=models), "GOOGLE", "m", [], "sys",
+                []):
+            if token.final_response is not None:
+                final = token.final_response
+        assert final.usage == {"input_tokens": 21, "output_tokens": 39,
+                               "cache_read_tokens": 16}
+
+
+def test_the_anthropic_sdk_itself_counts_its_cache_into_input():
+    """ROADMAP_v3 §97 (UF5). The reason the Anthropic branch adds its cache
+    counts to `input_tokens`, asked of the pinned package rather than
+    assumed: the SDK's own tracing reports a message's input as
+    `input_tokens` PLUS the cache reads and the cache writes, which is only
+    right if `input_tokens` leaves them out. If this stops holding, UF5
+    double-counts the cache, and `billed`, `ctx` and the trigger read high."""
+    with real_package("anthropic", "httpx"):
+        import inspect
+
+        from anthropic.lib._tracing import _response
+
+        source = inspect.getsource(_response.set_message_attributes)
+        assert ("cached = (usage.cache_read_input_tokens or 0) + "
+                "(usage.cache_creation_input_tokens or 0)") in source
+        assert ('"gen_ai.usage.input_tokens", usage.input_tokens + cached'
+                in source), (
+            "anthropic's tracing no longer adds the cache counts to "
+            "input_tokens; core/client.py's _whole_prompt says it does")
+
+
 # ===========================================================================
 # ---- ROADMAP_v3 §83: the ChatGPT plan's Responses path --------------------
 # ===========================================================================

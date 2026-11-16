@@ -311,7 +311,10 @@ def read_run(params: dict) -> dict:
             chunk = f.read(config.INIT_READ_CHARS)
             more = f.read(1) != ""
     except OSError as e:
-        logger.warning("read_project_doc failed for %s: %s", user_path, e)
+        # INFO, not WARNING (batch 266, the owner's choice): the error below
+        # is the result, and both shells print a failed result as a line of
+        # its own, so a WARNING here drew the one failure twice.
+        logger.info("read_project_doc failed for %s: %s", user_path, e)
         return {"error": f"Could not read {user_path}: {e}"}
 
     result = {"path": user_path, "content": chunk, "truncated": more}
@@ -442,8 +445,10 @@ def write_run(params: dict) -> dict:
     destination = doc_path(root, name)
     resolved = _resolve_in_project(root, name)
     if resolved is None:
-        logger.warning("write_project_doc refused %s: resolves outside the "
-                       "project", destination)
+        # INFO (batch 266): the error below is the result, which both shells
+        # print as a line of its own. The file keeps the path it resolved to.
+        logger.info("write_project_doc refused %s: resolves outside the "
+                    "project", destination)
         return {"error": f"write_project_doc: {name!r} resolves outside the "
                          f"project directory, so it is not one of this "
                          f"project's documents."}
@@ -458,7 +463,8 @@ def write_run(params: dict) -> dict:
         # approval that was shown a diff of the lines that changed.
         write_text_atomic(resolved, content)
     except OSError as e:
-        logger.warning("write_project_doc failed for %s: %s", resolved, e)
+        # INFO (batch 266), as `read_project_doc`'s failure: the result says it.
+        logger.info("write_project_doc failed for %s: %s", resolved, e)
         return {"error": f"Could not write {resolved}: {e}"}
 
     return {"result": f"Wrote {len(content)} characters to {resolved}"}

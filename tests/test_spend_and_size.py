@@ -498,3 +498,261 @@ class TestTheTuiUsageLine:
             body = line.content.plain
             assert "ctx 41k/230k" in body, body
             assert "fold" not in body, body
+
+
+# ---------------------------------------------------------------------------
+# ---- ROADMAP_v3 §97: /usage, over billed's span -----------------------------
+# ---------------------------------------------------------------------------
+
+class TestUsageIsRecordedBesideBilled:
+    """§97 UF4. The loop hands every call's usage to the memory that keeps
+    `billed`, so `/usage` and the usage line cover one span."""
+
+    def test_every_step_reaches_the_tally(self, mocker):
+        first = _resp(1000, 100, tool=True)
+        first.usage["cache_read_tokens"] = 800
+        _, memory = _drive(mocker, first, _resp(1100, 50))
+        assert memory.usage.calls == 2
+        assert memory.usage.totals == {"input_tokens": 2100,
+                                       "output_tokens": 150,
+                                       "cache_read_tokens": 800}
+        assert memory.usage.reported["cache_read_tokens"] == 1
+
+    def test_a_coerced_zero_reaches_the_tally_as_unreported(self, mocker):
+        """`ModelResponse.usage_unreported` rides through the loop: the
+        zero is still in `billed`'s sum, and still not a count."""
+        silent = _resp(0, 0)
+        silent.usage_unreported = ("input_tokens", "output_tokens")
+        _, memory = _drive(mocker, silent)
+        assert memory.billed_tokens == 0
+        assert memory.usage.calls == 1 and memory.usage.totals == {}
+
+    def test_the_real_memory_starts_its_tally_at_zero(self, fake_storage):
+        """record_billed's scope, for record_billed's reason: nothing is
+        persisted, so a resumed thread counts from the moment it opened."""
+        from core.memory import ConversationMemory
+
+        memory = ConversationMemory()
+        memory.record_usage({"input_tokens": 5, "output_tokens": 2})
+        resumed = ConversationMemory(thread_id=memory.thread_id)
+        assert memory.usage.calls == 1
+        assert resumed.usage.calls == 0
+
+    def test_a_cli_turn_hands_its_tally_back(self, mocker, fake_storage):
+        """The CLI builds a memory per turn, so the turn's tally rides the
+        response for `ChatSession` to add up."""
+        mocker.patch("core.loop.api_initialization", return_value=object())
+        mocker.patch("core.loop.call_model_stream",
+                     side_effect=make_stream_sequence(_resp(300, 20)))
+        response = RunAgentLoop.run_agent_conversation(
+            user_goal="hi", model="m", provider_name="ANTHROPIC",
+            max_total_tokens=None)
+        assert response.turn_usage.calls == 1
+        assert response.turn_usage.totals == {"input_tokens": 300,
+                                              "output_tokens": 20}
+
+    def test_a_cli_wake_turn_hands_its_tally_back(self, mocker,
+                                                  fake_storage):
+        """`wake_conversation` builds a memory for the one run too, and
+        the CLI's wait loop counts what it returns."""
+        from core.memory import ConversationMemory
+        from tests.test_harness_rows import TEXT, WAKE
+
+        mocker.patch("core.loop.api_initialization", return_value=object())
+        mocker.patch("core.loop.call_model_stream",
+                     side_effect=make_stream_sequence(_resp(500, 30)))
+        thread = ConversationMemory().thread_id
+        response = RunAgentLoop.wake_conversation(
+            thread, TEXT, WAKE, model="m", provider_name="ANTHROPIC")
+        assert response.turn_usage.calls == 1
+        assert response.turn_usage.totals == {"input_tokens": 500,
+                                              "output_tokens": 30}
+
+
+class TestUsageInEachShell:
+
+    def test_the_cli_adds_turns_up_and_restarts_on_a_new_thread(self):
+        from types import SimpleNamespace
+
+        from cli_commands import ChatSession
+        from core.usage_view import UsageTally
+
+        def turn(thread, inp):
+            tally = UsageTally()
+            tally.add({"input_tokens": inp, "output_tokens": 1})
+            return SimpleNamespace(thread_id=thread, turn_usage=tally)
+
+        session = ChatSession(provider_name="ANTHROPIC", model="m")
+        first, second = uuid4(), uuid4()
+        session.thread_id = first
+        session.count_usage(turn(first, 10))
+        session.count_usage(turn(first, 20))   # a wake turn, same thread
+        assert session.usage.totals["input_tokens"] == 30
+        session.thread_id = second
+        session.count_usage(turn(second, 5))
+        assert session.usage.calls == 1
+        assert session.usage.totals["input_tokens"] == 5
+
+    def test_the_cli_command_prints_the_shared_report(self, capsys):
+        from cli_commands import ChatSession, _cmd_usage
+        from core.usage_view import report_lines
+
+        session = ChatSession(provider_name="ANTHROPIC", model="m")
+        session.thread_id = session.usage_thread = uuid4()
+        session.usage.add({"input_tokens": 1_234, "output_tokens": 56})
+        _cmd_usage(session, "")
+        printed = capsys.readouterr().out.splitlines()
+        assert printed == report_lines(session.usage)
+        assert printed[1] == "  input        1,234"
+
+    def test_the_cli_shows_nothing_for_a_thread_it_has_not_counted(
+            self, capsys):
+        """After /new, and after /resume before its first turn, the tally
+        still holds the previous thread's calls; they are not this one's."""
+        from cli_commands import ChatSession, _cmd_usage
+
+        session = ChatSession(provider_name="ANTHROPIC", model="m")
+        session.usage_thread = uuid4()
+        session.usage.add({"input_tokens": 9, "output_tokens": 9})
+        session.thread_id = uuid4()
+        _cmd_usage(session, "")
+        assert "no model calls yet" in capsys.readouterr().out
+
+    def test_the_wake_turns_count_in_the_cli_too(self, mocker, cli_stdin):
+        """`_await_sessions` hands each wake turn's response to the same
+        counter as the turn that started the sessions.
+
+        Batch 265's wait reads `waited_on` rather than `live_for`, and
+        polls the one stdin reader while it waits, so both are scripted:
+        a real read in a test reads the runner's own stdin."""
+        import main
+        from core.client import ModelResponse
+
+        cli_stdin()
+        thread = uuid4()
+        sessions = mocker.patch.object(main, "sessions")
+        sessions.waited_on.side_effect = [True, False]
+        sessions.pending.return_value = False
+        sessions.wait_for_wake.return_value = [object()]
+        mocker.patch("core.session_wake.build_wake",
+                     return_value=("wake", {}))
+        woke = ModelResponse(text="ok")
+        mocker.patch.object(main.RunAgentLoop, "wake_conversation",
+                            return_value=woke)
+        counted = []
+        main._await_sessions(thread, model="m", provider_name="ANTHROPIC",
+                             effort=None, authorization=None,
+                             count_usage=counted.append)
+        assert counted == [woke]
+
+    def test_a_cli_chat_turn_reaches_slash_usage(self, mocker, fake_storage,
+                                                 cli_stdin, capsys):
+        """The CALL SITE, end to end: `run_chat` counts the turn it ran,
+        and the `/usage` typed after it prints that turn's calls. The
+        pieces above prove nothing if `_chat_turn` never counts."""
+        import main
+        from core.client import ModelResponse
+        from core.usage_view import UsageTally
+
+        mocker.patch("sys.stdin.isatty", return_value=False)
+        thread = uuid4()
+        tally = UsageTally()
+        tally.add({"input_tokens": 4_321, "output_tokens": 12})
+
+        def _run(**kwargs):
+            response = ModelResponse(text="ok")
+            response.thread_id = thread
+            response.turn_usage = tally
+            return response
+
+        mocker.patch("main.RunAgentLoop.run_agent_conversation",
+                     side_effect=_run)
+        cli_stdin("hello", "/usage")
+        main.run_chat(None, "ANTHROPIC", "m")
+        out = capsys.readouterr().out
+        assert "usage · this thread since it was opened · 1 call" in out
+        assert "  input        4,321" in out
+
+    def test_the_cli_hands_its_counter_to_the_session_wait(
+            self, mocker, fake_storage, cli_stdin):
+        """The wake turns are counted only if `run_chat` hands the session
+        wait the same counter its own turn used."""
+        import main
+        from core.client import ModelResponse
+
+        mocker.patch("sys.stdin.isatty", return_value=False)
+        thread = uuid4()
+
+        def _run(**kwargs):
+            response = ModelResponse(text="ok")
+            response.thread_id = thread
+            return response
+
+        mocker.patch("main.RunAgentLoop.run_agent_conversation",
+                     side_effect=_run)
+        # Batch 265: the wait says how it ended, and run_chat reads that.
+        waited = mocker.patch("main._await_sessions",
+                              return_value=main._WaitEnd())
+        cli_stdin("hello")
+        main.run_chat(None, "ANTHROPIC", "m")
+        counter = waited.call_args.kwargs["count_usage"]
+        assert counter.__func__.__name__ == "count_usage"
+
+    @pytest.mark.asyncio
+    async def test_the_tui_command_writes_the_shared_report(self):
+        from types import SimpleNamespace
+
+        from core.usage_view import UsageTally, report_lines
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            tally = UsageTally()
+            tally.add({"input_tokens": 412_880, "output_tokens": 18_207,
+                       "cache_read_tokens": 301_440})
+            app._memory = SimpleNamespace(usage=tally, billed_tokens=0,
+                                          last_input_tokens=0)
+            written = []
+            app._transcript.write_system = written.append
+            from tui.commands import registry
+            assert registry.dispatch(app, "/usage")
+            await pilot.pause()
+            assert written == report_lines(tally)
+
+    @pytest.mark.asyncio
+    async def test_the_tui_command_before_any_turn_writes_no_thread(
+            self):
+        """`_memory`, never `memory`: asking must not create a thread."""
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            app._memory = None
+            written = []
+            app._transcript.write_system = written.append
+            from tui.commands import registry
+            assert registry.dispatch(app, "/usage")
+            await pilot.pause()
+            assert written == [
+                "usage · this thread since it was opened · no model calls yet"]
+            assert app._memory is None
+
+    @pytest.mark.asyncio
+    async def test_the_usage_line_writes_millions_in_m(self):
+        """§97 UF3: the reported shape, `billed 12345k`, is gone."""
+        from types import SimpleNamespace
+
+        from tui.app import VenastineApp
+        from tui.widgets import UsageLine
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            app._memory = SimpleNamespace(billed_tokens=12_345_000,
+                                          last_input_tokens=412_000)
+            app.refresh_usage_line()
+            await pilot.pause()
+            body = app.query_one("#usage-line", UsageLine).content.plain
+            assert "billed 12M" in body and "ctx 412k" in body, body

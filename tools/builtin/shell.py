@@ -1115,5 +1115,6 @@ def run(params: dict) -> dict:
     except SandboxUnavailable as e:
         return {"error": str(e)}
     except Exception as e:
-        logger.exception("shell tool failed")
+        # INFO (batch 266): the result below says this; the file keeps the trace.
+        logger.info("shell tool failed", exc_info=True)
         return {"error": f"Shell execution failed: {e}"}

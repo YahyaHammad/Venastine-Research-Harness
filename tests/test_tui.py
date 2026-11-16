@@ -1498,7 +1498,9 @@ class TestLoggingMustNotScribbleOnTheScreen:
 
         `fetch_url` logs the URL it failed on BY DESIGN -- its own comment
         names this redaction as the sink-side guard for a URL carrying
-        userinfo -- so this needs no contrivance to reach.
+        userinfo. Since batch 266 that line is INFO and no longer reaches
+        this handler; the WARNING here stands in for any warning that
+        names a URL, which still does.
         """
         import logging
 
@@ -8165,6 +8167,103 @@ class TestTheLineThatSaysItIsDone:
 
 
     @pytest.mark.asyncio
+    async def test_the_wake_turns_count_and_the_session_wait_does_not(
+            self, mocker):
+        """ROADMAP_v3 §97 (UF1). A turn held open for its background
+        sessions ends with ONE line, after every wake turn. The line kept
+        only the last wake turn's count and divided it by a time that
+        included every second spent waiting between them."""
+        from tui.app import SessionWait
+
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            answer = make_model_response(text="started it")
+            answer.turn_output_tokens = 300
+            woke = make_model_response(text="it finished")
+            woke.turn_output_tokens = 100
+
+            app._busy = True
+            app.post_message(LoopEventMessage(
+                LoopEvent(final_response=answer, stop_reason="complete")))
+            await pilot.pause()
+            clock.advance(2.0)
+            app.post_message(SessionWait(True))
+            await pilot.pause()
+            clock.advance(60.0)              # the session runs
+            app.post_message(SessionWait(False))
+            await pilot.pause()
+            app.post_message(LoopEventMessage(
+                LoopEvent(final_response=woke, stop_reason="complete")))
+            await pilot.pause()
+            clock.advance(2.0)
+            app._busy = False
+            app._write_turn_time()
+            await pilot.pause()
+
+            line = [t for r, t in app._transcript._entries if r == "system"][-1]
+            # took: all 64 seconds. The rate: 400 tokens over the 4
+            # seconds that were not the wait.
+            assert line == "took 1m04s · 400 tokens out · 100 tok/s", line
+
+
+    @pytest.mark.asyncio
+    async def test_a_count_left_by_a_turn_with_no_line_does_not_carry(
+            self, mocker):
+        """§97 (UF1). Summing needs a start: the count is cleared when a
+        turn starts, so one whose line was never written cannot join the
+        next turn's."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            app._turn_output_tokens = 999
+            response = make_model_response(text="done")
+            response.turn_output_tokens = 400
+
+            app._busy = True
+            app.post_message(LoopEventMessage(
+                LoopEvent(final_response=response, stop_reason="complete")))
+            await pilot.pause()
+            clock.advance(10.0)
+            app._busy = False
+            app._write_turn_time()
+            await pilot.pause()
+
+            line = [t for r, t in app._transcript._entries if r == "system"][-1]
+            assert line == "took 10.0s · 400 tokens out · 40 tok/s", line
+
+
+    @pytest.mark.asyncio
+    async def test_a_running_tool_leaves_the_completion_rate_too(
+            self, mocker):
+        """§97 (UF1): batch 118 took tool time out of the live figure
+        only; the completion line divided by `took`."""
+        clock = _Clock()
+        mocker.patch("tui.app.monotonic", clock)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(84, 24)) as pilot:
+            response = make_model_response(text="done")
+            response.turn_output_tokens = 500
+
+            app._busy = True
+            clock.advance(2.0)
+            app._meter.set_tool_running(1, clock())
+            clock.advance(120.0)             # a two-minute tool
+            app._meter.set_tool_running(-1, clock())
+            app.post_message(LoopEventMessage(
+                LoopEvent(final_response=response, stop_reason="complete")))
+            await pilot.pause()
+            clock.advance(3.0)
+            app._busy = False
+            app._write_turn_time()
+            await pilot.pause()
+
+            line = [t for r, t in app._transcript._entries if r == "system"][-1]
+            assert line == "took 2m05s · 500 tokens out · 100 tok/s", line
+
+    @pytest.mark.asyncio
     async def test_nothing_is_said_when_no_turn_was_running(self, mocker):
         """`_busy` is cleared on paths where it was never set -- a starter's
         early-return error branch. A `took 0.0s` line under an error message
@@ -9231,13 +9330,18 @@ class _StubSessions:
     def live_for(self, owner):
         return self._live
 
+    def waited_on(self, owner):
+        # Batch 265: what the wait loop counts since it stopped counting
+        # interactive shells. The one session here is a background one.
+        return self._live
+
     def pending(self, owner):
         return 0
 
     def suspended(self, owner):
         return False
 
-    def wait_for_wake(self, owner, timeout=None):
+    def wait_for_wake(self, owner, timeout=None, stop=None):
         self.waits += 1
         if self._on_wait is not None:
             self._on_wait(self.waits)

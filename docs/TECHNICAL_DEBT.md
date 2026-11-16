@@ -3145,6 +3145,18 @@ Two findings in the building, both in DEVLOG batch 160: a lazy BEGIN-to-END
 match ate the prose between two quoted markers, and the obvious footer regex is
 quadratic on a megabyte of base64.
 
+**The `ghs_` half of that list went stale in April, and batch 260 covers it
+again.** Since 2026-04-27, GitHub has minted installation tokens in a stateless
+form, `ghs_APPID_JWT`: a JWT after the prefix, about 520 characters with two
+dots. GitHub's changelog called the rollout complete on 2026-10-02, with Actions'
+`GITHUB_TOKEN` included. The 40-character pattern added above stops at the first
+underscore. Measured on 2026-11-14, a fake passed `redact_output_text` whole and
+refused no input. Batch 259's evaluation of a GitHub persona found the gap.
+Batch 260 adds a second GitHub pattern, on both sides as this closure's ruling
+requires: the four `gh[ousr]_` prefixes, then three base64url runs of at least 20
+characters joined by two dots. DEVLOG batch 260 has the measurements and the
+owner's two choices.
+
 ## 53. `resolve=False` checks dotted IP literals and no other numeric form (closed, batch 213)
 
 **Issue:** #207.
@@ -6454,6 +6466,92 @@ would then fail the startup gate rather than every call after it. Left for
 its own batch because it changes what a deployment checks before it serves
 anyone, which wants a run on the Space; meanwhile `TestTheWallsHold` runs the
 real path in CI on every push.
+
+## 117. The input side's URL scan is quadratic on one long alphanumeric run (open, found batch 260)
+
+**Found while writing batch 260's linearity test.** The test drove a megabyte
+through `check_input_policy` as well as `redact_output_text`. Severity `S3`,
+`stability`.
+
+**What was measured.** `_input_leaf` runs `_URL_RE.findall` over every string
+in every tool call's arguments, looking for a URL whose domain is blocked. On
+one run of letters and digits with no `://` in it, every position is a start.
+`[a-zA-Z][a-zA-Z0-9+.\-]*` scans to the end of the run and then fails to find
+`://`. Measured on Windows in the pinned venv:
+
+| run length | `_URL_RE.findall` |
+|---|---|
+| 25 KB | 0.24 s |
+| 50 KB | 0.98 s |
+| 100 KB | 4.8 s |
+| 1 MB, through `check_input_policy` | 441 s |
+
+The same 100 KB through `redact_output_text` takes 0.008 s. With a `_` every
+nine characters, `check_input_policy` takes 0.008 s too, because `_` is not a
+scheme character and so it ends the run.
+
+**Why it matters.** The scan runs on the arguments before the handler does. A
+call carrying a long hex string, or a minified line with no punctuation, stalls
+dispatch for seconds at 100 KB and for minutes at a megabyte. Nothing is refused
+and nothing leaks; the cost is the hang.
+
+**Shape, not done here.** Measured standalone on the regex, not applied. Bound
+the scheme: `[a-zA-Z][a-zA-Z0-9+.\-]{0,31}://`. Each start then costs at most 32
+steps, and a megabyte takes 0.05 s. It finds every URL today's pattern finds in
+`1abc://`, `0https://`, `git+ssh://` and ordinary prose. For a scheme glued to a
+long run, it finds the same host from a later start. The other shape, a
+lookbehind like batch 260's, takes 0.016 s, but it stops seeing
+`0https://exploit-db.com/x`, and that is a way around the blocklist. Left out of
+batch 260 because it changes what the blocklist reads, and the batch is about
+one token form.
+
+## 118. The Space's audit leaves out what only the Space installs (open, found batch 262)
+
+**Found while moving the demo to Gradio 6.32.0.** On Hugging Face,
+`deploy_demo.audit_targets` audits `session.lock` and a lock compiled from
+`bridge_requirements`: the bridge's own requirements plus `gradio==` the pinned
+version. The Space installs more than that, in one pip command: the bundle's
+`requirements.txt`, `gradio[oauth,mcp]` at `sdk_version`, and the platform's own
+`torch<=2.13.0`, `uvicorn`, `websockets` and `spaces` (the line
+`build_demo_bundle.py` records from the Space's log). Resolved with uv 0.13.4
+on 2026-11-15 for 6.32.0, that line pins 112 packages against the audited
+set's 72:
+
+- **40 never audited:** among them `mcp` 1.30.0, `authlib`, `cryptography`,
+  `pyjwt`, `jsonschema`, `sse-starlette`, torch 2.13.0, triton, and torch's
+  CUDA packages;
+- **one at another version:** `pydantic` (2.12.5 in the Space, 2.14.3 audited),
+  because the `mcp` extra caps it.
+
+pip-audit 2.10.1 found nothing in either set that day, so nothing is exposed
+now. But an advisory in one of the 40 would not refuse a deploy, while the
+same advisory in the bridge's own set would.
+
+**Shape, not done here.** For `hf`, compile the Space's whole line for the audit,
+from `requirements(root, "hf")` plus `gradio[oauth,mcp]==GRADIO_VERSION` and
+the platform's pins, kept as one constant beside `GRADIO_VERSION`. That
+constant is read from a build log, so it can drift when Hugging Face changes
+its line. Left for its own batch because it changes what refuses a deploy,
+and the accepted list would need triage for a package the bridge never
+imports.
+
+## 119. The shell reads the container's `/workspace` as a host path (open, found batch 263)
+
+**Found while building ROADMAP_v3 §96.** The file tools now map `/workspace/x`
+onto the workspace (CW1), and the shell does not. Measured on Windows and in
+WSL: `classify_command("cat /workspace/notes.txt", ws)` is `HOST_READ` with
+`escapes_workspace` True, so `_route` sends it to the host, after a prompt, and
+on the host `/workspace` is not the workspace. `cat notes.txt` is `INERT` and
+runs in the container. A model that copies a path from the container's own
+output into a read-only command is asked, then gets the host's answer about a
+different path. Severity `S3`, `coherence`.
+
+**Shape, not done here.** `_within` in `security/sandbox.py` would read a
+token spelled from the mount point as the workspace path it names, with the
+same two rules CW2 gives the file tools. Left out of batch 263 because it
+changes what the gate AUTO-APPROVES: `cat /workspace/x` would become INERT and
+run unasked in the container, which is the right answer but is the gate's
+decision (ROADMAP_v2 §28, G2) and wants the owner's yes.
 
 ## Review-marathon arrivals at open issues with no register entry
 

@@ -950,3 +950,108 @@ class TestTheExitIsHandedToTheCredentialQuarantine:
         [(code, first)] = process.exit_notes
         assert code == 1
         assert first == "x" * ss._AUTH_SCAN_CHARS
+
+
+# ---------------------------------------------------------------------------
+# ---- SS2 as amended (batch 265): a consumer that stops waiting ------------
+# ---------------------------------------------------------------------------
+
+
+class TestAConsumerThatStopsWaiting:
+    """The manager's half of the owner's rule that a message sent while a
+    shell waits goes first: the wait can be told to stop (`stop`, `nudge`),
+    and a batch the consumer already took goes back (`put_back`)."""
+
+    def test_a_stop_already_true_hands_out_nothing(self, manager,
+                                                   session_starter):
+        _start(manager)
+        _process(session_starter).exit(0)
+        assert _until(lambda: manager.pending("t1"))
+
+        assert manager.wait_for_wake("t1", timeout=1.0,
+                                     stop=lambda: True) is None
+        # Still there, for the wait the message's own turn ends in.
+        assert manager.take_wake("t1") is not None
+
+    def test_a_stop_that_comes_true_is_read_at_the_nudge(self,
+                                                          session_starter):
+        """Not at the end of the slice, which here is a minute long: a
+        consumer that saw its message only then would sit on it that long.
+
+        Nudging needs the manager's lock, and the waiter holds it from its
+        first `stop()` until it is inside the condition wait -- so once
+        `stop` has been asked once, the nudge below can only land on a
+        waiter that is already asleep, which is the case being measured.
+        """
+        slow = ss.SessionManager(starter=session_starter,
+                                 clock=time.monotonic, poll_s=60.0)
+        _start(slow)
+        asked = []
+        stopped = threading.Event()
+
+        def stop():
+            asked.append(1)
+            return stopped.is_set()
+
+        result = []
+        waiter = threading.Thread(
+            target=lambda: result.append(
+                slow.wait_for_wake("t1", timeout=120.0, stop=stop)),
+            daemon=True)
+        waiter.start()
+        try:
+            assert _until(lambda: asked)
+            stopped.set()
+            slow.nudge()
+            waiter.join(5.0)
+            assert not waiter.is_alive(), \
+                "the stop was read at the end of the slice, not at the nudge"
+            assert result == [None]
+        finally:
+            slow.close()
+
+    def test_put_back_returns_a_batch_to_the_front(self, manager,
+                                                   session_starter):
+        _start(manager, call_id="c1")
+        _start(manager, call_id="c2")
+        _process(session_starter, 0).exit(0)
+        assert _until(lambda: manager.pending("t1"))
+        first = manager.take_wake("t1")
+        _process(session_starter, 1).exit(3)
+        assert _until(lambda: manager.pending("t1"))
+
+        manager.put_back("t1", first)
+
+        assert [e.return_code for e in manager.take_wake("t1")] == [0, 3], \
+            "the result put back lost its place to one that came after it"
+
+    def test_the_wake_it_was_counted_as_is_uncounted(
+            self, manager, session_starter, monkeypatch):
+        """No turn answered it, so it must not spend one of the wakes the
+        limit allows: with a limit of one, counting it would suspend waking
+        before the result was ever answered."""
+        monkeypatch.setattr(config, "SHELL_SESSION_MAX_CONSECUTIVE_WAKES", 1)
+        _start(manager)
+        _process(session_starter).exit(0)
+        assert _until(lambda: manager.pending("t1"))
+
+        manager.put_back("t1", manager.take_wake("t1"))
+
+        assert manager.take_wake("t1") is not None
+        assert manager.suspended("t1") is False
+
+    def test_putting_back_nothing_uncounts_nothing(
+            self, manager, session_starter, monkeypatch):
+        monkeypatch.setattr(config, "SHELL_SESSION_MAX_CONSECUTIVE_WAKES", 1)
+        _start(manager, call_id="c1")
+        _start(manager, call_id="c2")
+        _process(session_starter, 0).exit(0)
+        assert _until(lambda: manager.pending("t1"))
+        assert manager.take_wake("t1") is not None
+
+        manager.put_back("t1", [])
+
+        _process(session_starter, 1).exit(0)
+        assert _until(lambda: manager.pending("t1"))
+        assert manager.take_wake("t1") is None
+        assert manager.suspended("t1") is True

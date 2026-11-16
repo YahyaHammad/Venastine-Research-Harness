@@ -119,9 +119,10 @@ _SPECS = (
                 "[--software|--research] [--config]",
                 absent={CLI: "not yet; run venastine --init."}),
     CommandSpec("kill", "stop a background session", "[session-id]",
-                absent={CLI: "the CLI's prompt waits until background "
-                             "sessions finish, and Ctrl+C while it waits "
-                             "stops them."}),
+                # Batch 265: the prompt no longer waits for them (SS2 as
+                # amended), so the reason is the key alone.
+                absent={CLI: "Ctrl+C while the CLI waits on background "
+                             "sessions stops them."}),
     CommandSpec("memories", "list durable memories visible here"),
     CommandSpec("mentions", "show file mention status or include ignored "
                             "paths", "[ignored on|off]",
@@ -163,6 +164,9 @@ _SPECS = (
     CommandSpec("trigger", "override when this chat compacts, for the "
                            "session", "[tokens|off]",
                 absent={CLI: _IN_THE_TUI}),
+    # ROADMAP_v3 §97 (UF4): both shells, one report (`core/usage_view.py`).
+    CommandSpec("usage", "token counts the provider reported for this "
+                         "thread"),
     CommandSpec("window", "override this model's context window for the "
                           "session", "[tokens|off]",
                 absent={CLI: _IN_THE_TUI}),
