@@ -233,10 +233,11 @@ def _interpret(tool_name: str, stdout: str, stderr: str, returncode: int,
         return {"error": _limit_message(tool_name, timeout)}
 
     excerpt = (stderr or "").strip().replace("\n", " ")[-_STDERR_EXCERPT:]
-    # logger.warning, not exception: there is no traceback here to keep,
-    # and this path is reachable by ordinary input.
-    logger.warning("%s produced no readable result (exit %s): %s",
-                   tool_name, returncode, excerpt)
+    # Not logger.exception: there is no traceback here to keep, and this
+    # path is reachable by ordinary input. INFO, not WARNING (batch 266):
+    # the result below says the same, and both shells print it.
+    logger.info("%s produced no readable result (exit %s): %s",
+                tool_name, returncode, excerpt)
     return {"error": f"{tool_name} did not return a usable result "
                      f"(exit {returncode}). {excerpt}".strip()}
 
@@ -309,8 +310,10 @@ def run_isolated(handler, params: dict, timeout: float,
             # case, which shares this wording rather than repeating it.
             return {"error": _limit_message(tool_name, timeout)}
         except OSError as e:
-            logger.warning("Could not start an isolated child for %s: %s",
-                           tool_name, e)
+            # INFO (batch 266): the result below says this, and both shells
+            # print it; the file keeps the line.
+            logger.info("Could not start an isolated child for %s: %s",
+                        tool_name, e)
             return {"error": f"{tool_name} could not be run: {e}"}
         stdout, stdout_bytes = _head(out, MAX_CHILD_OUTPUT_BYTES + 1)
         stderr = _tail(err, 4 * _STDERR_EXCERPT)

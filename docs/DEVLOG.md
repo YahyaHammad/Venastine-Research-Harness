@@ -32015,3 +32015,63 @@ baseline count grew) and gitleaks on a clean export are clean; no requirements f
 pip-audit was not re-run.
 
 - **Version:** the branch's beta identity, `0.3.16-b.1.ss2-type-during-sessions.r881d0b00dc0e`.
+
+## Batch 266 -- a tool failure is said once: INFO for what the result already says, WARNING on both screens (2026-11-16)
+
+**Asked.** The owner reported, from an earlier version, that a failed `fetch_url` showed twice in
+the transcript: a `[warning] fetch_url failed for <url>: <e>` line and then the `x fetch_url
+Could not fetch URL: <e>` result line, with httpx's "For more information check" in both. Asked
+to check it against the current code before fixing it. **Still there, measured** with real httpx,
+the real `fetch_url.run`, the real `TranscriptLogHandler` and the real `_translate`: one 403 gave
+one log line and one result line, the same text. `fetch_url.py` logged a WARNING and returned the
+same error, `TranscriptLogHandler` routes WARNING+ to the transcript, and both shells print a
+failed result as a line of its own.
+
+**Three answers, because two of my claims did not survive measuring.**
+- **First:** a failure the tool returns as its result logs at **INFO**, app.log only, at every
+  site of that shape -- `fetch_url`, `read_project_doc`, `write_project_doc` (refused, failed),
+  and `web_search`'s and `arxiv_search`'s retry lines, whose last attempt repeated the result.
+  The registry already logs a refusal it returns at INFO (`refused before approval`).
+- **Second, after a correction.** The question said INFO would also leave the CLI's terminal. It
+  would not: `configure_logging`'s stderr handler carried no level, so it printed the root's INFO
+  -- measured, an INFO line reached stderr beside the file. Asked again, the owner chose **the
+  CLI's stderr at WARNING**, the TUI transcript's rule, so both shells put the same lines on
+  screen. An explicit `AGENT_LOG_LEVEL` (or a `level` a caller passes) still reaches the terminal,
+  so `main.py`'s documented `AGENT_LOG_LEVEL=DEBUG` route keeps working; a set but unreadable value
+  counts as asked for, since `_resolve_level` has just said it runs at INFO.
+- **Third, after a scan.** An AST scan of `tools/` for the shape found nine more the first answer
+  had not named: `read`, `write`, both halves of `edit`, `view_image`, and `shell`'s catch-all,
+  which used `logger.exception` (so the TUI drew a red `[error] ... (reason)` line above the
+  result), and `isolation.py`'s two WARNINGs and `arxiv_search`'s oversized feed. The owner
+  chose the same rule, **keeping the tracebacks**: the six `logger.exception` sites log at INFO
+  with `exc_info=True`, so app.log still holds the stack for an unexpected failure.
+
+**Not changed, on purpose.** `arxiv_search`'s hostile-feed line keeps the exception, which carries
+a string the feed chose, while the result names only its category (batch 116's review): the two
+do not say the same thing, and the guard's one allowance names why. The registry's `Tool %s
+raised` line (batch 91 put its reason on screen deliberately) and its input-policy refusal (raised,
+not returned) are outside the shape and were left alone.
+
+**The guard.** `tests/test_tool_failure_lines.py` parses every module under `tools/` and fails on
+a statement list that both logs at WARNING or above and returns `{"error": ...}`, and on a retry
+loop whose `except` logs loudly while its `else` returns the error. It is shown both shapes as
+they stood, the fixed form, and arxiv's "kept N of M" WARNING in a retry loop's body, which says
+something the result does not and is not flagged. An allowance that stops matching fails too.
+
+**What it costs.** The CLI's terminal no longer shows INFO lines: about fifty sites, among them
+"MCP server connected", "Registered N MCP tool(s)", cache hits, compaction and "refused before
+approval". All of them stay in app.log, and `AGENT_LOG_LEVEL=INFO` brings them back. The hosted
+bridge configures its own logging (`deploy/hosted/app.py`) and is unaffected.
+
+**Verified.** The full suite on Windows with `AGENT_WORKSPACE` unset: 9474 passed, 88 skipped
+(9562, 52 new). 28 of 28 mutations killed, each reverting one piece: every one of the
+fifteen sites back to its old level, three of the kept tracebacks dropped, the screen level
+following the root again, the handler's level never set, the variable ignored, a caller's level
+ignored, an empty variable read as unset, and five cuts to the guard itself (each shape's rule, the
+retry rule widened to the whole loop, the allowance, `exception` not counted as loud). One WIP
+run, made while bandit ran beside it, failed `test_a_timed_out_call_is_STOPPED_not_merely_abandoned`
+by one byte (26 against 25): a tick on the timeout path, which this batch does not touch. It passed
+five of five alone and on the final run. ruff, bandit (no new findings, no baseline count grew) and
+gitleaks on a clean export are clean; no requirements file changed, so pip-audit was not re-run.
+
+- **Version:** the branch's beta identity, `0.3.16-b.1.tool-failure-log-level.r425b57801358`.

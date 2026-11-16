@@ -66,7 +66,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 9691 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 9743 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -3471,7 +3471,9 @@ That example is deliberately a *current* divergence, because a rule whose only e
 
 A tool that should not always be *offered* (as opposed to not allowed) supplies a `ToolSpec.available_check` predicate — `load_skill` does this so it disappears from `schemas()` when no skills are catalogued. Don't special-case it inside `schemas()`; the registry owns mechanism, not policy.
 
-**Log detail must be in the message, not in `extra={}`.** The default formatter renders `%(message)s` only, so every field passed via `extra=` was silently dropped — fifteen consecutive `fetch_url failed` lines with no URL and no reason, and an `arxiv_search attempt failed` that hid a scheme change for three retries. Interpolate instead (`logger.warning("fetch_url failed for %s: %s", url, e)`). This matters more since the TUI routes WARNING+ into the transcript.
+**Log detail must be in the message, not in `extra={}`.** The default formatter renders `%(message)s` only, so every field passed via `extra=` was silently dropped — fifteen consecutive `fetch_url failed` lines with no URL and no reason, and an `arxiv_search attempt failed` that hid a scheme change for three retries. Interpolate instead (`logger.info("fetch_url failed for %s: %s", url, e)`). This matters more since the TUI routes WARNING+ into the transcript.
+
+**A failure a tool RETURNS is logged at INFO** (batch 266, the owner's choice). Both shells print a failed result as a line of its own, so a WARNING drew the one failure twice: the owner's screenshot had `[warning] fetch_url failed for ...` above `x fetch_url  Could not fetch URL: ...`, the same text. Where the site used `logger.exception`, it is `logger.info(..., exc_info=True)`, which keeps the traceback in `app.log`. `tests/test_tool_failure_lines.py` holds it: its guard fails on any block under `tools/` that logs at WARNING or above AND returns `{"error": ...}`, and on a retry loop that does it per attempt; `ALLOWED` names the one exception (arxiv's hostile feed, whose line keeps what the result deliberately leaves out). **Both screens show WARNING and above:** the TUI's transcript always did, and the CLI's stderr does since batch 266 (`logging_setup._screen_level`) unless `AGENT_LOG_LEVEL` is set or a caller passes a level.
 
 **Debug breadcrumbs name things, never quote them (batch 78).** `on_loop_event_message` logs event-kind flags plus screen-stack depth, and `_blocking_modal` logs screen type plus outcome class — params, answers and notes stay out of the file. A breadcrumb quoting a value is one log rotation away from a durable secret beside the redacted sinks, and the ordering story never needs the content. `logger.isEnabledFor(logging.DEBUG)` guards each site so the per-token hot path pays one predicate; a test asserts silence at INFO.
 

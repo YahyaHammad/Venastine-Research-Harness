@@ -1498,7 +1498,9 @@ class TestLoggingMustNotScribbleOnTheScreen:
 
         `fetch_url` logs the URL it failed on BY DESIGN -- its own comment
         names this redaction as the sink-side guard for a URL carrying
-        userinfo -- so this needs no contrivance to reach.
+        userinfo. Since batch 266 that line is INFO and no longer reaches
+        this handler; the WARNING here stands in for any warning that
+        names a URL, which still does.
         """
         import logging
 

@@ -577,7 +577,9 @@ def run(params: dict) -> dict:
                 # Returned rather than raised, like every other dead end in
                 # this function: a search tool that cannot answer is a
                 # result the model can work around.
-                logger.warning(
+                # INFO (batch 266): the result below says this, and both
+                # shells print it; the file keeps the query and the page.
+                logger.info(
                     "arxiv_search dropped a feed over %d bytes for %r "
                     "(max_results=%d, start=%d)",
                     MAX_FEED_BYTES, parsed.keywords, parsed.max_results,
@@ -636,7 +638,11 @@ def run(params: dict) -> dict:
                 }
             except (httpx.HTTPError, ET.ParseError) as e:
                 last_exc = e
-                logger.warning(
+                # INFO (batch 266), as web_search's retries: the last
+                # attempt's error is the result, and a recovered attempt is
+                # nothing to show. NOT the hostile-feed refusal above, whose
+                # line keeps what the result deliberately leaves out.
+                logger.info(
                     "arxiv_search attempt %s/%s failed for %r: %s",
                     attempt + 1, MAX_RETRIES + 1, parsed.keywords, e)
         else:
