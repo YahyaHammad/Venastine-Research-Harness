@@ -1730,6 +1730,9 @@ class FakeStorage:
             "harness": harness,
             # ROADMAP_v3 §81 (IM2). The list, as `harness` holds its dict.
             "images": images,
+            # ROADMAP_v3 §98 (RS6). storage.tool_result_times reads it, and
+            # runs over this fake through _ordered_rows.
+            "created_at": datetime.now(UTC),
         })
         # (#32) Mirrors production: any archived row stamps the thread,
         # in the same write.

@@ -423,6 +423,26 @@ python main.py --mode research "does the claim about X hold up?"
 
 In the TUI, a sidebar tracks passes and a running tier tally; `/claims` or **ctrl+l** opens every claim with its tier, grounding status, assumption flags and score breakdown — during the run as well as after it.
 
+### Picking up a run that stopped
+
+A run that fails, or that you quit, keeps everything it finished. Its last line
+says how to pick it up:
+
+```bash
+python main.py --resume 1a2b3c4d          # the run's id, or its first eight characters
+python main.py --resume                   # list the runs that can be resumed
+```
+
+In the TUI, `/research --resume <id>`, or bare `/research --resume` for a picker.
+Passes that completed are not run again. The pass that failed carries on in its
+own thread, with its research kept: an answer it had already written is checked
+again first, with no model call, and a request the run stopped on is sent again.
+The pages it fetched are read back from the stored tool results, so sources are
+scored as they would have been. A resume runs on the session's current model,
+and takes `--attended`, `--review` and `--grant` again, because a grant is never
+stored. A run recorded before resume existed can be picked up too, unless it
+stopped inside the revision loop.
+
 ### Having it review itself
 
 ```bash
@@ -762,7 +782,7 @@ paths are cached and 200 matches offered; narrow the query when a limit is shown
 | `/critic [[PROVIDER] name\|off]` | Route the grounding and critic passes (3a, 3b, 6b) to a different model than the generator, so it is not checking its own output for errors. Remembered across launches; not cleared by `/model`, since being a different model is the point. Bare reports what is in force and where it came from |
 | `/embedder [[PROVIDER] name\|off]` | Choose the embedding model that scores how close each source is to the claim it was cited for. The selection is **probed** — one embedding call checks the provider, the slug and the key, and reports the dimension — and only what worked is remembered. Without one, similarity stays the grounding model's own estimate and every run says so |
 | `/submodel [[PROVIDER] name\|off]` | Run spawned subagents on a different model than the session's, so a cheap child need not run on its parent's expensive model. An agent whose own file names a model or a provider keeps its pin, and the compactor, the pipeline reviewer and `/init`'s initializer keep the session model; the command names what it does not reach. Remembered across launches, never in settings.json, and named in the header while set. Also in the CLI |
-| `/research [--attended] [--review\|--no-review] [--grant[=a,b]] <query>` | Run the pipeline live from the TUI. Leading flags compose in any order before the query; bare `--grant` opens the picker, `--grant=a,b` names them (`--grant-tools=` works as an alias); without flags, `research.*` settings apply |
+| `/research [--attended] [--review\|--no-review] [--grant[=a,b]] <query>\|--resume [run-id]` | Run the pipeline live from the TUI. Leading flags compose in any order before the query; bare `--grant` opens the picker, `--grant=a,b` names them (`--grant-tools=` works as an alias); without flags, `research.*` settings apply. `--resume` comes last and picks a failed or abandoned run up where it stopped; bare, it opens a picker |
 | `/compact [--strength 1-5]` | Fold older turns now instead of waiting for the trigger. Recent turns keep exactly the protection an automatic compaction gives them |
 | `/trigger [tokens\|off]` | Override **when this chat compacts**, for this session only. An absolute prompt size (`80k`), not a margin below the window. A value below the warning margin or the keep-recent floor is refused naming it; a value below the thread's current size is accepted and says a fold is coming |
 | `/window [tokens\|off]` | Set this model's **context window** and remember it, per `(provider, model)` and across launches. It outranks both the provider's own answer and the built-in table, and it moves everything derived from the window: the chat compaction trigger, the research-pass backstop and the summarizer's input budget. Above what the provider reports it warns rather than refusing, because raising it is the point — a gateway or a self-hosted endpoint can report its own default rather than your deployment's |
@@ -871,6 +891,7 @@ Everything `python main.py` accepts. Wherever a value can come from more than on
 | `--grant-tools NAMES` | Research only. Same as `--grant`, but takes an explicit comma-separated list of tool names and works without a terminal |
 | `--attended` | Research only. Ask about every gated call as it happens; 600s with no answer denies that call and the run continues. Composes with grants — granted tools aren't asked about, everything else is |
 | `--review` / `--no-review` | Research only. Post-pipeline review on/off for this run; `--no-review` is the escape from a persisted setting |
+| `--resume [RUN_ID]` | Pick a failed or abandoned research run up where it stopped; completed passes are not run again. Implies `--mode research`. The id's first eight characters are enough; with none, list the runs that can be resumed and exit |
 | `--memories` | List durable memories visible from this directory — id, scope, content — and exit |
 | `--forget ID` | Delete one memory by id — never by substring — and exit |
 | `--summary [THREAD]` | Print one thread's distilled summary and exit; falls back to `--thread`. A summary still current costs no model call — staleness is detected, not assumed |
@@ -882,7 +903,9 @@ Everything `python main.py` accepts. Wherever a value can come from more than on
 
 **Combinations the parser refuses** (rather than ignoring):
 
-- `--mode research` without a positional query.
+- `--mode research` without a positional query (or `--resume`).
+- `--resume` with a query — a resumed run keeps its own.
+- `--tui` with `--resume` — use `/research --resume` inside the TUI.
 - `--tui` with `--mode research` — use `/research` inside the TUI.
 - `--tui` with a positional query — start the TUI and type.
 - Any of `--grant`, `--grant-tools`, `--attended`, `--review`, `--no-review` outside research mode, including under `--tui`.
@@ -1058,7 +1081,7 @@ Deliberately not settings.json keys: editing these means editing the harness's o
 
 **Built:** ROADMAP.md §1–§12 (§10's ensemble mode rebuilt by its revisit — diversity now comes from a roster of different models) and ROADMAP_v2.md §13 (streaming loop), §14 (config loader + workspace trust), §15 (permissions), §16 (TUI), §17 (MCP), §18 (agents), §19 (skills), §20 (post-pipeline review), §21a (compaction + `pin`), §21b (durable memory), §22 (live pipeline progress), §25 (authorised tool use in the pipeline), §26 (research legibility: per-pass tool calls, code-stage announcements, the claims view, role colour, `/copy`), §27 (thread legibility: transcript replay on resume, a conversations-only thread picker), §21c (session summaries and cross-thread referencing — §21 is now complete), §24 (`/init`), §23 (interactive tools: the response channel, per-tool subagent sign-off, `ask_user`, and the todo list), §28 (the shell capability classifier).
 
-**Remaining:** nothing in `ROADMAP.md` or `ROADMAP_v2.md`, and §10's revisit is now closed. `ROADMAP_v3.md` §49–§59, §61–§93, §95, §96 and §97 are built. The section still to build is §60 (Unified Harness Protocol compliance), specified and awaiting detailed design. §56 lets a decision model approve a single contained shell command under the opt-in `classified` mode; §54 completes project file/folder mentions without loading contents; §58 supplies a short harness identity that follows the current model; §83's final live checks are confirmed, and the ChatGPT header distinguishes a selected provider from an active sign-in. `TECHNICAL_DEBT.md` items 14, 17, 18, 21, 102, 116, 118, 119 and 120 are open, and so is the secrets half of item 97. The two checks recorded against §10 are answered from the providers' documentation in `ROADMAP_v3.md` §87: the default `temperature` on OpenAI and Google is 1.0, and OpenAI's reasoning models refuse one whenever reasoning effort is not `none`, which the guard now follows.
+**Remaining:** nothing in `ROADMAP.md` or `ROADMAP_v2.md`, and §10's revisit is now closed. `ROADMAP_v3.md` §49–§59, §61–§93 and §95–§98 are built. The section still to build is §60 (Unified Harness Protocol compliance), specified and awaiting detailed design. §56 lets a decision model approve a single contained shell command under the opt-in `classified` mode; §54 completes project file/folder mentions without loading contents; §58 supplies a short harness identity that follows the current model; §83's final live checks are confirmed, and the ChatGPT header distinguishes a selected provider from an active sign-in. `TECHNICAL_DEBT.md` items 14, 17, 18, 21, 102, 116, 118, 119, 120, 121 and 122 are open, and so is the secrets half of item 97. The two checks recorded against §10 are answered from the providers' documentation in `ROADMAP_v3.md` §87: the default `temperature` on OpenAI and Google is 1.0, and OpenAI's reasoning models refuse one whenever reasoning effort is not `none`, which the guard now follows.
 
 **And both audits are closed.** Both roadmaps being built is not the same as the code
 being clean, and saying only the first would be the "built and runs are different claims"
@@ -1077,7 +1100,7 @@ note that shell approval is governed solely by `shell_approval_mode` -- `tool_ap
 deliberately has no `shell` key, so an old file carrying one is refused at startup
 naming the key — see `tests/BREAKING_CHANGES.md` §24.
 
-Run the test suite with `pytest` — 9829 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
+Run the test suite with `pytest` — 9916 tests, fully offline, no API keys needed. Since batch 243 the suite holds itself to that: a test that asks DNS for a name, or writes into your home folder, fails by name, and every test process runs with HOME pointing at a throwaway folder of its own. The suite's own packages are `requirements-test.txt`, separate from `requirements.txt` since batch 136: they used to be in the shipped dependency list, so installing the harness also installed a test runner. It runs in parallel by default (`pytest-xdist`, 70% of your cores): **1:26 on a 16-core machine, against 9:06 single-process.** `pytest -n0` forces the old serial run, which is what you want under a debugger or when something is parsing the output. Eight further tests are marked `integration` and excluded by default: three spawn a real stdio MCP server, one runs an external program through the host fallback shell, one builds the hosted bundle's Docker image, and three run the installers' uv path against a real uv (`pytest -m integration`).
 
 ## Documentation
 

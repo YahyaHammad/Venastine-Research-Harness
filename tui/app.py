@@ -112,6 +112,7 @@ from tui.screens import (
     PermissionScreen,
     ProjectKindScreen,
     QuestionScreen,
+    ResumeRunPickerScreen,
     ReviewScreen,
     SecretScreen,
     SessionKillScreen,
@@ -5382,6 +5383,10 @@ class VenastineApp(App):
                 event.claim_id, {"id": event.claim_id})
             claim["retry_count"] = event.attempt
             panel.retried()
+        elif event.kind == "run_started":
+            # §98. Kept for _write_resume_hint, and not drawn: a completed
+            # run prints its id at the end, and a failed one in the hint.
+            self._research_run_id = event.text
 
     def on_research_finished(self, message: ResearchFinished) -> None:
         self._busy = False
@@ -5396,9 +5401,17 @@ class VenastineApp(App):
                 "[run abandoned — quit requested. Checkpoints so far are "
                 "kept; the run's record stays 'running' rather than "
                 "claiming completion.]")
+            self._write_resume_hint()
             return
         if message.error is not None:
+            from core.reasoning.resume import ResumeRefused
+            if isinstance(message.error, ResumeRefused):
+                # §98. Nothing ran, so this is not "pipeline failed".
+                self._transcript.write_error(
+                    f"[cannot resume: {message.error}]")
+                return
             self._write_failure(message.error, "pipeline failed")
+            self._write_resume_hint()
             return
         run = message.run
         self._last_run = run
@@ -5425,6 +5438,16 @@ class VenastineApp(App):
                 f"{accepted} applied — {record}]")
         if run.run_id:
             self._transcript.write_system(f"[run id: {run.run_id}]")
+
+    def _write_resume_hint(self) -> None:
+        """How to pick up a run that failed or was abandoned (ROADMAP_v3
+        §98), once its id is known -- the run_started event carries it, and
+        the exception that ended the run does not."""
+        run_id = getattr(self, "_research_run_id", None)
+        if run_id:
+            self._transcript.write_system(
+                f"Completed passes are kept. /research --resume "
+                f"{str(run_id)[:8]} picks the run up where it stopped.")
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         """§16 AC3. Required alongside exit_on_error=False: without a handler the
@@ -5909,6 +5932,11 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     §25: --grant [names] takes the same values as the CLI flag and goes
     through the same parser, so the two shells cannot offer different
     sets. Bare --grant opens the picker.
+
+    ROADMAP_v3 §98: `--resume [run-id]` in the query's place picks a failed
+    or abandoned run up where it stopped; bare, it opens the picker. It
+    comes LAST, after the other flags, which a resume takes too -- a grant
+    is never stored (R12), so a resumed run is authorised afresh.
     """
     from core.reasoning.authorization import (
         GrantSpecError,
@@ -5917,6 +5945,7 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     )
 
     attended, review, grant_spec, query = _split_research_flags(args)
+    resume = _split_resume(query)
     if not attended:
         attended = app._settings.get("research", {}).get(
             "approval_mode") == "attended"
@@ -5929,10 +5958,26 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     if not query:
         app._transcript.write_error(
             "Usage: /research [--attended] [--review|--no-review] "
-            "[--grant[=a,b]] <query>")
+            "[--grant[=a,b]] <query>|--resume [run-id]")
         return
     if app.refuse_if_occupied("start a research run"):
         return
+    if resume is not None and resume is not RESUME_PICKER:
+        from core.reasoning.resume import ResumeRefused, find_run
+        try:
+            resume = find_run(resume)
+        except ResumeRefused as e:
+            app._transcript.write_error(f"/research --resume: {e}.")
+            return
+
+    def launch(authorization) -> None:
+        """Start the run, or, for a bare --resume, ask which run first."""
+        if resume is None:
+            _start_research(app, query, authorization)
+        elif resume is RESUME_PICKER:
+            _pick_run_to_resume(app, authorization)
+        else:
+            _start_research(app, None, authorization, resume=resume)
 
     offered = candidates()
     if grant_spec is GRANT_PICKER:
@@ -5954,7 +5999,7 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
             # connects. What was config-dependent is now what happens on
             # a fresh clone.
             app._transcript.write_system(NOTHING_TO_GRANT)
-            _start_research(app, query, _authorization_for(app, set()))
+            launch(_authorization_for(app, set()))
             return
 
         def _picked(selected) -> None:
@@ -5963,7 +6008,7 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
             if selected is None:
                 app._transcript.write_system("Research cancelled.")
                 return
-            _start_research(app, query, _authorization_for(app, selected))
+            launch(_authorization_for(app, selected))
 
         app.push_screen(GrantPickerScreen(offered), _picked)
         return
@@ -5975,7 +6020,47 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
         except GrantSpecError as e:
             app._transcript.write_error(f"/research --grant: {e}")
             return
-    _start_research(app, query, _authorization_for(app, granted))
+    launch(_authorization_for(app, granted))
+
+
+#: ROADMAP_v3 §98. A bare `/research --resume`: open the picker rather than
+#: resume a named run. GRANT_PICKER's shape, for the same reason.
+RESUME_PICKER = object()
+
+
+def _split_resume(query: str):
+    """`--resume [run-id]` at the front of what is left once the leading
+    flags are taken: None when the query is not a resume, RESUME_PICKER
+    for a bare one, else the id as typed (ROADMAP_v3 §98). A separate step
+    rather than a fifth value from _split_research_flags, whose four are
+    unpacked by name at its call sites and in the suite."""
+    head, _sep, rest = (query or "").strip().partition(" ")
+    if head != "--resume":
+        return None
+    return rest.strip() or RESUME_PICKER
+
+
+def _pick_run_to_resume(app: VenastineApp, authorization) -> None:
+    """The picker behind a bare `/research --resume` (ROADMAP_v3 §98).
+
+    The read runs on the UI thread, in a command handler, so a failure is
+    written rather than raised -- `action_pick_thread`'s rule (#104), and
+    for its reason: app.db is shared with any CLI run, so `database is
+    locked` needs nothing to be wrong."""
+    from core.reasoning.resume import resumable_runs
+    try:
+        runs = resumable_runs()
+    except Exception as e:  # noqa: BLE001 -- see the docstring
+        app._transcript.write_error(f"Could not list research runs: {e}")
+        return
+
+    def chosen(run_id) -> None:
+        if run_id is None:
+            app._transcript.write_system("Resume cancelled.")
+            return
+        _start_research(app, None, authorization, resume=run_id)
+
+    app.push_screen(ResumeRunPickerScreen(runs), chosen)
 
 
 def _authorization_for(app: VenastineApp, granted: set):
@@ -6093,12 +6178,25 @@ def _forwarding(app: "VenastineApp", events, outcome: dict):
         yield event
 
 
-def _start_research(app: VenastineApp, query: str, authorization) -> None:
+def _start_research(app: VenastineApp, query, authorization,
+                    resume=None) -> None:
     """Kick off the worker. Split from _cmd_research because the picker
-    path resolves asynchronously and lands here from a callback."""
+    path resolves asynchronously and lands here from a callback.
+
+    `resume` (ROADMAP_v3 §98) is the id of a run to pick up instead of
+    starting `query`, which is then None. The id is kept on the app from
+    here, and from the run's run_started event, so a failure can say how
+    to resume."""
     app._busy = True
-    app._transcript.write_user(f"/research {query}")
-    app._transcript.write_system("Running the ten-pass pipeline. This takes a while.")
+    app._research_run_id = str(resume) if resume is not None else None
+    if resume is not None:
+        app._transcript.write_user(f"/research --resume {resume}")
+        app._transcript.write_system(
+            "Resuming the run where it stopped; completed passes are not "
+            "run again.")
+    else:
+        app._transcript.write_user(f"/research {query}")
+        app._transcript.write_system("Running the ten-pass pipeline. This takes a while.")
     app._raven.state = ravens.THINKING
     app._research_progress.start_run()
     review_on = bool(getattr(app, "_research_review", False))
@@ -6110,6 +6208,7 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
             stream_deep_research_pipeline,
         )
         from core.reasoning.output_writer import write_run_artifacts
+        from core.reasoning.resume import ResumeRefused
         error = None
         try:
             # §22: ITERATED, not drained. A drainer would
@@ -6135,12 +6234,19 @@ def _start_research(app: VenastineApp, query: str, authorization) -> None:
                 # in the status bar -- captured HERE, so a mid-run /effort
                 # affects the next run, exactly like model/provider.
                 effort=app.effort,
+                resume=resume,
             )
             outcome = {}
             run = None
             try:
                 run = run_pipeline_to_completion(
                     _forwarding(app, events, outcome))
+            except ResumeRefused as refused:
+                # §98. Refused before anything changed: reported as what it
+                # is, and NOT re-raised -- it is an answer, not a worker
+                # failure, and re-raising would log and toast it again.
+                app.post_message(ResearchFinished(None, refused))
+                return
             except RuntimeError:
                 if not outcome.get("abandoned"):
                     raise

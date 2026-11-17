@@ -2067,6 +2067,45 @@ def test_a_pipeline_run_survives_a_write_and_a_read(real_storage):
         pipeline_storage.update_pipeline_run(uuid4(), run)
 
 
+def test_the_runs_a_resume_is_offered_on_real_sqlite(real_storage):
+    """ROADMAP_v3 §98 (RS1). `list_resumable_runs` is the one query here the
+    conftest's fake cannot run -- it filters on status and orders by start
+    -- so it is measured on real SQLite: failed and abandoned runs, newest
+    first, a complete one left out; and a resume point written by
+    `save_resume_point` and nothing else, a reopen putting a run back to
+    'running' with no finish time."""
+    from core.reasoning.base import PipelineRun
+
+    pipeline_storage = _real_pipeline_storage()
+    run = PipelineRun(user_query="resumable")
+    ids = []
+    try:
+        for status in ("failed", "complete", None, "failed"):
+            run_id = pipeline_storage.create_pipeline_run("resumable")
+            ids.append(run_id)
+            pipeline_storage.update_pipeline_run(run_id, run, status=status)
+        failed_first, complete, running, failed_last = ids
+        pipeline_storage.save_resume_point(failed_last, {"version": 1,
+                                                         "stage": "D0"})
+
+        listed = [r["id"] for r in pipeline_storage.list_resumable_runs(
+            limit=500) if r["id"] in ids]
+        assert listed == [failed_last, running, failed_first]
+        row = next(r for r in pipeline_storage.list_resumable_runs(limit=500)
+                   if r["id"] == failed_last)
+        assert row["resume"] == {"version": 1, "stage": "D0"}
+        assert pipeline_storage.load_pipeline_run(complete)["resume"] == {}
+
+        pipeline_storage.reopen_pipeline_run(failed_last)
+        reopened = pipeline_storage.load_pipeline_run(failed_last)
+        assert (reopened["status"], reopened["finished_at"]) == (
+            "running", None)
+        assert reopened["resume"]["stage"] == "D0"
+    finally:
+        for run_id in ids:
+            _delete_run(run_id)
+
+
 def test_a_run_older_than_its_newer_columns_reads_them_as_empty(
         real_storage, tmp_path, monkeypatch):
     """#258, and what measuring it found. `load_pipeline_run` reads the two

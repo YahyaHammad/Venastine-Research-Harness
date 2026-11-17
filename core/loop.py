@@ -1734,6 +1734,40 @@ def _finish_cancelled(memory, response, *, partial_text, unrun, reason,
     yield LoopEvent(final_response=response, stop_reason="cancelled")
 
 
+#: What a resumed pass tells the model about a call its run never answered
+#: (ROADMAP_v3 §98, RS4). Worded for the model, which is who reads it.
+UNANSWERED_ON_RESUME = (
+    "Not run: the research run stopped before this call returned a result. "
+    "Call it again if you still need it.")
+
+
+def answer_unanswered_calls(memory, reason: str = UNANSWERED_ON_RESUME) -> int:
+    """Write an error result for every call of the thread's LAST assistant
+    turn that has no result yet, and return how many (ROADMAP_v3 §98, RS4).
+
+    #42's lesson and `_finish_cancelled`'s, reached from a third side. A
+    run killed while a tool ran leaves the `tool_use` D20 had already
+    written with no `tool_result`, and a provider refuses the next request
+    built from that thread. A cancelled turn answers its calls before it
+    ends; a killed one could not, so the run that RESUMES the thread
+    answers them first, in the shape a denied call already takes. Only the
+    last assistant turn: every earlier one was answered before the loop
+    took its next step.
+    """
+    messages = memory.messages
+    last = next((i for i in range(len(messages) - 1, -1, -1)
+                 if messages[i].get("role") == "assistant"), None)
+    if last is None:
+        return 0
+    answered = {m.get("tool_call_id") for m in messages[last + 1:]
+                if m.get("role") == "tool"}
+    missing = [call["id"] for call in messages[last].get("tool_calls") or ()
+               if call.get("id") not in answered]
+    for call_id in missing:
+        memory.add_tool_result(call_id, {"error": reason})
+    return len(missing)
+
+
 class RunAgentLoop:
 
     @staticmethod
@@ -2426,9 +2460,20 @@ class RunAgentLoop:
         context: Optional[ToolContext] = None,
         authorization=None,
         activity=None,
+        resume_thread: Optional[UUID] = None,
+        on_thread=None,
     ):
         """One research pass, as a generator of LoopEvents, RETURNING the
         ModelResponse (ROADMAP_v2 §26).
+
+        ROADMAP_v3 §98 adds two arguments, both for a run that fails and is
+        resumed. `on_thread` is called with the pass's thread id the moment
+        the thread exists (RS3): the run used to learn it only when the pass
+        RETURNED, so a pass that raised, or was abandoned, left a thread its
+        run could not name. `resume_thread` continues an existing pass
+        thread instead of opening one (RS4): no user row is added, any call
+        the thread left unanswered is answered first, and the loop takes the
+        step the failed run was about to take. `pass_input` is unused then.
 
         Exists because §22's P2 -- "a pass's LoopEvents do not propagate
         up" -- made a pass opaque while it ran. The pipeline could say
@@ -2473,19 +2518,30 @@ class RunAgentLoop:
         # written as a 1: `_compactor_depth`'s rule, one entry point over.
         depth = (context.subagent_depth if context is not None else 0) + 1
         with agent_activity.span(activity, pass_id, depth):
-            memory = ConversationMemory(
-                kind=THREAD_KIND_RESEARCH_PASS,
-                # §47. No parent THREAD: a pass is a child of the RUN, and
-                # a run is not a conversation. §27's T2 already indexes
-                # them on `PipelineRun.pass_threads`, the run's own
-                # object, so a second index here would be two records of
-                # one edge -- the producer/consumer shape this project
-                # keeps finding.
-                agent_name=pass_id)
+            if resume_thread is None:
+                memory = ConversationMemory(
+                    kind=THREAD_KIND_RESEARCH_PASS,
+                    # §47. No parent THREAD: a pass is a child of the RUN,
+                    # and a run is not a conversation. §27's T2 already
+                    # indexes them on `PipelineRun.pass_threads`, the run's
+                    # own object, so a second index here would be two
+                    # records of one edge -- the producer/consumer shape
+                    # this project keeps finding.
+                    agent_name=pass_id)
+            else:
+                memory = ConversationMemory(thread_id=resume_thread)
             # The address, at the earliest moment it exists, so a pass is
             # openable WHILE it runs rather than once the report lands.
             agent_activity.bind(activity, memory.thread_id)
-            memory.add_user_message(pass_input)
+            # ROADMAP_v3 §98 (RS3), the same moment for the same reason: a
+            # run that fails or is abandoned in this pass can still name the
+            # thread its work is in.
+            if on_thread is not None:
+                on_thread(memory.thread_id)
+            if resume_thread is None:
+                memory.add_user_message(pass_input)
+            else:
+                answer_unanswered_calls(memory)
             # #68. The catalogs are decided from the SAME bundle the tool
             # schemas are decided from a few frames down, so a pass cannot
             # be told to spawn a subagent it will not be given.

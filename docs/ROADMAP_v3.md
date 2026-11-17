@@ -45,6 +45,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
 - **§96. The container's `/workspace`, read by the file tools** - **(BUILT in batch 263)** (the shell runs in a container that mounts the workspace at `/workspace`, so the paths the model saw there were spelled from it, while `read`, `write`, `edit` and `view_image` run on the host, where that path is not the workspace: each such call asked to leave the workspace and then failed. `resolve_path` now maps the container's spelling onto the workspace while a tool that starts commands is enabled, and every other outside path still asks; CW1-CW3)
 - **§97. Usage figures: the rate's clock, thoughts, k/M/B and `/usage`** - **(BUILT in batch 264)** (the completion line divided the output count by the whole turn, tools and the wait on background sessions included, and kept only the last wake turn's count; Google's output left out the thoughts; `billed` read in thousands past a million; and no cache count was read. The rate now divides by generating time while `took` stays the turn's time, thoughts count as output, the usage line writes k, M and B, and `/usage` shows four provider-reported rows for this thread in both shells, with input the whole prompt on every branch; UF1-UF5)
+- **§98. A failed research run, resumed where it stopped** - **(BUILT in batch 269)** (a run that failed or was abandoned could only be started again from Pass 0: the owner's failed after 4h53m in Pass 3a on an answer that was a complete array followed by a stray closing fence. Each stage now ends with a resume point, a pass's thread is recorded as it opens, and `/research --resume` or `--resume` skips every completed stage and continues the failed pass in its own thread -- its stored answer checked again with no model call, or the request it died on resent -- with the corpus rebuilt from the stored tool results, and the parser takes a fence at either end; RS1-RS9)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -3064,6 +3065,114 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §98. A failed research run, resumed where it stopped
+
+**Added and built in batch 269, from the owner's report** (2026-11-17). Running 0.3.17 in WSL, a
+research run on the `research` worker reached 98 claims and then failed after 4h53m with
+`[pipeline failed: Response did not return valid JSON: Extra data: line 1143 column 1 (char
+59006)]`. Pass 0, Pass 1, Pass 2 and gate D0 had finished. The only way on was `/research` again,
+from Pass 0. The owner asked for a resume that restarts at the point that failed: at worst the
+failed pass from its beginning, at best only what actually broke.
+
+### What was measured (2026-11-17)
+
+Read-only, on the owner's WSL database. A consistent copy was taken with SQLite's backup API: a
+plain `cp` misses the write-ahead log, and the copy it made still showed the run 'running',
+without its Pass 3a thread.
+
+- **The record.** Status `failed`; `pass_threads_json` named Pass 0, Pass 1, Pass 2 and Pass 3a;
+  the trace ended on the D0 line and two "JSON parse failed" lines. `claims_json` held the 98
+  claims; the plan, Pass 1's text, the corpus and every later pass's output were in no column.
+- **Pass 3a's thread held 84 rows.** 79 were the pass's research (web_search, fetch_url and shell
+  scripts run in the container), then three answers. Attempt 1 was a 281-character sign-off with
+  no JSON. Attempt 2 was a 15,322-character array cut off mid-string, carrying 218,784 characters
+  of reasoning. Attempt 3 was **59,009 characters: a complete array of 57 entries, one per factual
+  claim, no id repeated, then a newline and a closing code fence**. `parse_json_response` stripped
+  a fence only when the text STARTED with one, so `json.loads` read the array and raised "Extra
+  data" on the three backticks.
+- **So the run failed on an answer that was right.** Recovering it needs no model call: the
+  stored answer, parsed again, is the pass's result. One of its 57 entries names `c096` where
+  Pass 2 called that claim `c96`, so on resume it is dropped and traced, by the scoping rule
+  batch 220 gave Pass 3a.
+- **What a pass leaves behind.** Every pass writes its whole conversation to its own thread: the
+  input, every tool call and result (D20, #42), every answer and every corrective. A pass's
+  thread id reached the run only once the pass RETURNED (`_record_pass_thread`), so a pass that
+  raised mid-request, or a run a quit abandoned, left a thread its record could not name.
+- **Dry run of this section's code on the copy:** the run rebuilt in 0.01 s (stage D0, 98 claims,
+  the plan, Pass 1's 50,534 characters, the pending Pass 3a thread); the stored answer parsed and
+  passed Pass 3a's shape check; the corpus was rebuilt from 189 stored tool results into 162
+  documents in 0.12 s. No model was called.
+
+### Decisions (RS1-RS9)
+
+| # | Decision |
+|---|---|
+| **RS1** | **A failed run and an abandoned one can be resumed** (owner: failed and abandoned). Listed newest first. A run left 'running' may be live in another process sharing app.db, and nothing in the record says which, so the listing calls it "stopped, or still running elsewhere". A resume keeps the run's record, its id and its output directory: `reopen_pipeline_run` puts it back to 'running', and it ends 'complete' or 'failed' like any other. `core/reasoning/resume.prepare` rebuilds the run before anything is written, so a run it refuses keeps its status and the reason is shown |
+| **RS2** | **A resume point is saved at the end of every stage, and nowhere else.** `pipeline_storage.save_resume_point` is the one writer of `resume_json`, called from `_Progress.checkpoint(done=...)` and once at the run's creation (stage none). The point is self-contained: the claims as they stood at that boundary, the plan, the completeness and assumption payloads, the coverage gaps, the granted calls, the ensemble count, the 6a/6b round and its batch, how many threads the run had, and which thread holds Pass 1's text. `claims_json` is written on the failure path too, and can hold a stage's work half applied; the point cannot. A point that cannot be saved is warned and the run goes on |
+| **RS3** | **A pass reports its thread the moment the thread exists.** `stream_deep_research_mode(on_thread=...)`, called beside §47's `bind`; the orchestrator notes it on the run and persists it then. Reported again on return, and by a resumed pass, so `_note_thread` keeps one entry per thread, as §27 promised one per pass |
+| **RS4** | **The failed pass keeps its thread** (owner). The pass a resume reaches first is handed the thread opened after the last point, when there is exactly one. If its last row is an answer, that answer is the pass's first attempt, with no model call, and everything after it runs as before: the truncation check, the JSON or text retry with its correctives, the apply. If its last row is anything else, the run stopped before the model replied: `stream_deep_research_mode(resume_thread=...)` answers any call the thread left unanswered (`answer_unanswered_calls`, in the shape a denied call takes) and resends, adding no row. A thread that cannot be read back starts the pass again |
+| **RS5** | **`/research ... --resume [run-id]` in the TUI, `--resume [RUN_ID]` in the CLI** (owner: picker or id). Bare, the TUI opens a picker and the CLI lists the runs and exits. An id may be its first four or more characters. `--resume` comes after the other flags, and a resume takes `--attended`, `--review` and `--grant` again, because a grant is never stored (R12). In the CLI `--resume` implies `--mode research` and refuses a query. A run's id reaches the shell first, in a new `run_started` event, so a failed or abandoned run's last line names the command that resumes it |
+| **RS6** | **The source corpus is rebuilt from the stored tool results** (owner). Every row of the corpus's own tools (`source_corpus.READ_TOOLS`), from every thread the run recorded, oldest first. A row is `str(result)` of the very dict the live run gave the corpus, so `ast.literal_eval` reads it back; a row it cannot read is skipped and counted. Each page keeps its row's stored time as `retrieved_at`. A run resumed past Pass 3a refreshes `run.source_documents` through `_collect_sources`, the same call `_ground_and_score` makes, so it still has one writer |
+| **RS7** | **The parser takes a fence at either end** (owner). A lone closing fence after bare JSON is stripped, as an opening one always was. Any other text after the value still fails and is corrected as before: a second value there could be the rest of the answer, and dropping it would lose claims silently |
+| **RS8** | **A resumed run uses the session's model** (owner). Provider, model, effort and critic are resolved as for a new `/research`, so a resume can move away from a provider that failed. The trace's first resume line names what it ran on |
+| **RS9** | **A run recorded before §98 resumes up to the 6a/6b loop** (owner). It has no point, so its last completed stage is read from the trace's checkpoint lines (`resume.LEGACY_STAGE_LINES`). Gate D1 reads as Pass 5, so D1 runs again rather than its rule being copied. The plan and the Pass 3c and Pass 4 payloads are parsed from their threads' last answers, and Pass 1's text is read back too. A run whose trace shows a 6a, 6b or D2 line is refused, because a round changes claims no line describes. An ensemble run is refused, because its record never said which thread held which candidate |
+
+RS1, RS4, RS5, RS6, RS7, RS8 and RS9 are the owner's choices. RS2 and RS3, the four-character
+id prefix, the picker's wording and the refusal of older ensemble runs are adopted defaults the
+owner may overturn.
+
+### What §98 deliberately does not change
+
+- **A pass's fresh thread.** A resumed pass continues the thread it failed in, which is that
+  pass's own. No pass ever reads another's history.
+- **The JSON retry's budget.** A resumed answer starts a fresh set of corrective attempts, the
+  same count a new pass gets. A resume that was given the failed run's exhausted budget could
+  only fail again.
+- **What is stored in the database.** Pass 1's text and the candidates' texts stay in their
+  threads, as E13 decided. A resume reads them back from there.
+- **The review.** A run that failed in §20's review runs the review again from the start; a
+  consent already given is not stored.
+
+### Built (batch 269)
+
+- **`core/reasoning/resume.py`** (new): `prepare`, `ResumePoint`, `snapshot`, `thread_tail`,
+  `last_answer`, `rebuild_corpus`, `legacy_stage`, `resumable_runs`, `find_run`, `describe`.
+- **`core/reasoning/orchestrator.py`**: every stage behind `done()`, the point saved at each end,
+  `via()` for each pass, `_resumed_attempt`, `_note_thread`, `_collect_sources`, `_pass2_input`.
+- **`core/reasoning/pipeline_storage.py`**: `resume_json`, `save_resume_point`,
+  `reopen_pipeline_run`, `list_resumable_runs`, `RESUMABLE_STATUSES`.
+- **`core/loop.py`**: `resume_thread` and `on_thread` on `stream_deep_research_mode`,
+  `answer_unanswered_calls`, `UNANSWERED_ON_RESUME`.
+- **`core/reasoning/json_retry.py`**: RS7. **`core/reasoning/source_corpus.py`**: `READ_TOOLS`,
+  `retrieved_at`. **`storage.py`**: `tool_result_times`, and `created_at` on `_ordered_rows`.
+  **`core/reasoning/events.py`**: `run_started`.
+- **`main.py`**, **`tui/app.py`**, **`tui/screens.py`** (`ResumeRunPickerScreen`),
+  **`tui/app.tcss`**, **`core/commands.py`**: the two shells.
+
+Tests: `tests/test_research_resume.py` drives the real pipeline on the real loop with a scripted
+model, breaks each of the ten model passes for real (a provider error; a reply that is not JSON;
+an empty prose reply), and resumes. Each case asserts that no completed pass calls the model
+again, that the failed pass recovers with one call in its own thread, and that the run ends as an
+unbroken run with the same model ends. Further cases: a crash in Pass 5, a 6b failure after its
+round's 6a, a second failure after a resume, the owner's fenced answer (no model call in Pass
+3a, for a new run and for one recorded before §98), a quit mid-call, the rebuilt corpus, every
+refusal, both shells. `tests/test_storage_e2e.py` runs the listing on real SQLite.
+
+### Gap register
+
+- **Not run against a live provider.** The owner's own run was resumed as far as `prepare`, on a
+  copy of the database, with no model call. The passes after Pass 3a need the owner's provider.
+- **A run recorded before §98 that stopped inside the 6a/6b loop, or an ensemble one, is
+  refused.** RS9 says why.
+- **The 6a/6b loop's points are per pass, not per claim.** A round's 6a and its 6b each end
+  with a point, and a failure between them resumes from 6a's, through 6b's own thread. That is
+  as fine as the passes are: 6a and 6b are each one batched call across the round's claims.
+- **A run left 'running' in another live process can be resumed from here.** Two processes would
+  then write one record. Nothing in the record can tell a live run from an abandoned one, and
+  RS1 says so in the listing instead of guessing.
+
 ---
 
 ## §97. Usage figures: the rate's clock, thoughts, k/M/B and `/usage`

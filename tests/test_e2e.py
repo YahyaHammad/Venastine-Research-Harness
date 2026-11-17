@@ -250,6 +250,9 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
         # "send nothing" value, asserted so a future default of "always
         # force a level at this seam" cannot slip through unnoticed.
         effort=None,
+        # ROADMAP_v3 §98: a query starts a NEW run. A resume id here would
+        # mean run_research picked a run up that nobody named.
+        resume=None,
     )
 
     # --- Verify write_run_artifacts was called with the run ---

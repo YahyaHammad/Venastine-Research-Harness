@@ -209,6 +209,12 @@ def normalize_url(url: str) -> str:
     return urlunsplit((parts.scheme.lower(), host, path, parts.query, ""))
 
 
+#: The tools whose results `SourceCorpus.add` reads. Named once for the
+#: resume's rebuild (ROADMAP_v3 §98, RS6), which skips every other tool's
+#: stored row before parsing it, and pinned against `add` by a test.
+READ_TOOLS = ("fetch_url", "arxiv_search", "web_search")
+
+
 @dataclass
 class SourceCorpus:
     """Every source text one run retrieved, keyed by normalized URL.
@@ -230,7 +236,7 @@ class SourceCorpus:
 
     # -- ingest ----------------------------------------------------------
 
-    def add(self, tool_name: str, result) -> int:
+    def add(self, tool_name: str, result, retrieved_at: str | None = None) -> int:
         """Absorb one tool result. Returns how many documents it added or
         improved.
 
@@ -240,18 +246,23 @@ class SourceCorpus:
         whose result is the error shape is also ignored -- `arxiv.py` and
         `web_search.py` both return errors rather than raising, so an
         error dict is an ordinary occurrence here.
+
+        `retrieved_at` is for a result replayed from its stored row, when
+        a resumed run rebuilds its corpus (ROADMAP_v3 §98, RS6): the time
+        the row was written, not the time of the replay. None, every live
+        call, stamps now.
         """
         if not isinstance(result, dict) or "error" in result:
             return 0
         if tool_name == "fetch_url":
-            return self._add_fetch_url(result)
+            return self._add_fetch_url(result, retrieved_at)
         if tool_name == "arxiv_search":
-            return self._add_arxiv(result)
+            return self._add_arxiv(result, retrieved_at)
         if tool_name == "web_search":
-            return self._add_web_search(result)
+            return self._add_web_search(result, retrieved_at)
         return 0
 
-    def _add_fetch_url(self, result: dict) -> int:
+    def _add_fetch_url(self, result: dict, retrieved_at=None) -> int:
         # `url` is the URL that ANSWERED, after redirects -- which is what
         # fetch_url.py:89-95 says the grounding pass attributes the text
         # to, and therefore what the model will cite.
@@ -268,9 +279,10 @@ class SourceCorpus:
             title="",
             tool="fetch_url",
             offset=offset,
+            retrieved_at=retrieved_at,
         )
 
-    def _add_arxiv(self, result: dict) -> int:
+    def _add_arxiv(self, result: dict, retrieved_at=None) -> int:
         added = 0
         for entry in result.get("results") or ():
             if not isinstance(entry, dict):
@@ -290,10 +302,11 @@ class SourceCorpus:
                 text=text,
                 title=title,
                 tool="arxiv_search",
+                retrieved_at=retrieved_at,
             )
         return added
 
-    def _add_web_search(self, result: dict) -> int:
+    def _add_web_search(self, result: dict, retrieved_at=None) -> int:
         added = 0
         for entry in result.get("results") or ():
             if not isinstance(entry, dict):
@@ -306,10 +319,12 @@ class SourceCorpus:
                 text=text,
                 title=title,
                 tool="web_search",
+                retrieved_at=retrieved_at,
             )
         return added
 
-    def _store(self, url, text, title: str, tool: str, offset=None) -> int:
+    def _store(self, url, text, title: str, tool: str, offset=None,
+               retrieved_at=None) -> int:
         """Absorb one document, or one PAGE of one (ROADMAP_v3 §51, PG7).
 
         `offset` is the source position this text starts at, or None from a
@@ -374,7 +389,7 @@ class SourceCorpus:
                 return 0
             self.documents[key] = SourceDocument(
                 url=key, text=merged, title=existing.title,
-                tool=tool, retrieved_at=_now(),
+                tool=tool, retrieved_at=retrieved_at or _now(),
                 next_offset=max(existing.next_offset, offset + len(text)),
             )
             return 1
@@ -395,7 +410,7 @@ class SourceCorpus:
 
         self.documents[key] = SourceDocument(
             url=key, text=cleaned, title=title or (existing.title if existing else ""),
-            tool=tool, retrieved_at=_now(),
+            tool=tool, retrieved_at=retrieved_at or _now(),
             # In the SOURCE's positions, so the next page's offset can be
             # compared against it. `len(text)` and not `len(cleaned)`:
             # redaction and stripping change how much is HELD, never where

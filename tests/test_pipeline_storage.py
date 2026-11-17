@@ -286,8 +286,11 @@ def test_load_pipeline_run_round_trips_all_fields():
     assert set(loaded) == {
         "id", "user_query", "status", "started_at", "finished_at",
         "claims", "trace", "coverage_gaps", "pass_threads", "candidates",
-        "final_report",
+        "final_report", "resume",
     }, "the return shape changed; BREAKING_CHANGES.md:191 names this test"
+    # ROADMAP_v3 §98 (RS2): only save_resume_point writes the point, so a
+    # data checkpoint and a terminal status leave it empty.
+    assert loaded["resume"] == {}
     assert loaded["id"] == run_id
     assert loaded["user_query"] == "round-trip query"
     assert loaded["status"] == "complete"

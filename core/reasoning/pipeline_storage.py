@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from typing import Optional
 from uuid import UUID, uuid4
 
-from sqlmodel import Field, Session, SQLModel
+from sqlmodel import Field, Session, SQLModel, select
 
 from database import engine
 
@@ -47,14 +47,15 @@ logger = logging.getLogger(__name__)
 class PipelineRunRecord(SQLModel, table=True):
     """One row per stream_deep_research_pipeline() invocation. `status` is
     'running' from creation until the wrapping try/except in the
-    orchestrator flips it to 'complete' or 'failed'. The SIX data columns
+    orchestrator flips it to 'complete' or 'failed'. The SEVEN data columns
     carry the run's structured output (or the partial state available at
     failure time) so an operator can inspect what happened without a
     separate trace log.
 
-    SIX, not the four this paragraph said until batch 154: T2 added
-    pass_threads_json and E13 added candidates_json, and neither batch
-    found the enumerations written about them. The count is pinned by
+    SEVEN, not the four this paragraph said until batch 154: T2 added
+    pass_threads_json, E13 added candidates_json and §98 resume_json, and
+    the first two batches found none of the enumerations written about
+    them. The count is pinned by
     test_the_documented_record_shape_matches_what_load_returns, which
     reads it out of the prose rather than out of a second list here."""
 
@@ -82,6 +83,13 @@ class PipelineRunRecord(SQLModel, table=True):
     # what it had reached.
     candidates_json: str = "[]"
     final_report: str = ""
+    # ROADMAP_v3 §98 (RS2): where a resume picks the run up. Written at the
+    # end of each STAGE, never at a trace line inside one, and never by the
+    # failure path, so it always describes a boundary the run reached in
+    # full -- claims_json beside it is written on failure too, and may hold
+    # a stage's work half applied. "{}" on every run recorded before §98,
+    # which core/reasoning/resume.py reads from the trace instead (RS9).
+    resume_json: str = "{}"
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: Optional[datetime] = None
 
@@ -127,6 +135,10 @@ def update_pipeline_run(
     synthesis). If a nested-dataclass field is ever added to Claim, ALL of
     those sites migrate to asdict(c) together -- see the note on Claim in
     core/reasoning/base.py.
+
+    resume_json is NOT written here (ROADMAP_v3 §98, RS2): this runs at
+    every trace line and on the failure path, and the resume point must
+    move only at the end of a stage. save_resume_point is its one writer.
     """
     with Session(engine) as session:
         record = session.get(PipelineRunRecord, run_id)
@@ -156,9 +168,75 @@ def update_pipeline_run(
         session.commit()
 
 
+def save_resume_point(run_id: UUID, point: dict) -> None:
+    """Record where a resume would pick this run up (ROADMAP_v3 §98, RS2).
+
+    The ONE writer of resume_json, called at the end of each stage and
+    nowhere else. Its own function rather than an argument to
+    update_pipeline_run, because that one runs at every trace line and on
+    the failure path, and the point has to be a boundary the run reached in
+    full. Self-contained -- the claims are copied into it -- so it needs no
+    transaction shared with the data columns: claims_json beside it may be
+    newer, and a resume reads this one."""
+    with Session(engine) as session:
+        record = session.get(PipelineRunRecord, run_id)
+        if record is None:
+            raise ValueError(f"No pipeline run found with id {run_id}")
+        record.resume_json = json.dumps(point)
+        session.add(record)
+        session.commit()
+
+
+def reopen_pipeline_run(run_id: UUID) -> None:
+    """Put a failed or abandoned run back to 'running' for a resume
+    (ROADMAP_v3 §98, RS1). `finished_at` is cleared because the run is no
+    longer finished; the resume's own end sets it again. Raises ValueError
+    for an unknown id, like every writer here."""
+    with Session(engine) as session:
+        record = session.get(PipelineRunRecord, run_id)
+        if record is None:
+            raise ValueError(f"No pipeline run found with id {run_id}")
+        record.status = "running"
+        record.finished_at = None
+        session.add(record)
+        session.commit()
+
+
 # ---------------------------------------------------------------------------
 # ---- Public read API -------------------------------------------------------
 # ---------------------------------------------------------------------------
+
+#: The statuses a resume is offered for (ROADMAP_v3 §98, RS1). 'running'
+#: is a run that was abandoned -- a quit or a kill leaves it there, §22 --
+#: or one still running in another process sharing app.db, and nothing in
+#: the record can tell those apart, so the listing says both.
+RESUMABLE_STATUSES = ("failed", "running")
+
+
+def list_resumable_runs(limit: int = 50) -> list[dict]:
+    """The runs a resume can be offered for, newest first, as plain dicts:
+    id, user_query, status, started_at, finished_at, trace and resume (the
+    two fields the stage is read from). Bounded by `limit` because a
+    long-lived database holds every run it ever started."""
+    with Session(engine) as session:
+        statement = (
+            select(PipelineRunRecord)
+            .where(PipelineRunRecord.status.in_(RESUMABLE_STATUSES))
+            .order_by(PipelineRunRecord.started_at.desc())
+            .limit(limit)
+        )
+        return [
+            {
+                "id": record.id,
+                "user_query": record.user_query,
+                "status": record.status,
+                "started_at": record.started_at,
+                "finished_at": record.finished_at,
+                "trace": json.loads(record.trace_json or "[]"),
+                "resume": json.loads(record.resume_json or "{}"),
+            }
+            for record in session.exec(statement).all()
+        ]
 
 def load_pipeline_run(run_id: UUID) -> dict:
     """Loads a PipelineRunRecord by id and returns its state as a plain
@@ -199,6 +277,9 @@ def load_pipeline_run(run_id: UUID) -> dict:
             # its sibling's; tests/test_storage_e2e.py pins both facts.
             "candidates": json.loads(record.candidates_json or "[]"),
             "final_report": record.final_report,
+            # §98 (RS2). The same floor as its two siblings: a NULL is SQL
+            # nobody here wrote, and json.loads(None) would raise on it.
+            "resume": json.loads(record.resume_json or "{}"),
         }
 
 

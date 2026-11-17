@@ -1189,6 +1189,67 @@ class ThreadPickerScreen(ModalScreen[object]):
         self.dismiss(None)
 
 
+def resume_run_row(run: dict) -> str:
+    """One research run in the resume picker (ROADMAP_v3 §98): the start of
+    its id, when it started, what state it is in, where it would resume, and
+    its query on the line below -- the query is what a person recognises.
+    A run that is still 'running' may be live in another process sharing
+    app.db, and nothing in the record can tell, so the row says both."""
+    status = ("stopped, or still running elsewhere"
+              if run.get("status") == "running" else str(run.get("status")))
+    started = run.get("started_at")
+    when = (started.strftime("%Y-%m-%d %H:%M")
+            if hasattr(started, "strftime") else str(started or ""))
+    where = (f"cannot resume: {run['note']}" if run.get("note")
+             else f"resumes {run.get('stage')}")
+    query = " ".join(str(run.get("user_query") or "").split())
+    if len(query) > 70:
+        query = query[:69] + "…"
+    return f"{str(run.get('id'))[:8]}  {when}  {status}  {where}\n  {query}"
+
+
+class ResumeRunPickerScreen(ModalScreen[object]):
+    """Pick a failed or abandoned research run to resume (ROADMAP_v3 §98).
+    Dismisses with the run's id, or None to cancel.
+
+    The thread picker's shape and its CSS, because it is the same decision
+    one level up -- which earlier piece of work to carry on -- and a second
+    look for it would be a second thing to keep styled. A run this build
+    cannot resume is still listed, with the reason, so a person looking
+    for it learns why rather than wondering where it went; choosing it gets
+    the same reason as an error.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, runs: list[dict], note: str = ""):
+        super().__init__()
+        self._runs = runs
+        self._note = note
+
+    def compose(self) -> ComposeResult:
+        items = [ListItem(Label(Text(resume_run_row(r)))) for r in self._runs]
+        children = [Label("Resume which research run?", id="thread-title")]
+        if self._note:
+            children.append(Static(Text(self._note), id="thread-note"))
+        if items:
+            children.append(ListView(*items, id="thread-list"))
+        else:
+            children.append(Static("No failed or abandoned research run to "
+                                   "resume.", id="thread-empty"))
+        yield Vertical(*children, id="thread-dialog")
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        index = event.list_view.index
+        if index is not None and 0 <= index < len(self._runs):
+            self.dismiss(self._runs[index]["id"])
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class SecretScreen(ModalScreen[object]):
     """Ask for one secret, masked (ROADMAP_v3 §49 slice 5a, SS59).
 
