@@ -6,8 +6,11 @@ blocked domain checking, output policy enforcement, and registry
 integration (dispatch redacts secrets from tool output).
 """
 
+import random
+import re
 import socket
 import sys
+import time
 
 import pytest
 
@@ -1359,10 +1362,10 @@ class TestTheStatelessGitHubTokenShape:
         a megabyte as easily as a result.
 
         The long run carries a `_` every nine characters. It is one run to
-        this pattern, but it breaks the input side's URL scan, which is
-        quadratic on one long ALPHANUMERIC run by itself (TECHNICAL_DEBT
-        117) and would time this test out for a reason that is not this
-        pattern's."""
+        this pattern. Until batch 268 the `_` also kept the input side's URL
+        scan off its quadratic case, one long ALPHANUMERIC run (TECHNICAL_DEBT
+        117, closed there); `TestTheUrlScanStartsOncePerRun` times that scan
+        on runs with no `_` in them."""
         import time
 
         from safety.policy_enforcement import redact_output_text
@@ -1371,3 +1374,205 @@ class TestTheStatelessGitHubTokenShape:
         redact_output_text(text)
         check_input_policy("spy", {"text": text})
         assert time.perf_counter() - started < 10
+
+
+# ===========================================================================
+# ---- Batch 268: the URL scan, and a token after an escape ------------------
+# ===========================================================================
+
+#: The input side's URL scan as it was before batch 268: the reference the
+#: new scan must agree with. Quadratic on one long run of letters and digits
+#: (TECHNICAL_DEBT 117), so it only ever reads short text here.
+_UNBOUNDED_SCAN = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>]+")
+_BLOCKED = "spy call refused by policy: an argument targets a blocked domain: "
+
+
+class TestTheUrlScanStartsOncePerRun:
+    """TECHNICAL_DEBT 117, closed in batch 268. `_input_leaf` scans every
+    string in a tool call's arguments for a URL whose host is blocked, and
+    the scan was tried at every letter. On one long run of letters and
+    digits each try ran to the run's end before failing to find `://`: 4.8 s
+    at 100 KB and 441 s at a megabyte, before the handler ran. It now starts
+    once per run of scheme characters and captures from the run's first
+    letter. The owner chose that over the register's recorded shape, a
+    scheme bounded to 32 characters, which was linear too but found nothing
+    in `a` and 40 digits before `://`. Every test drives the real
+    `check_input_policy`."""
+
+    @pytest.mark.parametrize("text, url", [
+        ("see https://evil.com/a for details", "https://evil.com/a"),
+        ("0https://evil.com/x", "https://evil.com/x"),
+        ("1abc://evil.com/x", "abc://evil.com/x"),
+        ("git+ssh://evil.com/r.git", "git+ssh://evil.com/r.git"),
+        ("first http://a.example then ftp://evil.com/f", "ftp://evil.com/f"),
+        ("a" + "1" * 40 + "://evil.com/x", "a" + "1" * 40 + "://evil.com/x"),
+        ("z9" + "+" * 35 + "://evil.com/x", "z9" + "+" * 35 + "://evil.com/x"),
+        ("x" * 100 + "https://evil.com/x", "x" * 100 + "https://evil.com/x"),
+    ], ids=["prose", "leading-digit", "digit-then-scheme", "plus-scheme",
+            "second-url", "letter-then-40-digits", "letter-then-35-plus",
+            "100-letters-then-https"])
+    def test_the_refusal_names_the_url_the_old_scan_found(
+            self, monkeypatch, text, url):
+        """The EXACT reason. A scan that captured from the run's start keeps
+        the leading digit, which `urlparse` reads as no scheme at all, so
+        the host is never seen. A scheme bounded to 32 characters finds
+        nothing in the two cases with no letter in the last 32 characters
+        before `://`, and quotes a shorter URL in the last one."""
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS",
+                            {"evil.com"})
+        assert check_input_policy("spy", {"text": text}) == _BLOCKED + url
+
+    def test_it_refuses_exactly_what_the_old_scan_refused(self, monkeypatch):
+        """Seeded random text built from the pieces the scan turns on, long
+        runs of digits, letters and `+` among them, with a URL's `://` and
+        host between a random head and tail in two strings of three. For
+        each string the expected answer comes from the old pattern: the
+        first URL it found whose host is blocked, or no refusal. The probe
+        that chose this pattern found the two lists equal on 523,000
+        strings."""
+        monkeypatch.setattr("safety.policy_enforcement.BLOCKED_DOMAINS",
+                            {"evil.com"})
+        rng = random.Random(268)  # nosec B311 - a SEEDED rng for a reproducible sample, never a secret
+        pieces = ["a", "Z", "0", "7", "+", ".", "-", ":", "/", "://", " ",
+                  '"', "<", "x", "https", "evil.com", "1" * 33, "q" * 33,
+                  "+" * 33]
+        refused = 0
+        for _ in range(20000):
+            text = ("".join(rng.choices(pieces, k=rng.randint(0, 12)))
+                    + rng.choice(["://evil.com/x", "://a.example/", ""])
+                    + "".join(rng.choices(pieces, k=rng.randint(0, 12))))
+            expected = next((u for u in _UNBOUNDED_SCAN.findall(text)
+                             if is_domain_blocked(u)), None)
+            reason = check_input_policy("spy", {"text": text})
+            assert reason == (None if expected is None else _BLOCKED + expected), text
+            refused += expected is not None
+        assert refused > 1000, (
+            "the sample hardly reaches the blocklist, so agreement proves "
+            "little; change the pieces, not this floor")
+
+    @pytest.mark.parametrize("unit", [
+        "a1b2c3d4", "a", "7", "a.", "+.-", "9" * 1000 + "a" * 1000,
+    ], ids=["alphanumeric", "letters", "digits", "letters-and-dots",
+            "plus-dot-dash", "digits-then-letters"])
+    def test_the_scan_is_linear_on_a_long_run(self, unit):
+        """256 KB of one run, through the real entry point. The old scan
+        took about 33 s on the alphanumeric run. Without the lookbehind
+        every position in a run of digits would be a start that skips to
+        the run's end. Measured at about 0.1 s a megabyte, so the bound is
+        far above this scan's cost and far below either quadratic case."""
+        text = unit * (256 * 1024 // len(unit))
+        started = time.perf_counter()
+        assert check_input_policy("spy", {"text": text}) is None
+        assert time.perf_counter() - started < 5
+
+
+# The fakes below are BUILT from pieces, as in `tests/conftest.py`, so no
+# source line holds a run a secret scanner reads as a token.
+_HF = "hf_" + "a1B2c3D4" * 4 + "x9"
+_HF_OAUTH = "hf_" + "oauth_" + "Zx9Yw8Vu" * 5
+_MS = "ms-" + "1a2b3c4d-5e6f-7a8b-9c0d-" + "1e2f3a4b5c6d"
+_JWT = ("eyJ" + "hbGciOiJIUzI1NiJ9" + "." + "eyJ" + "zdWIiOiIxMjM0In0"
+        + "." + "q1W2e3R4" * 2)
+_OPAQUE = "q1W2e3R4" * 3
+_AUTH = ("Authorization: Bearer " + _OPAQUE,
+         "Authorization: Bearer [REDACTED]")
+
+#: Where an escape's closing character sits right before a token: the hex
+#: digit of a URL-encoded `=`, and the letter of three JSON escapes.
+_ESCAPED = {
+    "url-encoded": ("next=%2Fcb%3Ftoken%3D", "%26x%3D1"),
+    "json-newline": ('{"out": "line one\\n', '\\nline two"}'),
+    "json-tab": ('{"row": "name\\t', '"}'),
+    "json-return": ('{"out": "line one\\r', '"}'),
+}
+
+
+def _escaped_cases():
+    """(id, text, redacted) for each shape in each setting it can be in.
+    The header is never URL-encoded with its `:` left raw, so it is in the
+    three JSON settings only."""
+    shapes = {"hf": (_HF, "[REDACTED]"), "hf-oauth": (_HF_OAUTH, "[REDACTED]"),
+              "ms": (_MS, "[REDACTED]"), "jwt": (_JWT, "[REDACTED]"),
+              "authorization": _AUTH}
+    for shape, (raw, redacted) in shapes.items():
+        for setting, (before, after) in _ESCAPED.items():
+            if shape == "authorization" and setting == "url-encoded":
+                continue
+            yield pytest.param(before + raw + after, before + redacted + after,
+                               id=f"{shape}-{setting}")
+
+
+class TestATokenAfterAnEscape:
+    """Batch 268. A pattern that refuses to start after a token character
+    also refused to start after the one that closes an escape, so a token
+    after `%3D`, `\\n`, `\\t` or `\\r` passed whole. Batch 260 fixed that
+    for GitHub's stateless form and measured it in `hf_`; this batch
+    measured it in `ms-`, the JWT and the `Authorization` header too, and
+    the owner chose to fix all four. They share `_AFTER_ESCAPE`. Every
+    test drives the real `redact_output_text` and `check_input_policy`."""
+
+    @pytest.mark.parametrize("text, redacted", list(_escaped_cases()))
+    def test_it_is_redacted_after_the_escape(self, text, redacted):
+        """The EXACT output: the token goes and the escape stays."""
+        from safety.policy_enforcement import redact_output_text
+
+        assert redact_output_text(text) == redacted
+
+    @pytest.mark.parametrize("token", [_HF, _HF_OAUTH, _MS],
+                             ids=["hf", "hf-oauth", "ms"])
+    @pytest.mark.parametrize("setting", list(_ESCAPED))
+    def test_a_vendor_token_is_refused_after_the_escape(self, token, setting):
+        """Both sides, like every vendor token: one vocabulary. The JWT and
+        the header are output shapes, so they refuse nothing anywhere."""
+        before, after = _ESCAPED[setting]
+        reason = check_input_policy("spy", {"text": before + token + after})
+        assert reason is not None
+        assert token not in reason
+
+    @pytest.mark.parametrize("text", [
+        "ab" + _HF,
+        "ab12" + _HF,
+        "xn" + _HF,
+        "ab12" + _MS,
+        "nonauthorization = 1234567890123456",
+        "x\\NAuthorization: Bearer " + _OPAQUE,
+    ], ids=["letters-before-hf", "hex-pair-without-percent",
+            "n-without-backslash", "hex-pair-before-ms",
+            "word-ending-in-n", "uppercase-not-an-escape"])
+    def test_only_an_escapes_closing_character_is_let_through(self, text):
+        """What the patterns refused before batch 268 they still refuse to
+        start after: a word character that closes no escape. These are not
+        text anyone writes; they pin the escape to BOTH its characters, the
+        `%` with its hex pair and the backslash with its letter, and to the
+        lowercase letters JSON uses, which is where the header's escape
+        reads case-sensitively under its pattern's `(?i)`."""
+        from safety.policy_enforcement import redact_output_text
+
+        assert redact_output_text(text) == text
+        assert check_input_policy("spy", {"text": text}) is None
+
+    @pytest.mark.parametrize("unit", [
+        "%41hf_" + "a1b2c3d4" * 3,
+        "\\nhf_" + "a1b2c3d4" * 3,
+        "%41ms-" + "1a2b3c4d-",
+        "%41eyJ" + "a1b2c3d4" * 3,
+        "\\neyJ" + "a1b2c3d4" * 3,
+        "ab" + "eyJ" + "xn" + "eyJ",
+        "\\nAuthorization: Bearer ",
+    ], ids=["percent-hf", "backslash-hf", "percent-ms", "percent-jwt",
+            "backslash-jwt", "jwt-escape-halves-in-one-run",
+            "backslash-authorization"])
+    def test_the_escape_starts_stay_linear(self, unit):
+        """256 KB of each, both sides. Each escape start sits two characters
+        after a `%` or a `\\`, which none of the four patterns' runs
+        contains. The JWT is the one whose run has no `_` to end it, so an
+        escape loosened to its second half -- a hex pair, or a bare `n` --
+        lets a start in at every `eyJ` of one run: measured 3.8 s at 128 KB
+        that way, quadratic, against under 0.1 s here."""
+        from safety.policy_enforcement import redact_output_text
+
+        text = unit * (256 * 1024 // len(unit))
+        started = time.perf_counter()
+        redact_output_text(text)
+        check_input_policy("spy", {"text": text})
+        assert time.perf_counter() - started < 5

@@ -6467,7 +6467,7 @@ its own batch because it changes what a deployment checks before it serves
 anyone, which wants a run on the Space; meanwhile `TestTheWallsHold` runs the
 real path in CI on every push.
 
-## 117. The input side's URL scan is quadratic on one long alphanumeric run (open, found batch 260)
+## 117. The input side's URL scan is quadratic on one long alphanumeric run (closed, batch 268 -- the scan starts once per run)
 
 **Found while writing batch 260's linearity test.** The test drove a megabyte
 through `check_input_policy` as well as `redact_output_text`. Severity `S3`,
@@ -6504,6 +6504,45 @@ lookbehind like batch 260's, takes 0.016 s, but it stops seeing
 `0https://exploit-db.com/x`, and that is a way around the blocklist. Left out of
 batch 260 because it changes what the blocklist reads, and the batch is about
 one token form.
+
+**CLOSED (batch 268), with neither shape above, on the owner's choice.**
+Measured before building, the bounded scheme was not what this entry said. It
+is linear, but it does not find every URL today's pattern finds. In `a` and 40
+digits before `://evil.com/x`, and in `z9` and 35 `+` before it, no letter sits
+in the last 32 characters before `://`, so no start can match and the host is
+never read. Where it does find the host from a later start, the refusal quotes
+a URL cut to its last 32 scheme characters. Random strings did not show it (0
+of 303,000 differed), because they rarely hold a long run with no letter.
+
+What was built is a third shape: start only where a run of scheme characters
+starts, skip the run's leading digits and `+.-`, and capture from its first
+letter.
+
+```
+(?<![a-zA-Z0-9+.\-])[0-9+.\-]*([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>]+)
+```
+
+The old pattern's leftmost match in a run began at the run's first letter,
+and if that start failed every later one in the run failed too, since they
+share its end. So `findall`, which returns the one group, gives the list the
+old pattern gave, and the blocklist reads the same strings: `0https://h`
+still gives `https://h`, which is what the plain lookbehind above lost.
+Measured in the pinned venv:
+
+| measurement | before | after |
+|---|---|---|
+| `_URL_RE.findall`, 100 KB of one alphanumeric run | 4.98 s | 0.002 s |
+| `check_input_policy`, the same 100 KB | 5.9 s | -- |
+| `check_input_policy`, one alphanumeric megabyte | 441 s (batch 260) | 0.087 s |
+| `check_input_policy`, six other hostile megabytes (letters, digits, `a.`, `+.-`, digits then letters, `ab:// `) | -- | 0.09-0.11 s |
+| strings whose list differs from the old pattern's | -- | 0 of 523,000, 20,000 of them with a long letter-poor run before `://` |
+
+`TestTheUrlScanStartsOncePerRun` holds it: the exact refusal on eight cases
+(three a bounded scheme fails), agreement with the old pattern on 20,000
+seeded strings through `check_input_policy`, and six 256 KB runs under 5 s.
+Five mutations, each killed by the test written for it: the old pattern back,
+the bounded scheme, the lookbehind dropped, the digit skip dropped, and the
+capture group dropped.
 
 ## 118. The Space's audit leaves out what only the Space installs (open, found batch 262)
 
@@ -6552,6 +6591,35 @@ same two rules CW2 gives the file tools. Left out of batch 263 because it
 changes what the gate AUTO-APPROVES: `cat /workspace/x` would become INERT and
 run unasked in the container, which is the right answer but is the gate's
 decision (ROADMAP_v2 §28, G2) and wants the owner's yes.
+
+## 120. The password shape misses a JSON-escaped assignment (open, found batch 268)
+
+**Found while measuring batch 268's escape gap.** Batch 268 let a token follow
+an escape's closing character in the four patterns that refused to start after
+one: `hf_`, `ms-`, the JWT and the `Authorization` header. `_ASSIGNMENT_RE`
+has the same anchor, `\b` before `password` or `passwd`, which fails after the
+`n` of a JSON-escaped `\n`. Its value has a second problem, though. Inside a
+JSON string, the quotes around the value are escaped too, and the pattern reads
+`["']` right after the separator, where the text has a backslash. Measured
+through the real `redact_output_text`:
+
+| text | result |
+|---|---|
+| `password = "hunter22x"` | redacted |
+| `{"cfg": "user=a\npassword = \"hunter22x\""}` | unchanged |
+
+Letting the escape through `\b` alone would change nothing, which is why it was
+not one of batch 268's four. Severity `S3`, `security`: a build file or a
+config that a tool returns as a JSON string keeps its quoted password.
+
+**Shape, not done here.** Two changes to an output-only shape: the shared
+`_AFTER_ESCAPE` before the keyword, and an optional backslash before each
+quote, with the closing one required to match the opening one's form. The
+second needs measuring before it is built. A value could then end at a `\"`
+inside a longer escaped string. The 4-character floor and the template
+placeholders, `${PASSWORD}` and its siblings, would need re-checking against
+build files carried in JSON. Left out of batch 268 because it is a second
+defect, not the escape gap that batch measured.
 
 ## Review-marathon arrivals at open issues with no register entry
 
