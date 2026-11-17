@@ -32217,3 +32217,106 @@ bandit (no new findings, no baseline count grew) and gitleaks on a clean export 
 workflow file and no `config.yaml` is in the diff.
 
 - **Version:** the branch's beta identity, `0.3.16-b.1.bug-round-2026-11-15.r7070c89b1d87`.
+
+## Batch 268 -- the URL scan starts once per run, and a token after an escape is a token (2026-11-17)
+
+**Asked.** From a survey of what was open, the owner picked two items, both in
+`safety/policy_enforcement.py`. The first was TECHNICAL_DEBT 117, the input side's quadratic
+URL scan. The second was the escape gap batch 260 measured in the `hf_` pattern and left.
+
+**Measured first.**
+
+- **The URL scan.** Re-driven on `main` (`fb82253`). `_URL_RE.findall` took 0.23 s at 25 KB,
+  0.93 s at 50 KB and 4.98 s at 100 KB of one alphanumeric run. `check_input_policy` took
+  5.9 s on the same 100 KB. Item 117's numbers held.
+- **The register's shape loses URLs.** Item 117 said a scheme bounded to 32 characters finds
+  every URL the old pattern finds. It does not. Where no letter sits in the 32 characters
+  before `://` (`a` and 40 digits, or `z9` and 35 `+`), no start can match. So
+  `a` + 40 digits + `://evil.com/x` would no longer be refused. 303,000 random strings showed
+  no difference, because they rarely hold a long run with no letter in it. The two cases were
+  built by hand.
+- **A third shape.** It starts only where a run of scheme characters starts, skips the run's
+  leading digits and `+.-`, and captures from the first letter. It gave the old pattern's
+  list on every case and on all 303,000 strings. It took 0.045 s or less on each of ten
+  hostile megabytes.
+- **The escape gap is wider than `hf_`.** After `%3D`, `\n` or `\t`, an `hf_` or `hf_oauth_`
+  token passed `redact_output_text` whole, and `check_input_policy` let it through. So did
+  `ms-`, which has the same lookbehind. The JWT shape (output only) missed it too, since its
+  `\b` fails between the `n` of `\n` and `eyJ`. So did the `Authorization` header after a
+  JSON-escaped `\n`. The password shape misses an escaped assignment for a second reason as
+  well: its quotes are escaped too.
+
+**Settled with the owner.** Two questions, and both answers took the recommended option.
+
+- **TECHNICAL_DEBT 117: the run-start pattern**, not the bounded scheme. The blocklist reads
+  exactly the strings it read before.
+- **The escape: all four shapes**, `hf_`, `ms-`, the JWT and the `Authorization` header. The
+  password shape went into the register as TECHNICAL_DEBT 120.
+
+**Built.**
+
+- `_URL_RE` is now `(?<![a-zA-Z0-9+.\-])[0-9+.\-]*([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>]+)`.
+  `findall` returns the one group, so `_input_leaf` is unchanged.
+- `_AFTER_ESCAPE` holds batch 260's two escape lookbehinds once: `%XX`, and `\n`, `\r` or
+  `\t`. GitHub's stateless pattern reads it and compiles to the identical regex. `hf_` and
+  `ms-` take it beside their lookbehind, and the JWT beside its `\b`. The `Authorization`
+  header takes it beside its `\b` inside `(?-i:...)`, because the pattern is case-insensitive
+  and an uppercase `\N` is not a JSON escape.
+
+**Measured after.**
+
+- `check_input_policy` took 0.087-0.108 s on each of seven hostile megabytes. One
+  alphanumeric megabyte had taken 441 s.
+- 220,000 more strings gave the old pattern's list, 20,000 of them with a long run of few
+  letters before `://evil.com/`. `a` and 40 digits before `://evil.com/x` is refused with the
+  whole URL quoted.
+- Every escaped case is redacted, and the `hf_` and `ms-` ones are refused. Every escape
+  start is linear on both sides, at 0.09-0.18 s a megabyte. The JWT with its escape loosened
+  to the second half is quadratic: 0.15 s at 32 KB, 0.77 s at 64 KB and 3.8 s at 128 KB.
+
+**Caught on the way.**
+
+- **The random sample has to reach the blocklist.** The equivalence test's first sample
+  refused 117 of its 20,000 strings, under its own floor of 1,000, so agreement would have
+  proved little. Two strings in three now carry a `://` and a host between a random head and
+  tail, and 2,779 are refused.
+- **A heredoc decoded three escapes in a document.** A one-off `python - <<'PY'` edit wrote
+  the `\n`, `\t` and `\r` of ARCHITECTURE.md's new test line as a real newline, tab and
+  carriage return. Reading the line back found it. A script file repaired it, and the file
+  was checked for tabs and bare carriage returns.
+
+**Tests.** Two classes in `tests/test_policy_enforcement.py` drive the real
+`check_input_policy` and `redact_output_text`. Nothing is patched but the blocklist.
+
+- `TestTheUrlScanStartsOncePerRun` checks the exact refusal on eight cases, three of which a
+  bounded scheme fails. It checks agreement on 20,000 seeded strings with the old pattern,
+  kept in the file as `_UNBOUNDED_SCAN`. And it times six 256 KB runs against a 5 s bound.
+- `TestATokenAfterAnEscape` checks the exact output for five shapes after four escapes, 19
+  cases, since the header is never URL-encoded with its `:` left raw. It checks the vendor
+  tokens are refused, and that six lookalikes still start no match. And it times seven
+  256 KB hostile runs on both sides.
+
+Batch 260's linearity docstring and its BREAKING_CHANGES row about the `_` in its long run
+now say why the `_` no longer matters.
+
+**Verified.** The full suite on Windows, in a venv built from `main`'s pins, with
+`AGENT_WORKSPACE` unset: 9741 passed, 88 skipped (9829: `main`'s 9770 and this batch's 59).
+The pass ran on an export copy, and 15 of 15 mutations were killed, each by the test
+written for it:
+
+- the old scan back, and the run-start lookbehind dropped (both by the timing test);
+- the bounded scheme, once against the exact refusals and once against the random sample
+  alone;
+- the digit skip dropped, and the capture group dropped;
+- each escape loosened to its second half, and the backslash escape narrowed to `\n`;
+- `hf_`, `ms-`, the JWT and the header each without the escape;
+- the header's escape read case-insensitively, and `hf_` with no lookbehind at all.
+
+ruff is clean. bandit 1.9.4 first reported B311 on the new test's seeded `random.Random`. It
+now carries the `# nosec B311` and the reason `tests/test_shell.py` gives its seeded sweeps,
+added after the full run, and the file was re-run alone. With that, nothing is outside the
+baseline and no baseline count grew. gitleaks 8.30.1 on an export of the tracked files finds
+nothing. The requirements files are unchanged, so pip-audit was not re-run. The patterns are
+plain `re` with no platform branch, so no WSL run was made.
+
+- **Version:** the branch's beta identity, `0.3.17-b.1.url-scan-hf-escape.r6445e211ff24`.

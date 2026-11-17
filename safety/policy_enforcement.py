@@ -234,6 +234,17 @@ _PEM_SEP = _PEM_BREAK + r"+[ \t]*"
 # key carries before its base64.
 _PEM_UNIT = r"(?:[A-Za-z0-9+/=]{16,}|(?:Proc-Type|DEK-Info):[^\r\n\\]*)"
 
+# A token character that CLOSES AN ESCAPE, so a pattern that refuses to start
+# after a token character still starts here: the second hex digit of `%3D`
+# in a URL-encoded value, and the letter of `\n`, `\r` or `\t` in a
+# JSON-escaped one. Batch 260 wrote it for GitHub's stateless form. Batch 268
+# measured the same miss in every other pattern anchored that way: `hf_`,
+# `ms-` and the JWT each passed whole after `%3D`, `\n` and `\t`, and the
+# `Authorization` header after `\n`. They share this one copy. Each such
+# start sits two characters after a `%` or a `\`, which none of their runs
+# contains, so a pattern that was linear stays linear.
+_AFTER_ESCAPE = r"(?<=%[0-9A-Fa-f]{2})|(?<=\\[nrt])"
+
 _SECRET_PATTERNS = [
     # OpenAI-style keys
     re.compile(r"sk-[a-zA-Z0-9]{20,}"),
@@ -292,14 +303,14 @@ _SECRET_PATTERNS = [
     # long run is a start that scans to the run's end: measured quadratic,
     # 99 s on a hostile megabyte against 0.03 s with it. A token character
     # is allowed before the prefix only where it closes an escape, `%3D`
-    # or `\n`, since a URL-encoded or JSON-escaped token is still a token,
-    # and the classic pattern catches those. Each of those starts sits two
-    # characters after a `%` or a `\`, which no run contains, so the scan
-    # stays linear.
+    # or `\n` (`_AFTER_ESCAPE`), since a URL-encoded or JSON-escaped token
+    # is still a token, and the classic pattern catches those. Each of those
+    # starts sits two characters after a `%` or a `\`, which no run
+    # contains, so the scan stays linear.
     # This pattern runs BEFORE the classic one, because a 36-character
     # alphanumeric run inside a segment would otherwise take a piece of
     # the token and leave the rest standing.
-    re.compile(r"(?:(?<![A-Za-z0-9_-])|(?<=%[0-9A-Fa-f]{2})|(?<=\\[nrt]))"
+    re.compile(r"(?:(?<![A-Za-z0-9_-])|" + _AFTER_ESCAPE + r")"
                r"gh[ousr]_[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}"
                r"\.[A-Za-z0-9_-]{20,}"),
     # GitHub OAuth, user-to-server, server-to-server and refresh tokens
@@ -316,14 +327,21 @@ _SECRET_PATTERNS = [
     # --- the rest of the list.
     # Hugging Face user access tokens and OAuth access tokens. An
     # identifier like `hf_hub_download` breaks the run of word characters
-    # at its second underscore and is not matched.
-    re.compile(r"(?<![A-Za-z0-9])hf_(?:oauth_)?[A-Za-z0-9]{30,}"),
+    # at its second underscore and is not matched. An escape's closing
+    # character may come before the prefix (`_AFTER_ESCAPE`, batch 268):
+    # before that, `%3Dhf_...` and `\nhf_...` were neither redacted nor
+    # refused.
+    re.compile(r"(?:(?<![A-Za-z0-9])|" + _AFTER_ESCAPE + r")"
+               r"hf_(?:oauth_)?[A-Za-z0-9]{30,}"),
     # OpenRouter keys, which `sk-` above misses at the second hyphen
     re.compile(r"sk-or-v1-[A-Za-z0-9]{32,}"),
     # ModelScope access tokens in their prefixed form: `ms-` and a UUID. A
     # bare UUID is NOT matched -- thread ids are UUIDs -- and neither is one
-    # that merely ENDS a word like `items-<uuid>`.
-    re.compile(r"(?<![A-Za-z0-9])ms-[0-9a-f]{8}-[0-9a-f]{4}"
+    # that merely ENDS a word like `items-<uuid>`. An escape's closing
+    # character is not a word (`_AFTER_ESCAPE`, batch 268), so `%3Dms-...`
+    # and `\nms-...` are matched, as `hf_` is.
+    re.compile(r"(?:(?<![A-Za-z0-9])|" + _AFTER_ESCAPE + r")"
+               r"ms-[0-9a-f]{8}-[0-9a-f]{4}"
                r"-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"),
 ]
 
@@ -426,19 +444,26 @@ _ASSIGNMENT_RE = re.compile(
 # `Digest username=...`, whose secret is not one value, is left alone. A
 # value with NO scheme word must also be 16 characters and carry a digit,
 # because API documentation writes "Authorization: required" and a bare
-# 8-character floor redacted the word.
+# 8-character floor redacted the word. The header may follow an escape's
+# closing character (`_AFTER_ESCAPE`, batch 268), case-sensitively, since
+# `\b` fails between the `n` of a JSON-escaped `\n` and the header name: a
+# captured request's `\nAuthorization: Bearer ...` passed whole before it.
 # Groups: 1 header name, 2 separator, 3 scheme (or None).
 _AUTH_HEADER_RE = re.compile(
-    r"(?i)\b((?:proxy-)?authorization)([\"']?\s*[:=]\s*[\"']?)"
+    r"(?i)(?:\b|(?-i:" + _AFTER_ESCAPE + r"))"
+    r"((?:proxy-)?authorization)([\"']?\s*[:=]\s*[\"']?)"
     r"(?:((?:bearer|basic|token)\s+)[A-Za-z0-9._~+/=\-]{8,}"
     r"|(?=[A-Za-z._~+/=\-]*[0-9])[A-Za-z0-9._~+/=\-]{16,})")
 
 # A JSON Web Token, whole: three base64url segments, the first two of
 # which open with `eyJ` because both are JSON objects (`{"`). A bearer
 # credential wherever it appears, and the shape `_AUTH_HEADER_RE` cannot
-# reach when the token is pasted without its header.
+# reach when the token is pasted without its header. It may follow an
+# escape's closing character (`_AFTER_ESCAPE`, batch 268), where `\b` fails:
+# `%3DeyJ...` and `\neyJ...` passed whole before that.
 _JWT_RE = re.compile(
-    r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+    r"(?:\b|" + _AFTER_ESCAPE + r")"
+    r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
 
 # The END of a PEM key block whose BEGIN is not in this string: the footer
 # and the run of base64 lines above it. The vendor pattern takes a block
@@ -1065,7 +1090,23 @@ def check_output_policy(tool_name: str, result: dict) -> dict:
 # claims and reports constantly, and refusing every mention would make the
 # blocklist unusable while blocking nothing an attacker couldn't rephrase.
 # fetch_url.py keeps its own bare-domain check for the value it is given.
-_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>]+")
+#
+# The scan starts once per RUN of scheme characters (TECHNICAL_DEBT 117,
+# batch 268). It used to be `[a-zA-Z][a-zA-Z0-9+.\-]*://...`, tried at every
+# letter, and on one long run of letters and digits each try scanned to the
+# run's end before failing to find `://`. That was quadratic: 4.8 s at
+# 100 KB and 441 s at a megabyte, before the handler ran. Now the lookbehind
+# refuses every start inside a run, the run's leading digits and `+.-` are
+# skipped, and the group captures from the run's first letter, which is
+# where the old pattern's leftmost match began. So `findall`, which returns
+# that one group, gives exactly the list it gave before (`0https://h` still
+# gives `https://h`), and the blocklist reads the same strings. Measured:
+# 0.05 s or less on each of ten hostile megabytes, and the old pattern's
+# list on 303,000 random strings. The shape the register recorded, a scheme
+# bounded to 32 characters, was linear too, but it found nothing in `a` and
+# 40 digits before `://evil.com`, where today's scan finds the host.
+_URL_RE = re.compile(
+    r"(?<![a-zA-Z0-9+.\-])[0-9+.\-]*([a-zA-Z][a-zA-Z0-9+.\-]*://[^\s\"'<>]+)")
 
 
 def _input_leaf(text: str) -> str:

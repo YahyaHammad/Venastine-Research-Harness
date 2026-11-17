@@ -15,6 +15,19 @@ other name.
 
 ---
 
+## The URL scan, and a token after an escape (batch 268)
+
+| Change | Test | Fix |
+|---|---|---|
+| Put the old URL scan back, or drop the run-start lookbehind | `test_the_scan_is_linear_on_a_long_run` | The scan starts once per run of scheme characters. Tried at every letter, it was quadratic on one long run: about 33 s on that test's 256 KB, 441 s on a megabyte (TECHNICAL_DEBT 117) |
+| Bound the scheme to 32 characters | `test_the_refusal_names_the_url_the_old_scan_found`, `test_it_refuses_exactly_what_the_old_scan_refused` | Not the fix: with no letter in the last 32 characters before `://` it finds no URL, so `a` and 40 digits before `://evil.com` stops being refused. The owner chose the run-start shape, which returns the old pattern's list |
+| Drop the leading-digit skip, or the capture group | `test_the_refusal_names_the_url_the_old_scan_found` | `0https://h` must still give `https://h`: a capture from the run's start keeps the digit, which `urlparse` reads as no scheme, so the host is never checked |
+| Change the list the old scan's reference pattern in that file returns | `test_it_refuses_exactly_what_the_old_scan_refused` | Don't: `_UNBOUNDED_SCAN` is the pre-batch-268 pattern, and the new one is held to it. Its floor of 1,000 refusals is there so the sample keeps reaching the blocklist; change the pieces, not the floor |
+| Take `_AFTER_ESCAPE` out of `hf_`, `ms-`, the JWT or the `Authorization` header | `test_it_is_redacted_after_the_escape`, `test_a_vendor_token_is_refused_after_the_escape` | A token after `%3D`, `\n`, `\t` or `\r` is still a token; the owner chose all four patterns that refused to start after one |
+| Loosen the escape to its second half, narrow `[nrt]`, or read the header's escape case-insensitively | `test_only_an_escapes_closing_character_is_let_through`, `test_the_escape_starts_stay_linear`, `test_it_is_redacted_after_the_escape` | Only the `%` with its hex pair, or the backslash with a lowercase `n`, `r` or `t`, lets a start in. A bare hex pair or `n` lets the JWT start at every `eyJ` of one run: 3.8 s at 128 KB |
+
+---
+
 ## GitHub's stateless tokens (batch 260)
 
 | Change | Test | Fix |
@@ -24,7 +37,7 @@ other name.
 | Let a dot into the runs, lower the 20-character floor, or stop requiring both dots | `test_a_token_goes_and_what_surrounds_it_stays`, `test_code_and_prose_that_name_the_prefix_survive` | A sentence keeps its final period, and code that names a `ghs_` variable is neither redacted nor refused |
 | Drop the escape alternatives from the lookbehind | `test_a_token_goes_and_what_surrounds_it_stays` | A URL-encoded or JSON-escaped token is still a token, and the classic pattern always caught those |
 | Drop the lookbehind, or loosen an escape to its second half | `test_the_stateless_shape_is_linear_on_a_megabyte` | Without it, every `ghs_` inside one run is a start that scans to the run's end: 99 s on a megabyte |
-| Take the `_` out of that test's long run | `test_the_stateless_shape_is_linear_on_a_megabyte`, at about 441 s | Leave it in. The input side's URL scan is quadratic on one alphanumeric run (TECHNICAL_DEBT 117), and that is not this pattern's cost |
+| ~~Take the `_` out of that test's long run~~ | `test_the_stateless_shape_is_linear_on_a_megabyte` | **Breaks nothing since batch 268.** Until then it took about 441 s, because the input side's URL scan was quadratic on one alphanumeric run (TECHNICAL_DEBT 117); `test_the_scan_is_linear_on_a_long_run` times that scan now |
 
 ---
 
