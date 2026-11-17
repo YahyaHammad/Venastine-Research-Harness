@@ -71,6 +71,11 @@ from security import posture, protected_paths
 
 logger = logging.getLogger(__name__)
 
+#: ROADMAP_v3 §98. What a bare `--resume` parses to: list the runs that can be
+#: resumed rather than resume one. A sentinel, not a string, so no run id can
+#: collide with it -- GRANT_PICKER's shape, one flag over.
+RESUME_LIST = object()
+
 
 class _Visible:
     """Every untrusted string one prompt prints, and whether any of them
@@ -2168,6 +2173,39 @@ def run_memory_command(args) -> int:
     return 0
 
 
+def run_resume_list() -> int:
+    """A bare `--resume` (ROADMAP_v3 §98): the runs that can be resumed,
+    newest first, and how to resume one. The CLI's picker, since a line
+    shell has nothing to pick with. The first eight characters of an id
+    are shown because they are what `--resume` needs."""
+    from core.reasoning.resume import resumable_runs
+    for line in resume_list_lines(resumable_runs()):
+        print(line)
+    return 0
+
+
+def resume_list_lines(runs) -> list:
+    """The listing `run_resume_list` prints, as lines a test can read."""
+    if not runs:
+        return ["No failed or abandoned research run to resume."]
+    lines = ["Research runs that can be resumed, newest first:"]
+    for row in runs:
+        status = ("stopped, or still running elsewhere"
+                  if row["status"] == "running" else row["status"])
+        started = row["started_at"]
+        when = (started.strftime("%Y-%m-%d %H:%M")
+                if hasattr(started, "strftime") else str(started or ""))
+        where = (f"cannot resume: {row['note']}" if row.get("note")
+                 else f"resumes {row['stage']}")
+        query = ansi.for_display(str(row["user_query"]))
+        if len(query) > 60:
+            query = query[:59] + "…"
+        lines.append(f"  {str(row['id'])[:8]}  {when}  {status}  {where}")
+        lines.append(f"            {query}")
+    lines.append("Resume one with: venastine --resume <id>")
+    return lines
+
+
 def run_summary_command(args, provider_name: str, model: str) -> int:
     """`--summary [thread]`, ROADMAP_v2 §21c (M21).
 
@@ -2392,6 +2430,7 @@ def run_research(
     review=None,
     subagent_review=None,
     effort: str | None = None,
+    resume=None,
 ) -> None:
     """Run the full deep-research pipeline, write artifacts to disk,
     and print the results. ensemble_mode/ensemble_n come from
@@ -2411,11 +2450,27 @@ def run_research(
     §22: the pipeline is ITERATED, not called, so a run that takes many
     minutes says what it is doing while it does it. The CLI is where that
     matters most -- it is the shell an unattended run is usually launched
-    from, and it had nothing at all to show until the run ended."""
+    from, and it had nothing at all to show until the run ended.
+
+    resume (ROADMAP_v3 §98) is a run id, or the start of one, to pick up
+    instead of starting `query`. A run that fails, this time or that one,
+    ends with the command that resumes it, because the id is otherwise
+    printed only by a run that completed."""
     from core.reasoning.orchestrator import stream_deep_research_pipeline
     from core.reasoning.output_writer import write_run_artifacts
+    from core.reasoning.resume import ResumeRefused, find_run
 
-    print(f"Running deep-research pipeline on: {query!r}")
+    run_id = None
+    if resume is not None:
+        try:
+            run_id = find_run(resume)
+        except ResumeRefused as e:
+            print(f"Cannot resume {ansi.for_display(resume)}: "
+                  f"{ansi.for_display(e)}.")
+            raise SystemExit(1) from None
+        print(f"Resuming research run {run_id}")
+    else:
+        print(f"Running deep-research pipeline on: {query!r}")
     print(f"Provider: {provider_name} | Model: {model} | "
           f"Effort: {effort or 'auto'}\n")
 
@@ -2426,6 +2481,7 @@ def run_research(
             ensemble_mode=ensemble_mode, ensemble_n=ensemble_n,
             authorization=authorization, review=review,
             subagent_review=subagent_review, effort=effort,
+            resume=run_id,
         ):
             # §26: tool calls and code stages print here too. The CLI is
             # the shell an unattended run is launched from, so a
@@ -2473,6 +2529,10 @@ def run_research(
                 print(f"     .. {event.chars // 1000}k chars", flush=True)
             elif event.kind == "trace_line":
                 print(f"- {ansi.for_display(event.text)}", flush=True)
+            elif event.kind == "run_started":
+                # §98. Kept, not printed: the id is what the failure line
+                # below needs, and a completed run prints it at the end.
+                run_id = event.text
             elif event.kind == "run_complete":
                 run = event.run
         if run is None:
@@ -2482,11 +2542,20 @@ def run_research(
             raise RuntimeError(
                 "Pipeline generator completed without yielding a "
                 "run_complete event")
+    except ResumeRefused as e:
+        # §98. Refused before anything changed, so this is not a pipeline
+        # failure and the run keeps the status it had.
+        print(f"\nCannot resume run {run_id}: {ansi.for_display(e)}.")
+        raise SystemExit(1) from None
     except Exception as e:
         logger.exception("Research pipeline failed")
         print(f"\nPipeline failed: {ansi.for_display(e)}")
-        print("If any partial results were persisted, they can be "
-              "inspected via the database.")
+        if run_id:
+            print(f"Completed passes are kept. Resume the run where it "
+                  f"stopped with: venastine --resume {run_id}")
+        else:
+            print("If any partial results were persisted, they can be "
+                  "inspected via the database.")
         raise SystemExit(1)
 
     output_dir = None
@@ -2660,6 +2729,21 @@ def build_parser() -> argparse.ArgumentParser:
         const=False,
         help="Research mode: skip the post-pipeline review even if "
              "settings.json or config.yaml turns it on.",
+    )
+    # ROADMAP_v3 §98. An optional value, which is safe here where --grant
+    # was not: a resumed run takes no query, so there is no next token for
+    # it to swallow by mistake. Bare, it lists the runs it could take.
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const=RESUME_LIST,
+        default=None,
+        metavar="RUN_ID",
+        help="Research mode: pick a failed or abandoned run up where it "
+             "stopped -- completed passes are not run again. Give the run "
+             "id (its first eight characters are enough); with no id, list "
+             "the runs that can be resumed. Implies --mode research and "
+             "takes the usual --grant/--attended/--review flags.",
     )
     parser.add_argument(
         "--tui",
@@ -3409,6 +3493,21 @@ def main(argv=None) -> int:
     if args.summary is not None:
         return run_summary_command(args, provider, model)
 
+    # ROADMAP_v3 §98. --resume names a research run, so it implies the mode
+    # rather than requiring it to be typed too. Checked here, ahead of the
+    # validation below that wants a query for --mode research, because a
+    # resumed run keeps its own query and must not be given another.
+    if args.resume is not None:
+        if args.tui:
+            parser.error("--tui does not take --resume; use /research "
+                         "--resume inside the TUI.")
+        if args.query:
+            parser.error("--resume takes no query: a resumed run keeps the "
+                         "query it was started with.")
+        args.mode = "research"
+        if args.resume is RESUME_LIST:
+            return run_resume_list()
+
     # §24. Beside the others, and AFTER load_project_config for a reason the
     # rest do not share: the generator resolves its destination through
     # config_loader.get_project_path(), and reads the trust state that
@@ -3432,8 +3531,10 @@ def main(argv=None) -> int:
         # §16 ships the chat shell; research mode's coarse progress view
         # is driven from inside the TUI, not from a launch flag.
         parser.error("--tui does not take --mode research; use /research inside the TUI.")
-    if args.mode == "research" and not args.tui and not args.query:
-        parser.error("--mode research requires a positional query argument.")
+    if (args.mode == "research" and not args.tui and not args.query
+            and args.resume is None):
+        parser.error("--mode research requires a positional query argument "
+                     "(or --resume, to pick up a run that stopped).")
     if args.tui and args.query:
         # The parser help says a positional query is "sent as the first
         # message", and tui.app.run() has no first-message parameter --
@@ -3574,6 +3675,7 @@ def main(argv=None) -> int:
                 subagent_review=review_on,
                 review=build_review_consent() if review_on else None,
                 effort=effort,
+                resume=args.resume,
             )
         else:
             thread_id = args.thread

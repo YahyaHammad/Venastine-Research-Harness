@@ -3677,6 +3677,7 @@ def _modal_cases():
         NoticeScreen,
         ProjectKindScreen,
         QuestionScreen,
+        ResumeRunPickerScreen,
         ReviewScreen,
         SecretScreen,
         SessionKillScreen,
@@ -3713,6 +3714,9 @@ def _modal_cases():
         ("project-kind", lambda: ProjectKindScreen(),
          "#permission-dialog"),
         ("thread-picker", lambda: ThreadPickerScreen([], ""),
+         "#thread-dialog"),
+        # ROADMAP_v3 §98. The thread picker's dialog and CSS, one level up.
+        ("resume-run-picker", lambda: ResumeRunPickerScreen([], ""),
          "#thread-dialog"),
         ("agent-picker", lambda: AgentPickerScreen([]),
          "#agent-picker-dialog"),

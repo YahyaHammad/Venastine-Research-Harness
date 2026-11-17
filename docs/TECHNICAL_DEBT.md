@@ -6621,6 +6621,46 @@ placeholders, `${PASSWORD}` and its siblings, would need re-checking against
 build files carried in JSON. Left out of batch 268 because it is a second
 defect, not the escape gap that batch measured.
 
+## 121. A failed research run's error is printed twice in the TUI (open, found batch 269)
+
+**Seen in the owner's screenshot of the run that prompted ROADMAP_v3 §98.** The
+transcript showed the failure as `[pipeline failed: ...]`, with the first 500
+characters of the raw answer, and then again as `[error] Worker 'research'
+failed: ...`, with the same 500 characters. `_start_research`'s worker posts
+`ResearchFinished(None, e)`, which `on_research_finished` writes through
+`_write_failure`. It then re-raises, so the worker ends in `ERROR`, and
+`on_worker_state_changed` logs it at ERROR, which the transcript's log handler
+draws. A §98 refusal is not re-raised, so it is said once. Severity `S4`,
+`legibility`: a long failure fills the screen twice, and the second copy reads
+as a second failure.
+
+**Shape, not done here.** The worker could return after posting, as the
+refusal path now does, keeping the log record for the rotating file only. The
+toast and the traceback in the log are what the re-raise buys, and batch 78
+put the logging there on purpose, so the change needs that weighed rather than
+assumed.
+
+## 122. A JSON pass cut off by the provider's output limit is corrected as malformed JSON (open, found batch 269)
+
+**Found reading the owner's failed Pass 3a for ROADMAP_v3 §98.** Its second
+answer was a 15,322-character array that ended mid-string, after 218,784
+characters of reasoning: the shape of a reply stopped by an output-token
+limit. The trace called it `JSON parse failed ... Unterminated string`, and
+the corrective that followed told the model its JSON was malformed. Read in
+`core/client.py`: the OpenAI-compatible branch keeps `finish_reason`, but uses
+it only to explain a tool call's unreadable arguments (§33 W4). A text reply
+that stopped on `length` ends with `stop_reason` `complete`, so
+`_check_not_truncated` passes it on to the JSON retry. Whether the owner's
+provider sent `length` is not measured: the record keeps no finish reason.
+Severity `S3`, `correctness`: a corrective asks for the same long answer
+again, which meets the same limit.
+
+**Shape, not done here.** Surface a text `length` stop as its own stop reason,
+on each branch that reports one, so `_check_not_truncated` traces it, and a
+JSON pass's retry can say "your answer was cut off" rather than "your JSON
+did not parse". It needs each branch measured for what its SDK reports,
+which is why it is not part of §98.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both

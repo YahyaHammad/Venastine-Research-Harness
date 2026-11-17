@@ -460,7 +460,11 @@ Button:focus {
     border-right: none;
 }
 
-ThreadPickerScreen {
+/* ROADMAP_v3 §98's run picker shares the thread picker's dialog, so it
+   shares the rule that centres it -- the sweep in test_tui.py measured it
+   at the screen's left edge without. */
+ThreadPickerScreen,
+ResumeRunPickerScreen {
     align: center middle;
 }
 

@@ -825,9 +825,22 @@ def _ordered_rows(thread_id: UUID) -> list[dict]:
                 # ROADMAP_v3 §81 (IM2). NULL for every row that attached no
                 # image; the compactor's size proxy reads it (IM8).
                 "images": m.images,
+                # ROADMAP_v3 §98 (RS6): when a tool result arrived, which a
+                # resumed run's rebuilt corpus keeps as the page's
+                # retrieved_at. The ordering above already reads it.
+                "created_at": m.created_at,
             }
             for m in session.exec(statement).all()
         ]
+
+
+def tool_result_times(thread_id: UUID) -> dict:
+    """When each tool result in a thread was written, by tool_call_id
+    (ROADMAP_v3 §98, RS6). Over `_ordered_rows`, so the suite's fake
+    storage answers it through the one read it already mirrors."""
+    return {row["tool_call_id"]: row.get("created_at")
+            for row in _ordered_rows(thread_id)
+            if row["role"] == "tool" and row["tool_call_id"]}
 
 
 def _split_at(rows: list[dict], message_id: Optional[UUID]) -> int:

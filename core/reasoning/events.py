@@ -96,6 +96,12 @@ PIPELINE_EVENT_KINDS = (
     "tool_call",        # pass_id + tool + text -- a pass invoked a tool
     "tool_result",      # pass_id + tool + ok (+ text when it failed)
     "pass_activity",    # pass_id + chars -- output streamed so far, throttled
+    # --- ROADMAP_v3 §98 -----------------------------------------------
+    "run_started",      # text -- the run's id, first, before any pass. A
+                        # shell needs it to say how to resume a run that
+                        # then fails or is abandoned: the exception that
+                        # ends a failed run carries no reference back to
+                        # it, and run_complete is never reached.
 )
 
 # There is deliberately NO "step" kind. §26 set out to report which model

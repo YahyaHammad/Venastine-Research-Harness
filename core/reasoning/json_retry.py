@@ -80,13 +80,24 @@ _TEXT_CORRECTIVE = (
 def parse_json_response(text: str) -> Any:
     """Callers are instructed (via the universal preamble, or an agent's
     own output-format section) to emit clean JSON, optionally in a code
-    fence. Strip the fence if present."""
+    fence. Strip the fence if present.
+
+    A fence at EITHER end, since ROADMAP_v3 §98 (RS7). A lone closing fence
+    after bare JSON used to reach `json.loads`, which read the value and
+    raised "Extra data" on the three backticks. Measured on a real run: a
+    Pass 3a answer of 59,009 characters was a complete array of one entry
+    per factual claim followed by a newline and a closing fence, and it
+    failed a run that had spent 4h53m. Only the fence is taken. Any other
+    text after the value still fails and is corrected as before, because
+    a second value there could be the rest of the answer."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.split("```")[1]
         if cleaned.lower().startswith("json"):
             cleaned = cleaned[4:]
         cleaned = cleaned.strip()
+    elif cleaned.endswith("```"):
+        cleaned = cleaned[:-3].rstrip()
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:

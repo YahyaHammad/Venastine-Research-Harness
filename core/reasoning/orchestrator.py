@@ -87,7 +87,12 @@ from core.reasoning.events import PipelineEvent
 from core.reasoning.json_retry import parse_json_response as _parse_json_response
 from core.reasoning.json_retry import retry_until_json, retry_until_text
 from core.reasoning.payload_validation import validate as _validate_payload
-from core.reasoning.pipeline_storage import create_pipeline_run, update_pipeline_run
+from core.reasoning.pipeline_storage import (
+    create_pipeline_run,
+    reopen_pipeline_run,
+    update_pipeline_run,
+)
+from core.reasoning.pipeline_storage import save_resume_point as _save_resume_point
 from core.reasoning.scholar import ScholarLookup
 from core.reasoning.source_corpus import SourceCorpus
 from core.reasoning.source_scoring import make_scorer, score_grounding_sources
@@ -134,11 +139,13 @@ class _Progress:
     only inside a live generator has no business in a persisted row.
     """
 
-    def __init__(self, run: PipelineRun) -> None:
+    def __init__(self, run: PipelineRun, emitted: int = 0) -> None:
         self.run = run
-        self._emitted = 0
+        # A resumed run starts past the trace it already has (ROADMAP_v3
+        # §98): those lines were shown when they happened.
+        self._emitted = emitted
 
-    def checkpoint(self, message: str | None = None):
+    def checkpoint(self, message: str | None = None, done: dict | None = None):
         """Log (optionally), PERSIST, then emit every un-emitted line.
 
         Persist BEFORE emitting, not after. A generator only advances
@@ -150,14 +157,46 @@ class _Progress:
 
         Monotonic: `_emitted` only ever advances, so no line can be
         yielded twice however many times this is called.
+
+        `done` (ROADMAP_v3 §98, RS2) is the resume point of a stage this
+        checkpoint ENDS, built by resume.snapshot. Saved after the data, so
+        a run killed between the two resumes one stage early rather than
+        one stage late. A point that cannot be saved is WARNED and the run
+        goes on: it is an aid to a later resume, not the run's record, and
+        the cost of losing one is a resume that starts a stage earlier --
+        never a reason to fail a run that is working.
         """
         if message is not None:
             self.run.log(message)
         update_pipeline_run(self.run.run_id, self.run)
+        if done is not None:
+            self.save_point(done)
         while self._emitted < len(self.run.trace):
             line = self.run.trace[self._emitted]
             self._emitted += 1
             yield PipelineEvent(kind="trace_line", text=line)
+
+    def save_point(self, point: dict) -> None:
+        """Save a resume point, warning rather than raising (ROADMAP_v3 §98,
+        RS2) -- `checkpoint`'s docstring says why a point is not worth a
+        working run."""
+        try:
+            _save_resume_point(self.run.run_id, point)
+        except Exception:  # noqa: BLE001 -- see checkpoint's docstring
+            logger.warning("Could not save the resume point after %s for "
+                           "run %s.", point.get("stage"), self.run.run_id,
+                           exc_info=True)
+
+    def recorder(self, pass_id: str):
+        """The `on_thread` a pass is given (ROADMAP_v3 §98, RS3): note the
+        pass's thread on the run the moment it exists, and persist it then
+        and there. A pass that raises, or a run a quit abandons, would
+        otherwise leave a thread its record cannot name -- the abandoned
+        case reaches no `except` at all, so nothing later writes it."""
+        def record(thread_id) -> None:
+            if _note_thread(pass_id, thread_id, self.run.pass_threads):
+                update_pipeline_run(self.run.run_id, self.run)
+        return record
 
 
 # One pass_activity event per this many characters streamed. A per-token
@@ -439,10 +478,71 @@ def _pass_failed_event(pass_id: str, exc: BaseException) -> PipelineEvent:
         text=f"{type(exc).__name__}: {exc}"[:200])
 
 
+def _pass_kwargs(on_thread, resume_thread) -> dict:
+    """The two §98 arguments a pass forwards to the loop, only when set, so
+    a pass that is neither recorded early nor resumed calls
+    `stream_deep_research_mode` exactly as it did before §98."""
+    kwargs = {}
+    if on_thread is not None:
+        kwargs["on_thread"] = on_thread
+    if resume_thread is not None:
+        kwargs["resume_thread"] = resume_thread
+    return kwargs
+
+
+def _resumed_attempt(pass_id: str, thread_id, model: str, provider_name: str,
+                     temperature, authorization, effort, activity, corpus,
+                     trace, on_thread):
+    """The first attempt of a pass a resume hands its old thread (ROADMAP_v3
+    §98, RS4). Returns the response to carry on with, or None when the
+    thread cannot be continued and the pass must start again.
+
+    THREE OUTCOMES, by what the thread's last row is (resume.thread_tail):
+
+      an answer   the response the pass returned before the run died. It is
+                  handed back AS the first attempt, with no model call, so
+                  everything after it -- the truncation check, the JSON
+                  re-check and its corrective retries, the apply -- runs on
+                  it exactly as it ran the first time. The run that
+                  prompted §98 failed on an answer the parser now accepts
+                  (RS7), so its Pass 3a resumes with no call at all.
+      a request   the run stopped before the model replied. The loop
+                  resends it in the same thread, which keeps every tool
+                  result the pass had gathered.
+      nothing     the thread is gone. The pass starts again.
+    """
+    from core.client import ModelResponse
+    from core.reasoning import resume as resume_module
+
+    kind, text = resume_module.thread_tail(thread_id)
+    if kind == "answer":
+        if trace is not None:
+            trace.append(f"{pass_id}: resumed from the answer stored in its "
+                         f"thread; no model call.")
+        response = ModelResponse(text=text, usage={})
+        response.thread_id = thread_id
+        return response
+    if kind == "pending":
+        if trace is not None:
+            trace.append(f"{pass_id}: resumed in its own thread, resending "
+                         f"the request the run stopped on.")
+        return (yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
+            pass_input=None, model=model, pass_id=pass_id,
+            provider_name=provider_name, temperature=temperature,
+            authorization=authorization, effort=effort, activity=activity,
+            **_pass_kwargs(on_thread, thread_id),
+        ), corpus=corpus))
+    if trace is not None:
+        trace.append(f"{pass_id}: its thread could not be read back; "
+                     f"starting the pass again.")
+    return None
+
+
 def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
               temperature: float | None = None, authorization=None,
               trace: list[str] | None = None, pass_threads: list | None = None,
-              effort: str | None = None, corpus=None, activity=None):
+              effort: str | None = None, corpus=None, activity=None,
+              on_thread=None, resume_thread=None):
     """One LLM-backed pass. Every actual model call in this file goes
     through this single function.
 
@@ -471,14 +571,25 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
     The retries share the JSON passes' two §26 limits, stated at
     `_run_pass_with_json_retry`: a tool call a corrective attempt makes
     produces no tool_call event, and a page it fetches reaches no corpus.
+
+    ROADMAP_v3 §98: `on_thread` records the pass's thread as it opens
+    (RS3), and `resume_thread` is a failed pass's thread for a resume to
+    continue (RS4, `_resumed_attempt`). A resumed answer goes through the
+    same text retry as a fresh one.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
     try:
-        response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
-            pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
-            temperature=temperature, authorization=authorization, effort=effort,
-            activity=activity,
-        ), corpus=corpus)
+        response = None
+        if resume_thread is not None:
+            response = yield from _resumed_attempt(
+                pass_id, resume_thread, model, provider_name, temperature,
+                authorization, effort, activity, corpus, trace, on_thread)
+        if response is None:
+            response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
+                pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
+                temperature=temperature, authorization=authorization, effort=effort,
+                activity=activity, **_pass_kwargs(on_thread, None),
+            ), corpus=corpus)
         _record_granted_calls(pass_id, response, authorization)
         _record_pass_thread(pass_id, response, pass_threads)
         _check_not_truncated(pass_id, response, trace)
@@ -545,10 +656,24 @@ def _record_pass_thread(pass_id: str, response, pass_threads) -> None:
     """
     if pass_threads is None:
         return
-    thread_id = getattr(response, "thread_id", None)
-    if thread_id is None:
-        return
-    pass_threads.append({"pass": pass_id, "thread_id": str(thread_id)})
+    _note_thread(pass_id, getattr(response, "thread_id", None), pass_threads)
+
+
+def _note_thread(pass_id: str, thread_id, pass_threads) -> bool:
+    """Add one pass thread to the run's list, once. Returns whether it was
+    new. Since ROADMAP_v3 §98 (RS3) a pass reports its thread when it
+    STARTS and again when it returns, and a resumed pass reports the thread
+    it continues, so the second report of an id must not be a second
+    entry: §27 promises one entry per pass however many corrections it
+    took."""
+    if pass_threads is None or thread_id is None:
+        return False
+    key = str(thread_id)
+    if any(isinstance(e, dict) and e.get("thread_id") == key
+           for e in pass_threads):
+        return False
+    pass_threads.append({"pass": pass_id, "thread_id": key})
+    return True
 
 
 def _record_granted_calls(pass_id: str, response, authorization) -> None:
@@ -584,6 +709,8 @@ def _run_pass_with_json_retry(
     effort: str | None = None,
     corpus=None,
     activity=None,
+    on_thread=None,
+    resume_thread=None,
 ):
     """Runs one JSON-emitting pass and recovers from malformed JSON.
 
@@ -640,14 +767,25 @@ def _run_pass_with_json_retry(
     other source with no captured text. It degrades to the documented
     fallback instead of to a wrong number, which is why the limit is
     stated here and not worked around.
+
+    ROADMAP_v3 §98: `on_thread` and `resume_thread` as for `_run_pass`. A
+    resumed answer goes through the same retry loop as a fresh one, so the
+    re-check with no model call and the corrective retries after it are
+    this function's existing path rather than a second one.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
     try:
-        response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
-            pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
-            temperature=temperature, authorization=authorization, effort=effort,
-            activity=activity,
-        ), corpus=corpus)
+        response = None
+        if resume_thread is not None:
+            response = yield from _resumed_attempt(
+                pass_id, resume_thread, model, provider_name, temperature,
+                authorization, effort, activity, corpus, trace, on_thread)
+        if response is None:
+            response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
+                pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
+                temperature=temperature, authorization=authorization, effort=effort,
+                activity=activity, **_pass_kwargs(on_thread, None),
+            ), corpus=corpus)
         _record_granted_calls(pass_id, response, authorization)
         # §27: the retries re-enter THIS thread (continue_conversation), so one
         # entry per pass is the whole truth however many corrections it took.
@@ -783,8 +921,7 @@ def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
     """
     targets = run.claims if claims is None else claims
     applied = _apply_grounding(targets, grounding_entries)
-    if corpus is not None:
-        run.source_documents = corpus.artifact_entries()
+    _collect_sources(run, corpus)
     knobs = knobs or {}
     score_grounding_sources(
         run, claims=claims, corpus=corpus, scorer=scorer, scholar=scholar,
@@ -793,6 +930,20 @@ def _ground_and_score(run: PipelineRun, grounding_entries: list[dict], corpus,
                                  "claim_min_chars",
                                  "authority_adjustment_cap") if k in knobs})
     return applied
+
+
+def _collect_sources(run: PipelineRun, corpus) -> None:
+    """THE writer of `run.source_documents`: the evidence the run gathered,
+    as the corpus holds it now.
+
+    Two callers. `_ground_and_score`, as before, for both grounding sites.
+    And a resumed run that is past Pass 3a (ROADMAP_v3 §98, RS6): the field
+    is in-memory only, so a resume starts without it, and its corpus has
+    just been rebuilt from the stored tool results -- without this its
+    artifacts would list no sources unless a 6b round happened to run. It
+    is the same call both times, which is what keeps "one writer" true."""
+    if corpus is not None:
+        run.source_documents = corpus.artifact_entries()
 
 
 def _sources_were_scored(run: PipelineRun) -> bool:
@@ -1107,7 +1258,7 @@ def run_pipeline_to_completion(gen) -> PipelineRun:
 
 
 def stream_deep_research_pipeline(
-    user_query: str,
+    user_query: str | None,
     model: str,
     provider_name: str = DEFAULT_PROVIDER,
     ensemble_mode: bool | None = None,
@@ -1121,6 +1272,7 @@ def stream_deep_research_pipeline(
     # the model call only forward. Batch 59 stopped at
     # stream_deep_research_mode's signature; this is the rest of it.
     activity=None,
+    resume=None,
 ):
     """The pipeline, as a generator of PipelineEvents (§22). The terminal
     `run_complete` event carries the finished PipelineRun.
@@ -1152,7 +1304,22 @@ def stream_deep_research_pipeline(
     subagent_review (§20/D9): whether the review stage runs at all. None
     falls back to config.SUBAGENT_REVIEW, matching ensemble_mode's
     pattern. Separate from `review` because --review on a piped run must
-    still produce findings while applying nothing."""
+    still produce findings while applying nothing.
+
+    resume (ROADMAP_v3 §98): the id of a failed or abandoned run to pick
+    up instead of starting one; `user_query` is then the record's own and
+    the argument is ignored. core/reasoning/resume.py rebuilds the run and
+    says where it stopped, BEFORE anything changes -- a run it refuses
+    raises ResumeRefused here and keeps its status. After that the run
+    goes through this same body: a stage it completed is skipped (RS1),
+    the pass it failed in continues its own thread (RS4), and the run ends
+    'complete' or 'failed' like any other. The model, effort and critic
+    are the ones passed now (RS8), and authorization is the shell's again,
+    because a grant is never stored (R12).
+
+    A RESUME POINT is saved at the end of every stage (RS2), through
+    `_Progress.checkpoint(done=...)`. That is the only place it is written,
+    so it always names a boundary the run reached in full."""
     ensemble_mode = config.ENSEMBLE_MODE if ensemble_mode is None else ensemble_mode
     subagent_review = (config.SUBAGENT_REVIEW if subagent_review is None
                        else subagent_review)
@@ -1174,7 +1341,20 @@ def stream_deep_research_pipeline(
 
     roster = _ensemble_roster(ensemble_mode)
 
-    run = PipelineRun(user_query=user_query)
+    # ROADMAP_v3 §98. A resume is prepared BEFORE the record is touched, so a
+    # refusal leaves a failed run failed. `point` stays None for a new run,
+    # and every `done()` below is then False.
+    point = None
+    if resume is not None:
+        from core.reasoning import resume as resume_module
+        point = resume_module.prepare(resume)
+        run = point.run
+        user_query = run.user_query
+    else:
+        run = PipelineRun(user_query=user_query)
+
+    def done(stage: str, round_no: int = 0) -> bool:
+        return point is not None and point.done(stage, round_no)
 
     # §45 (SQ2). RUN-SCOPED, and attached to every pass rather than only to
     # the two that ground. The question it answers is "what did this run
@@ -1214,13 +1394,20 @@ def stream_deep_research_pipeline(
     # unattended run's record matters most. Copying at the end instead
     # would lose the trail on exactly the runs most worth auditing, and two
     # writers of related data is the bug shape §22 warns about by name.
+    # A resumed run's earlier calls go to the FRONT of the shared list, so
+    # its granted_calls.json is the whole run's trail, in order.
     if authorization is not None:
+        authorization.granted_calls[:0] = run.granted_calls
         run.granted_calls = authorization.granted_calls
 
     # ROADMAP §5 minimal core: create the durable record up front. On a
     # mid-pipeline crash, the except block below flips status to 'failed'
-    # and persists a snapshot of the partial run before re-raising.
-    run.run_id = create_pipeline_run(user_query)
+    # and persists a snapshot of the partial run before re-raising. A
+    # resumed run reuses its record, back at 'running' (§98).
+    if point is None:
+        run.run_id = create_pipeline_run(user_query)
+    else:
+        reopen_pipeline_run(run.run_id)
 
     # ROADMAP §11: resolve critic provider/model once. When no critic is
     # configured these fall back to the main provider/model — no-op
@@ -1237,210 +1424,268 @@ def stream_deep_research_pipeline(
     critic_provider = critic["provider_name"] if critic else provider_name
     critic_model = critic["model"] if critic else model
 
-    progress = _Progress(run)
+    progress = _Progress(run, emitted=point.trace_length if point else 0)
+
+    # §98. What a resume point needs that is not on the run: how many
+    # ensemble candidates the scores count out of, and which thread holds
+    # Pass 1's text (one per candidate). Both are restored on a resume.
+    effective_n = point.effective_n if point else 0
+    pass1_threads = list(point.pass1_threads) if point else []
+
+    def mark(stage: str, round_no: int = 0, batch=()) -> dict:
+        from core.reasoning.resume import snapshot
+        return snapshot(run, stage, round_no=round_no, flagged=batch,
+                        effective_n=effective_n, pass1_threads=pass1_threads)
+
+    def via(pass_id: str) -> dict:
+        """The §98 arguments one pass is given: its thread is recorded as
+        it opens (RS3), and a resume hands the failed pass its own (RS4)."""
+        return {"on_thread": progress.recorder(pass_id),
+                "resume_thread": point.take_thread(pass_id) if point else None}
+
+    # §98. A new run has a resume point before its first pass: "nothing
+    # completed yet". Without it a run that failed in Pass 0 would carry no
+    # point, which is what marks a run recorded before §98, and would be
+    # read from its trace instead.
+    if point is None:
+        progress.save_point(mark(None))
 
     try:
+        # --- §98: a resume says where it picks up, before anything runs ---
+        yield PipelineEvent(kind="run_started", text=str(run.run_id))
+        if point is not None:
+            run.log(resume_module.describe(point, provider_name, model))
+            for note in point.notes:
+                run.log(note)
+            added, skipped = resume_module.rebuild_corpus(corpus, run.pass_threads)
+            run.log(f"Resume: rebuilt the source corpus from {added} stored "
+                    f"tool result(s)"
+                    + (f"; {skipped} could not be read back and were skipped"
+                       if skipped else "") + ".")
+            if done("Pass 3a"):
+                _collect_sources(run, corpus)
+            # The claims the run already has, so a panel and /claims show
+            # them from the start rather than only those a later stage
+            # touches.
+            for claim in run.claims:
+                yield PipelineEvent(kind="claim_extracted", claim_id=claim.id,
+                                    text=claim.text)
+                if claim.confidence_tier is not None:
+                    yield PipelineEvent(kind="claim_tiered", claim_id=claim.id,
+                                        tier=claim.confidence_tier)
+            yield from progress.checkpoint()
+
         # --- Pass 0: preliminary plan ---
-        run.plan = _parse_json_response((yield from _run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, effort=effort, activity=activity)))
-        yield from progress.checkpoint(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).")
+        if not done("Pass 0"):
+            run.plan = _parse_json_response((yield from _run_pass_with_json_retry("Pass 0", user_query, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, effort=effort, activity=activity, **via("Pass 0"))))
+            yield from progress.checkpoint(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).", done=mark("Pass 0"))
 
         # --- Pass 1: initial generation (ensemble mode: N candidates) ---
-        pass1_input = f"Original query:\n{user_query}\n\nPreliminary plan (loose context, may deviate freely):\n{json.dumps(run.plan)}"
-        effective_n = 0
-        if roster:
-            # A LOOP, not a comprehension: _run_pass is a generator now
-            # (§22), and a comprehension would collect generator objects
-            # without ever running a pass.
-            #
-            # One candidate per roster entry, each on its OWN provider/model
-            # (E1). No new plumbing: _run() calls api_initialization() itself
-            # and effort_for() validates against the receiving model, so a
-            # heterogeneous roster is correct by construction -- the same way
-            # §11 already routes 3a/3b/6c to critic_provider/critic_model.
-            candidates = []
-            for entry in roster:
-                label = f"{entry['provider_name']}/{entry['model']}"
-                try:
-                    candidates.append((yield from _run_pass(
-                        "Pass 1", pass1_input, entry["model"], entry["provider_name"],
-                        authorization=authorization, trace=run.trace,
-                        pass_threads=run.pass_threads, effort=effort,
-                        activity=activity)))
-                except Exception as e:
-                    # NAMED, TRACED, SKIPPED (E7) -- §20's containment rule.
-                    # An optional generation strategy must not flip a
-                    # ten-pass run to status='failed' because one provider
-                    # was unreachable. Same posture MCP takes per server.
-                    message = (f"Pass 1: ensemble candidate on {label} failed "
-                               f"({type(e).__name__}: {e}) — skipped.")
-                    logger.warning("%s", message)
-                    run.log(message)
-                    continue
-                run.log(f"Pass 1: ensemble candidate {len(candidates)} generated on {label}.")
-                # E13/#77: the record keeps every surviving candidate.
-                # The metadata half sits beside the trace's candidate-N
-                # lines so a stored asserted_by_candidates tag names
-                # models this run can still identify; the text half feeds
-                # the per-candidate artifacts and Pass 3b's input -- the
-                # two places that must be able to check a claim against
-                # what its number actually said. pipeline_storage strips
-                # `text` at serialization; see PipelineRunRecord.
-                run.candidates.append({
-                    "candidate": len(candidates),
-                    "provider_name": entry["provider_name"],
-                    "model": entry["model"],
-                    "chars": len(candidates[-1]),
-                    "text": candidates[-1],
-                })
+        if not done("Pass 1"):
+            pass1_input = f"Original query:\n{user_query}\n\nPreliminary plan (loose context, may deviate freely):\n{json.dumps(run.plan)}"
+            effective_n = 0
+            pass1_threads = []
+            if roster:
+                # A LOOP, not a comprehension: _run_pass is a generator now
+                # (§22), and a comprehension would collect generator objects
+                # without ever running a pass.
+                #
+                # One candidate per roster entry, each on its OWN provider/model
+                # (E1). No new plumbing: _run() calls api_initialization() itself
+                # and effort_for() validates against the receiving model, so a
+                # heterogeneous roster is correct by construction -- the same way
+                # §11 already routes 3a/3b/6c to critic_provider/critic_model.
+                candidates = []
+                for entry in roster:
+                    label = f"{entry['provider_name']}/{entry['model']}"
+                    try:
+                        candidates.append((yield from _run_pass(
+                            "Pass 1", pass1_input, entry["model"], entry["provider_name"],
+                            authorization=authorization, trace=run.trace,
+                            pass_threads=run.pass_threads, effort=effort,
+                            activity=activity, **via("Pass 1"))))
+                    except Exception as e:
+                        # NAMED, TRACED, SKIPPED (E7) -- §20's containment rule.
+                        # An optional generation strategy must not flip a
+                        # ten-pass run to status='failed' because one provider
+                        # was unreachable. Same posture MCP takes per server.
+                        message = (f"Pass 1: ensemble candidate on {label} failed "
+                                   f"({type(e).__name__}: {e}) — skipped.")
+                        logger.warning("%s", message)
+                        run.log(message)
+                        continue
+                    run.log(f"Pass 1: ensemble candidate {len(candidates)} generated on {label}.")
+                    # §98: which thread holds this candidate's text, for a
+                    # resume to read back. The newest Pass 1 entry is this
+                    # candidate's: it was recorded as the pass opened.
+                    pass1_threads.append(_last_thread(run.pass_threads, "Pass 1"))
+                    # E13/#77: the record keeps every surviving candidate.
+                    # The metadata half sits beside the trace's candidate-N
+                    # lines so a stored asserted_by_candidates tag names
+                    # models this run can still identify; the text half feeds
+                    # the per-candidate artifacts and Pass 3b's input -- the
+                    # two places that must be able to check a claim against
+                    # what its number actually said. pipeline_storage strips
+                    # `text` at serialization; see PipelineRunRecord.
+                    run.candidates.append({
+                        "candidate": len(candidates),
+                        "provider_name": entry["provider_name"],
+                        "model": entry["model"],
+                        "chars": len(candidates[-1]),
+                        "text": candidates[-1],
+                    })
 
-            # Labels come from the SURVIVORS, never from position in the
-            # roster (E11). Labelling by roster position leaves a gap when a
-            # candidate fails -- "Candidate 1, Candidate 3" -- so Pass 2
-            # would tag a claim both survivors asserted as [1, 3] while the
-            # denominator said 2, and a unanimous claim would be scored as
-            # dissented-against. A silently deflated confidence score is the
-            # exact failure class this section exists to remove.
-            effective_n = len(candidates)
-            if effective_n >= 2:
-                run.raw_response = candidates[0]
-                pass2_input = "\n\n".join(
-                    f"Candidate {i + 1}:\n{c}" for i, c in enumerate(candidates)
-                )
-                run.log(f"Pass 1: ensemble mode — {effective_n} candidate(s) "
-                        f"across {effective_n} model(s); consistency is measured "
-                        f"out of {effective_n}.")
-            else:
-                # DEGRADE TO THE SINGLE-CANDIDATE PATH (E7), rather than
-                # scoring one candidate as an ensemble of one -- which would
-                # give every claim consistency 1.0, so none could ever be
-                # contested, while reporting that agreement as if it had
-                # been corroborated.
-                # ensemble_n=0 is not a degraded formula, it is the correct
-                # one when there is nothing to compare against.
-                effective_n = 0
-                if candidates:
+                # Labels come from the SURVIVORS, never from position in the
+                # roster (E11). Labelling by roster position leaves a gap when a
+                # candidate fails -- "Candidate 1, Candidate 3" -- so Pass 2
+                # would tag a claim both survivors asserted as [1, 3] while the
+                # denominator said 2, and a unanimous claim would be scored as
+                # dissented-against. A silently deflated confidence score is the
+                # exact failure class this section exists to remove.
+                effective_n = len(candidates)
+                if effective_n >= 2:
                     run.raw_response = candidates[0]
-                    pass2_input = f"Response to extract claims from:\n{run.raw_response}"
-                    run.log("Pass 1: only one ensemble candidate survived — "
-                            "no claim can be contested, since one candidate "
-                            "cannot disagree with itself.")
+                    run.log(f"Pass 1: ensemble mode — {effective_n} candidate(s) "
+                            f"across {effective_n} model(s); consistency is measured "
+                            f"out of {effective_n}.")
                 else:
-                    raise RuntimeError(
-                        "Pass 1: every ensemble candidate failed; there is no "
-                        "response to extract claims from. See the trace for "
-                        "each provider's error."
-                    )
-        else:
-            run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, corpus=corpus, trace=run.trace, pass_threads=run.pass_threads, effort=effort, activity=activity)
-            pass2_input = f"Response to extract claims from:\n{run.raw_response}"
-            run.log("Pass 1: initial generation complete.")
-        yield from progress.checkpoint()
+                    # DEGRADE TO THE SINGLE-CANDIDATE PATH (E7), rather than
+                    # scoring one candidate as an ensemble of one -- which would
+                    # give every claim consistency 1.0, so none could ever be
+                    # contested, while reporting that agreement as if it had
+                    # been corroborated.
+                    # ensemble_n=0 is not a degraded formula, it is the correct
+                    # one when there is nothing to compare against.
+                    effective_n = 0
+                    if candidates:
+                        run.raw_response = candidates[0]
+                        run.log("Pass 1: only one ensemble candidate survived — "
+                                "no claim can be contested, since one candidate "
+                                "cannot disagree with itself.")
+                    else:
+                        raise RuntimeError(
+                            "Pass 1: every ensemble candidate failed; there is no "
+                            "response to extract claims from. See the trace for "
+                            "each provider's error."
+                        )
+            else:
+                run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, corpus=corpus, trace=run.trace, pass_threads=run.pass_threads, effort=effort, activity=activity, **via("Pass 1"))
+                pass1_threads = [_last_thread(run.pass_threads, "Pass 1")]
+                run.log("Pass 1: initial generation complete.")
+            yield from progress.checkpoint(done=mark("Pass 1"))
 
         # --- Pass 2: claim extraction & classification ---
-        claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", pass2_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, ensemble=effective_n >= 2, effort=effort, activity=activity)))
-        run.claims = [_claim_from_json(c) for c in claims_json]
-        for claim in run.claims:
-            yield PipelineEvent(kind="claim_extracted", claim_id=claim.id,
-                                text=claim.text)
-        yield from progress.checkpoint(f"Pass 2: extracted {len(run.claims)} claim(s).")
+        if not done("Pass 2"):
+            claims_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 2", _pass2_input(run, effective_n), model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, ensemble=effective_n >= 2, effort=effort, activity=activity, **via("Pass 2"))))
+            run.claims = [_claim_from_json(c) for c in claims_json]
+            for claim in run.claims:
+                yield PipelineEvent(kind="claim_extracted", claim_id=claim.id,
+                                    text=claim.text)
+            yield from progress.checkpoint(f"Pass 2: extracted {len(run.claims)} claim(s).", done=mark("Pass 2"))
 
         # --- gate D0: route by claim type (pure code) ---
         factual_claims = [c for c in run.claims if c.type == "factual"]
         non_factual_claims = [c for c in run.claims if c.type != "factual"]
-        yield from _stage("D0")
-        yield from progress.checkpoint(
-            f"D0: {len(factual_claims)} factual claim(s) routed to 3a/3b, "
-            f"{len(non_factual_claims)} synthesis/speculative claim(s) routed directly to Pass 4."
-        )
+        if not done("D0"):
+            yield from _stage("D0")
+            yield from progress.checkpoint(
+                f"D0: {len(factual_claims)} factual claim(s) routed to 3a/3b, "
+                f"{len(non_factual_claims)} synthesis/speculative claim(s) routed directly to Pass 4.",
+                done=mark("D0"))
 
         # --- Pass 3a + 3b: only for factual claims, batched by deduplicated entity ---
         if factual_claims:
             unique_entities = sorted({e for c in factual_claims for e in c.entities})
-            pass3a_input = (
-                f"Factual claims:\n{json.dumps([vars(c) for c in factual_claims])}\n\n"
-                f"Deduplicated entities to research (search each ONCE, map results back "
-                f"to every claim referencing it):\n{json.dumps(unique_entities)}"
-            )
-            # SCOPED TO `factual_claims`, like 6b to its batch (batch 220,
-            # #247): 3a is shown the factual claims and nothing else, so an
-            # entry naming another claim is dropped and traced rather than
-            # marking a claim grounded that gate D0 routed past grounding.
-            grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in factual_claims], effort=effort, activity=activity)))
-            grounded = _ground_and_score(run, grounding_json, corpus, scorer,
-                                         scoring_knobs, scholar,
-                                         claims=factual_claims)
-            yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
-            _note_entries_outside_the_batch(
-                run, factual_claims, grounding_json, pass_id="Pass 3a",
-                scope="the factual claims", asked="factual claim(s)",
-                why="Gate D0 routes every other claim past 3a/3b, so grounding "
-                    "one would record a check gate D0 says never ran.")
+            if not done("Pass 3a"):
+                pass3a_input = (
+                    f"Factual claims:\n{json.dumps([vars(c) for c in factual_claims])}\n\n"
+                    f"Deduplicated entities to research (search each ONCE, map results back "
+                    f"to every claim referencing it):\n{json.dumps(unique_entities)}"
+                )
+                # SCOPED TO `factual_claims`, like 6b to its batch (batch 220,
+                # #247): 3a is shown the factual claims and nothing else, so an
+                # entry naming another claim is dropped and traced rather than
+                # marking a claim grounded that gate D0 routed past grounding.
+                grounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", pass3a_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in factual_claims], effort=effort, activity=activity, **via("Pass 3a"))))
+                grounded = _ground_and_score(run, grounding_json, corpus, scorer,
+                                             scoring_knobs, scholar,
+                                             claims=factual_claims)
+                yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.", done=mark("Pass 3a"))
+                _note_entries_outside_the_batch(
+                    run, factual_claims, grounding_json, pass_id="Pass 3a",
+                    scope="the factual claims", asked="factual claim(s)",
+                    why="Gate D0 routes every other claim past 3a/3b, so grounding "
+                        "one would record a check gate D0 says never ran.")
 
-            # E13/#77. Two or more survivors: the claims were extracted
-            # from the UNION of the candidates, so the critic sees every
-            # candidate under the labels Pass 2 used -- a claim only
-            # candidate 3 asserted is checked against text that actually
-            # contains it, and contradictions ACROSS candidates are
-            # findable. Handing it bare `raw_response` (candidate 1)
-            # asked an ill-posed question: find conflicts within a text
-            # much of your input did not come from.
-            if len(run.candidates) >= 2:
-                pass3b_input = (
-                    "\n\n".join(
-                        f"Candidate {entry['candidate']}:\n{entry['text']}"
-                        for entry in run.candidates)
-                    + f"\n\nFactual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
-                )
-            else:
-                pass3b_input = (
-                    f"Raw response:\n{run.raw_response}\n\n"
-                    f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
-                )
-            critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in factual_claims], effort=effort, activity=activity)))
-            # The same scope as 3a, for a stronger reason: a non-factual
-            # claim's score IS its capped critic component, so a severity
-            # landing on one moved its tier (measured, batch 220).
-            critiqued = _apply_critic(factual_claims, critic_json)
-            yield from progress.checkpoint(f"Pass 3b: critique applied to {critiqued} of {len(factual_claims)} factual claim(s).")
-            _note_entries_outside_the_batch(
-                run, factual_claims, critic_json, pass_id="Pass 3b",
-                scope="the factual claims", asked="factual claim(s)",
-                why="Gate D0 routes every other claim past 3a/3b, and a "
-                    "severity on one would lower the score Pass 5 gives "
-                    "it.")
-        else:
+            if not done("Pass 3b"):
+                # E13/#77. Two or more survivors: the claims were extracted
+                # from the UNION of the candidates, so the critic sees every
+                # candidate under the labels Pass 2 used -- a claim only
+                # candidate 3 asserted is checked against text that actually
+                # contains it, and contradictions ACROSS candidates are
+                # findable. Handing it bare `raw_response` (candidate 1)
+                # asked an ill-posed question: find conflicts within a text
+                # much of your input did not come from.
+                if len(run.candidates) >= 2:
+                    pass3b_input = (
+                        "\n\n".join(
+                            f"Candidate {entry['candidate']}:\n{entry['text']}"
+                            for entry in run.candidates)
+                        + f"\n\nFactual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
+                    )
+                else:
+                    pass3b_input = (
+                        f"Raw response:\n{run.raw_response}\n\n"
+                        f"Factual claims with grounding:\n{json.dumps([vars(c) for c in factual_claims])}"
+                    )
+                critic_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3b", pass3b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in factual_claims], effort=effort, activity=activity, **via("Pass 3b"))))
+                # The same scope as 3a, for a stronger reason: a non-factual
+                # claim's score IS its capped critic component, so a severity
+                # landing on one moved its tier (measured, batch 220).
+                critiqued = _apply_critic(factual_claims, critic_json)
+                yield from progress.checkpoint(f"Pass 3b: critique applied to {critiqued} of {len(factual_claims)} factual claim(s).", done=mark("Pass 3b"))
+                _note_entries_outside_the_batch(
+                    run, factual_claims, critic_json, pass_id="Pass 3b",
+                    scope="the factual claims", asked="factual claim(s)",
+                    why="Gate D0 routes every other claim past 3a/3b, and a "
+                        "severity on one would lower the score Pass 5 gives "
+                        "it.")
+        elif not done("Pass 3b"):
             # A stage, not a silence. "3a/3b did not run" is a fact about
             # the run's shape -- it means nothing was factual -- and a
             # panel that simply skipped from Pass 2 to Pass 3c would leave
             # the reader to infer it from an absence.
             yield from _stage("Pass 3a/3b")
-            yield from progress.checkpoint("Pass 3a/3b: skipped -- no factual claims to ground or critique.")
+            yield from progress.checkpoint("Pass 3a/3b: skipped -- no factual claims to ground or critique.", done=mark("Pass 3b"))
 
         # --- Pass 3c: completeness, independent of Pass 1's raw_response ---
-        pass3c_input = f"Original query:\n{user_query}\n\nPreliminary plan:\n{json.dumps(run.plan)}"
-        run.completeness = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, effort=effort, activity=activity)))
-        yield from progress.checkpoint(
-            f"Pass 3c: coverage_score={run.completeness.get('coverage_score')}, "
-            f"{len(run.completeness.get('gaps', []))} gap(s) identified."
-        )
+        if not done("Pass 3c"):
+            pass3c_input = f"Original query:\n{user_query}\n\nPreliminary plan:\n{json.dumps(run.plan)}"
+            run.completeness = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3c", pass3c_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, effort=effort, activity=activity, **via("Pass 3c"))))
+            yield from progress.checkpoint(
+                f"Pass 3c: coverage_score={run.completeness.get('coverage_score')}, "
+                f"{len(run.completeness.get('gaps', []))} gap(s) identified.",
+                done=mark("Pass 3c"))
 
         # --- Pass 4: assumption audit -- ALL claims, plus completeness ---
-        pass4_input = (
-            f"Original query:\n{user_query}\n\n"
-            f"All claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
-            f"Completeness findings:\n{json.dumps(run.completeness)}"
-        )
-        run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 4", pass4_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort, activity=activity)))
-        flagged_count = _apply_assumption_flags(run.claims, run.assumptions)
-        yield from progress.checkpoint(f"Pass 4: assumption audit complete, {flagged_count} of {len(run.claims)} claim(s) flagged.")
+        if not done("Pass 4"):
+            pass4_input = (
+                f"Original query:\n{user_query}\n\n"
+                f"All claims:\n{json.dumps([vars(c) for c in run.claims])}\n\n"
+                f"Completeness findings:\n{json.dumps(run.completeness)}"
+            )
+            run.assumptions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 4", pass4_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in run.claims], effort=effort, activity=activity, **via("Pass 4"))))
+            flagged_count = _apply_assumption_flags(run.claims, run.assumptions)
+            yield from progress.checkpoint(f"Pass 4: assumption audit complete, {flagged_count} of {len(run.claims)} claim(s) flagged.", done=mark("Pass 4"))
 
         # --- Pass 5: confidence tiering (0 LLM calls) ---
-        run_confidence_tiering(run, ensemble_n=effective_n,
-                               sources_scored=_sources_were_scored(run),
-                               weights=confidence_weights)
-        yield from _stage("Pass 5")
-        yield from _tier_events(run)
-        yield from progress.checkpoint("Pass 5: confidence tiers assigned (pure code, zero LLM calls).")
+        if not done("Pass 5"):
+            run_confidence_tiering(run, ensemble_n=effective_n,
+                                   sources_scored=_sources_were_scored(run),
+                                   weights=confidence_weights)
+            yield from _stage("Pass 5")
+            yield from _tier_events(run)
+            yield from progress.checkpoint("Pass 5: confidence tiers assigned (pure code, zero LLM calls).", done=mark("Pass 5"))
 
         # --- D1 + the 6a/6b/D2 retry loop ---
         # ROADMAP_v3 §90 (A85). D1 also takes the claims most ensemble
@@ -1451,65 +1696,85 @@ def stream_deep_research_pipeline(
         # loop that kept a contested claim for being contested would hold
         # it to D2's cap and publish it UNVERIFIED, which is the defect the
         # E8 penalty had.
-        flagged = [c for c in run.claims
-                   if c.confidence_tier in FLAGGED_TIERS or is_contested(c)]
-        contested = sum(1 for c in flagged if is_contested(c))
-        yield from _stage("D1")
-        yield from progress.checkpoint(
-            f"D1: {len(flagged)} claim(s) flagged for revision"
-            + (f" ({contested} contested by the ensemble)" if contested else "")
-            + f", {len(run.claims) - len(flagged)} already clean.")
+        if not done("D1"):
+            flagged = [c for c in run.claims
+                       if c.confidence_tier in FLAGGED_TIERS or is_contested(c)]
+            contested = sum(1 for c in flagged if is_contested(c))
+            yield from _stage("D1")
+            yield from progress.checkpoint(
+                f"D1: {len(flagged)} claim(s) flagged for revision"
+                + (f" ({contested} contested by the ensemble)" if contested else "")
+                + f", {len(run.claims) - len(flagged)} already clean.",
+                done=mark("D1", batch=flagged))
+        elif done("Pass 6c"):
+            flagged = []
+        else:
+            # §98: the batch the loop's next step works on, as the resume
+            # point recorded it -- after D1, after a 6a, or after a round.
+            flagged = list(point.flagged)
+
+        # The round number, so a resume point inside the loop names its
+        # round. A resume after 6a of round k re-enters round k at 6b; one
+        # after a whole round starts the next.
+        round_no = 0
+        if point is not None and point.stage in ("Pass 6a", "Pass 6b"):
+            round_no = point.round - (1 if point.stage == "Pass 6a" else 0)
 
         while flagged:
-            # --- Pass 6a: ONE batched call across every currently-flagged claim ---
-            pass6a_input = json.dumps([_revision_request(c) for c in flagged])
-            revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged], effort=effort, activity=activity)))
+            round_no += 1
+            if not done("Pass 6a", round_no):
+                # --- Pass 6a: ONE batched call across every currently-flagged claim ---
+                pass6a_input = json.dumps([_revision_request(c) for c in flagged])
+                revisions = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6a", pass6a_input, model, provider_name, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged], effort=effort, activity=activity, **via("Pass 6a"))))
 
-            # COUNT THE ROUND, NOT THE REVISION. The increment used to live
-            # inside the loop below, so only a claim Pass 6a NAMED counted --
-            # and 6a is one batched call across every flagged claim, which is
-            # exactly the shape a model drops an item from. A claim it omitted
-            # could never reach D2's cap, so `while flagged:` had no bound at
-            # all: two model calls per round, for ever. An omission, an empty
-            # list and an
-            # unknown id are indistinguishable here -- the lookup returns None
-            # and the `if claim:` skips in silence -- which is why the bound
-            # cannot be data the model supplies.
-            #
-            # Counting the round makes D2's cap bound the loop by
-            # construction, and since `flagged` only ever shrinks, every claim
-            # still in it exhausts on the same round.
-            for claim in flagged:
-                claim.retry_count += 1
+                # COUNT THE ROUND, NOT THE REVISION. The increment used to live
+                # inside the loop below, so only a claim Pass 6a NAMED counted --
+                # and 6a is one batched call across every flagged claim, which is
+                # exactly the shape a model drops an item from. A claim it omitted
+                # could never reach D2's cap, so `while flagged:` had no bound at
+                # all: two model calls per round, for ever. An omission, an empty
+                # list and an
+                # unknown id are indistinguishable here -- the lookup returns None
+                # and the `if claim:` skips in silence -- which is why the bound
+                # cannot be data the model supplies.
+                #
+                # Counting the round makes D2's cap bound the loop by
+                # construction, and since `flagged` only ever shrinks, every claim
+                # still in it exhausts on the same round.
+                for claim in flagged:
+                    claim.retry_count += 1
 
-            revised = 0
-            for rev in revisions:
-                # Resolved WITHIN the batch, first-wins like
-                # PipelineRun.claim_by_id: 6a was only asked about `flagged`,
-                # and a revision naming a claim outside it would land on one
-                # already finished -- while carrying a retry_count this round
-                # did not increment, so the event below would report a stale
-                # attempt number.
-                claim = next((c for c in flagged if c.id == rev["claim_id"]), None)
-                if claim:
-                    revised += 1
-                    claim.revision_text = rev["revised_text"]
-                    # §22's "which claim, which attempt" -- emitted from the
-                    # claim retry loop, which is the retry the section means.
-                    # A JSON-parse retry is a different thing and reaches the
-                    # consumer as a trace_line, via json_retry.py's own line.
-                    yield PipelineEvent(kind="retry", claim_id=claim.id,
-                                        attempt=claim.retry_count)
-            yield from progress.checkpoint(f"Pass 6a: revised {revised} of {len(flagged)} claim(s) in this retry round.")
-            # The count above shows that something was dropped, not why
-            # (#248). The comment on the loop bound is about the BOUND,
-            # which the round counter settled; a reader of the trace still
-            # needs to tell an omission from a misdirected revision.
-            _note_entries_outside_the_batch(
-                run, flagged, revisions, pass_id="Pass 6a",
-                scope="this round's batch", asked="flagged claim(s)",
-                why="a revision to a claim D1 had already finished with "
-                    "would replace its text without re-validating it.")
+                revised = 0
+                for rev in revisions:
+                    # Resolved WITHIN the batch, first-wins like
+                    # PipelineRun.claim_by_id: 6a was only asked about `flagged`,
+                    # and a revision naming a claim outside it would land on one
+                    # already finished -- while carrying a retry_count this round
+                    # did not increment, so the event below would report a stale
+                    # attempt number.
+                    claim = next((c for c in flagged if c.id == rev["claim_id"]), None)
+                    if claim:
+                        revised += 1
+                        claim.revision_text = rev["revised_text"]
+                        # §22's "which claim, which attempt" -- emitted from the
+                        # claim retry loop, which is the retry the section means.
+                        # A JSON-parse retry is a different thing and reaches the
+                        # consumer as a trace_line, via json_retry.py's own line.
+                        yield PipelineEvent(kind="retry", claim_id=claim.id,
+                                            attempt=claim.retry_count)
+                # §98: 6a has changed the claims (their retry counts above all),
+                # so this boundary is saved. A resume from here goes to 6b with
+                # this batch rather than running 6a again and counting twice.
+                yield from progress.checkpoint(f"Pass 6a: revised {revised} of {len(flagged)} claim(s) in this retry round.", done=mark("Pass 6a", round_no, flagged))
+                # The count above shows that something was dropped, not why
+                # (#248). The comment on the loop bound is about the BOUND,
+                # which the round counter settled; a reader of the trace still
+                # needs to tell an omission from a misdirected revision.
+                _note_entries_outside_the_batch(
+                    run, flagged, revisions, pass_id="Pass 6a",
+                    scope="this round's batch", asked="flagged claim(s)",
+                    why="a revision to a claim D1 had already finished with "
+                        "would replace its text without re-validating it.")
 
             # --- Pass 6b: re-validate the revised subset only (batched, reuses Pass 5's code) ---
             pass6b_input = json.dumps([vars(c) for c in flagged])
@@ -1526,7 +1791,7 @@ def stream_deep_research_pipeline(
             # beside a breakdown still recording `source_count: 1` -- which
             # breaks B10's property that the breakdown alone lets a reader
             # recompute the score.
-            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6b", pass6b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged], effort=effort, activity=activity)))
+            revalidation = _parse_json_response((yield from _run_pass_with_json_retry("Pass 6b", pass6b_input, critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in flagged], effort=effort, activity=activity, **via("Pass 6b"))))
             grounding_entries = revalidation.get("grounding", [])
             critic_entries = revalidation.get("critic", [])
             _ground_and_score(run, grounding_entries, corpus,
@@ -1570,23 +1835,29 @@ def stream_deep_research_pipeline(
                 yield from progress.checkpoint(f"D2: claim {c.id} exhausted retries ({c.retry_count}) -> fallback UNVERIFIED.")
 
             flagged = [c for c in still_flagged if c.retry_count < MAX_RETRIES]
+            # §98: the round is over, D2 included. The point names the batch
+            # the next round starts with, which may be none.
+            yield from progress.checkpoint(done=mark("Pass 6b", round_no, flagged))
 
         # --- Pass 6c: annotate (templated, 0 LLM calls) ---
-        for claim in run.claims:
-            if claim.final_text is None:
-                claim.final_text = claim.revision_text or claim.text
-            if claim.annotation is None:
-                claim.annotation = f"[{claim.confidence_tier}]"
-        yield from _stage("Pass 6c")
-        yield from progress.checkpoint("Pass 6c: annotation complete (templated, zero LLM calls).")
+        if not done("Pass 6c"):
+            for claim in run.claims:
+                if claim.final_text is None:
+                    claim.final_text = claim.revision_text or claim.text
+                if claim.annotation is None:
+                    claim.annotation = f"[{claim.confidence_tier}]"
+            yield from _stage("Pass 6c")
+            yield from progress.checkpoint("Pass 6c: annotation complete (templated, zero LLM calls).", done=mark("Pass 6c"))
 
         # --- Merge (pure code) ---
-        yield from _stage("Merge")
-        yield from progress.checkpoint(f"Merge: final claim set assembled -- {len(run.claims)} claim(s), {len(run.coverage_gaps)} coverage gap(s).")
+        if not done("Merge"):
+            yield from _stage("Merge")
+            yield from progress.checkpoint(f"Merge: final claim set assembled -- {len(run.claims)} claim(s), {len(run.coverage_gaps)} coverage gap(s).", done=mark("Merge"))
 
         # --- Final synthesis ---
-        run.final_report = yield from _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization, corpus=corpus, trace=run.trace, pass_threads=run.pass_threads, effort=effort, activity=activity)
-        yield from progress.checkpoint("Final synthesis complete.")
+        if not done("Final synthesis"):
+            run.final_report = yield from _run_pass("Final synthesis", _synthesis_input(run), model, provider_name, authorization=authorization, corpus=corpus, trace=run.trace, pass_threads=run.pass_threads, effort=effort, activity=activity, **via("Final synthesis"))
+            yield from progress.checkpoint("Final synthesis complete.", done=mark("Final synthesis"))
 
         # --- §20: review, consent, correct ---
         yield from _review_stage(run, progress, model, provider_name,
@@ -1614,3 +1885,24 @@ def stream_deep_research_pipeline(
                 f"Failed to persist failure state for run {run.run_id}: {persist_error}"
             )
         raise
+
+
+def _pass2_input(run: PipelineRun, effective_n: int) -> str:
+    """What Pass 2 extracts claims from: every surviving candidate under
+    the label Pass 2 tags with, or the one response. A function rather than
+    the inline string it was, because a resume at Pass 2 builds it from
+    the restored run (ROADMAP_v3 §98) and two spellings of one input drift.
+    `entry['candidate']` is the survivor's 1-based number, which is the
+    label E11 requires."""
+    if effective_n >= 2:
+        return "\n\n".join(
+            f"Candidate {entry['candidate']}:\n{entry['text']}"
+            for entry in run.candidates)
+    return f"Response to extract claims from:\n{run.raw_response}"
+
+
+def _last_thread(pass_threads, pass_id: str):
+    """The newest thread recorded for `pass_id`, or None (a test double
+    that reports no thread)."""
+    return next((e.get("thread_id") for e in reversed(pass_threads or ())
+                 if isinstance(e, dict) and e.get("pass") == pass_id), None)

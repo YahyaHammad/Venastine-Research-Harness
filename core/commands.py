@@ -138,8 +138,9 @@ _SPECS = (
     CommandSpec("quit", "exit the harness", aliases=("exit", "bye")),
     CommandSpec("ref", "reference another conversation's summary",
                 "[--list|--clear]"),
-    CommandSpec("research", "run the deep-research pipeline",
-                "[--attended] [--review|--no-review] [--grant[=a,b]] <query>",
+    CommandSpec("research", "run the deep-research pipeline, or resume one",
+                "[--attended] [--review|--no-review] [--grant[=a,b]] "
+                "<query>|--resume [run-id]",
                 absent={CLI: 'not yet; run venastine --mode research '
                              '"<query>".'}),
     CommandSpec("resume", "resume a thread by id, even an old one",

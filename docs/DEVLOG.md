@@ -32320,3 +32320,118 @@ nothing. The requirements files are unchanged, so pip-audit was not re-run. The 
 plain `re` with no platform branch, so no WSL run was made.
 
 - **Version:** the branch's beta identity, `0.3.17-b.1.url-scan-hf-escape.r6445e211ff24`.
+
+## Batch 269 -- a failed research run is resumed where it stopped (ROADMAP_v3 §98) (2026-11-17)
+
+**Asked.** The owner's run in WSL failed after 4h53m with `Response did not return valid JSON:
+Extra data: line 1143 column 1 (char 59006)`. Pass 0, Pass 1, Pass 2 and gate D0 had finished;
+Pass 3a failed. The owner asked for a resume, for example `/research --resume`, that restarts at
+the point that failed: at worst the failed pass from its beginning, at best only what actually
+broke. They also asked what the trailing text after the JSON was, before deciding.
+
+**Measured first.** Read-only, on the owner's WSL database. The first copy was taken with `cp`
+and showed the run 'running' with no Pass 3a thread, because the newest commits were still in
+the write-ahead log. SQLite's backup API gave a consistent copy.
+
+- **The trailing text was a closing code fence.** Pass 3a's thread held 84 rows: 79 of research,
+  then three answers. The third was 59,009 characters: a complete array of 57 entries, one per
+  factual claim, no id repeated, then `\n` and three backticks. `parse_json_response` stripped
+  a fence only at the START, so `json.loads` read the array and raised on the fence. The answer
+  was right; the parser was not. Of the other two answers, one was a prose sign-off. The other
+  was an array cut off mid-string at 15,322 characters, after 218,784 characters of reasoning
+  (TECHNICAL_DEBT 122).
+- **What a run keeps.** The record held the claims, the trace and the threads of Pass 0-3a. The
+  plan, Pass 1's text, the corpus and the later payloads were in no column, but each pass's
+  thread holds its whole conversation. A pass's thread reached the record only when the pass
+  returned, so a pass that raised mid-request, or one a quit abandoned, was in no record.
+
+**Settled with the owner.** Seven questions; every answer took the recommended option. Keep the
+failed pass's thread. `/research --resume [id]` with a picker, and `--resume [id]` that lists
+when bare. Failed and abandoned runs both. Older runs up to the 6a/6b loop. A fence at either
+end of a JSON answer. The corpus rebuilt from the stored tool results. The session's current
+model.
+
+**Built.**
+
+- `core/reasoning/resume.py` decides where a run resumes and rebuilds it: from its resume
+  point, or for a run recorded before §98 from its trace's checkpoint lines (RS9). It refuses
+  with a reason before anything is written.
+- The orchestrator saves a resume point at the end of every stage (RS2) through
+  `save_resume_point`, its one writer, and skips each stage a point says is done. Every pass
+  reports its thread as the thread opens (RS3). The pass a resume reaches first gets its old
+  thread (RS4): a stored answer is its first attempt with no model call, and a thread cut off
+  mid-request is resent, with any call it left unanswered answered first.
+- The corpus is replayed from the stored tool results with `ast.literal_eval`, keeping each
+  row's time as `retrieved_at` (RS6). The parser takes a fence at either end, and nothing else
+  (RS7).
+- Both shells: `--resume` in the CLI, `/research ... --resume` and `ResumeRunPickerScreen` in
+  the TUI, and a `run_started` event, so a failed or abandoned run's last line names the
+  command that resumes it (RS5).
+
+**Measured after, on a consistent copy of the owner's database, with no model called.**
+`prepare` rebuilt the owner's run in 0.01 s: stage D0 (read from the trace), 98 claims, the
+plan, Pass 1's 50,534 characters and the pending Pass 3a thread. The stored 59,009-character
+answer parsed and passed Pass 3a's shape check, so that pass resumes without a model call. One
+of its entries names `c096` where Pass 2 wrote `c96`; batch 220's scoping drops and traces it.
+The corpus was rebuilt from 189 stored results into 162 documents in 0.12 s. The copy was
+deleted afterwards.
+
+**Caught on the way.**
+
+- **The modal sweep found the new picker uncentred** (x=0): the centring rule in `app.tcss`
+  names screens by class, so `ResumeRunPickerScreen` shares `ThreadPickerScreen`'s.
+- **A test that stopped a patch with `.stop()` on the returned mock** left the old parser in
+  place, and the owner's case read as needing a model call. `mocker.stop(patch)` is the call,
+  and the test now asserts the real parser is back before it resumes.
+- **A run that failed in Pass 0 would have read as pre-§98**, having no point yet. A new run
+  saves an initial point, stage none, before its first pass.
+
+**Tests.** `tests/test_research_resume.py`, 81 tests, runs the real pipeline on the real loop,
+the suite's fake storage and fake sqlmodel, with only the model scripted. It answers by the pass
+its system prompt names. `TestAFailedPassResumesWhereItStopped` breaks each of the ten model
+passes for real, 28 cases: a provider error at every pass, a reply that is not JSON at the
+eight JSON passes, and an empty reply at the two prose passes. It then resumes with the model
+mended, and asserts four things. No completed pass calls the model again. The failed pass
+recovers with one call, in the thread it failed in, opening no other. The run ends exactly as
+an unbroken run ends: the same claims, tiers, grounding, revisions, report and source count.
+And a new run is never read from its trace. Further cases cover:
+
+- a Pass 5 crash;
+- a 6b failure after its round's 6a, with no round counted twice;
+- a second failure after a resume;
+- the owner's fenced answer, produced under the old parser and resumed under the new one, for
+  a new record and a pre-§98 one, with no model call in Pass 3a;
+- a quit mid-call, its unanswered call answered on resume;
+- the rebuilt corpus, a replayed page's time, sources after the loop, and the granted-call
+  trail;
+- every refusal, the pieces, and both shells.
+
+`tests/test_storage_e2e.py` gains the listing on real SQLite, which the fake cannot run.
+`test_tui.py`'s modal table gains the picker.
+**Verified.** The full suite on Windows, in batch 268's venv (import-tested), with
+`AGENT_WORKSPACE` unset: 9828 passed, 88 skipped (9916: `main`'s 9829 and this batch's 87). The
+mutation pass ran on an export copy (runner `mutate269.py` in this session's scratchpad). Its
+first run left four rows alive, each a gap in the tests rather than the code; with those closed,
+25 of 25 are killed:
+
+- **R6 and S1 ignored a replayed page's stored time and survived**, because the replay ran
+  within the same second as the fetch. The test now moves the stored row to a past time.
+- **O6 dropped the post-resume source refill and survived**, because a 6b round grounds again
+  and refills it. Its test now resumes after the loop.
+- **O8 dropped the new run's initial point and survived**, because a Pass 0 failure then took
+  the pre-§98 path to the same outcome. The parametrised test now asserts a new run is never
+  read from its trace.
+
+The other rows: the fence branch dropped and widened; the thread never handed on; an answer
+read as pending; `done()` one stage short; no pending thread; the corpus empty; loop lines
+accepted; a complete run accepted; D1 as its own stage; 6a's point and every point unsaved; a
+thread not persisted as it opens, or recorded twice; a stored answer never reused; the granted
+calls dropped; an unanswered call left; a thread never reported; a resumed pass given its input
+again; the listing offering a complete run; and a reopened run keeping its finish time.
+
+ruff is clean. bandit 1.9.4 reports nothing outside the baseline, and no count in it grew.
+gitleaks 8.30.1 on an export of the tracked and new files finds nothing. The requirements files
+are unchanged, so pip-audit was not re-run. Nothing here branches on the platform, so the WSL
+probe was the dry resume of the owner's run, not a suite run.
+
+- **Version:** the branch's beta identity, `0.3.18-b.1.research-resume.rfd9511d5f643`.
