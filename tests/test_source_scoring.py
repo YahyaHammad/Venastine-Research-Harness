@@ -328,9 +328,9 @@ class TestQuoteVerification:
         assert _only_source(run)["quote_verified"] is False
 
     def test_a_url_the_run_never_retrieved_is_unknown_not_false(self):
-        """The model cited a search result it did not open, or fetched it
-        during a JSON-retry turn, which is not translated. Neither is
-        evidence of fabrication."""
+        """The model cited a search result it did not open, which is not
+        evidence of fabrication. (A page fetched during a JSON retry reaches
+        the corpus since ROADMAP_v3 §99.)"""
         corpus = self._corpus_with("https://other.com/p", "text" * 50)
         run = _run(_claim(sources=[_source(quote="Kipling won in 1907.")]))
         score_grounding_sources(run, corpus=corpus)

@@ -32435,3 +32435,121 @@ are unchanged, so pip-audit was not re-run. Nothing here branches on the platfor
 probe was the dry resume of the owner's run, not a suite run.
 
 - **Version:** the branch's beta identity, `0.3.18-b.1.research-resume.rfd9511d5f643`.
+
+## Batch 270 -- a pass being corrected is seen while it runs (ROADMAP_v3 §99) (2026-11-18)
+
+**Asked.** The owner resumed the run batch 269 was built for, on 0.3.19 in WSL. It reached the
+second round of Pass 6b and seemed to stall: the pass's tool count stayed at 44, its character
+total at 48k, its row was gone from the agent panel, and `/research --resume` said "Still
+working". They asked whether it had stalled, and for the root cause if so. Then, on the
+diagnosis: make a pass's retries stream like its first attempt.
+
+**Measured first.** Read-only, on the owner's WSL process, log and database (a backup-API copy,
+deleted after).
+
+- **Not stalled.** The worker thread was waiting on the network, and one HTTPS connection was
+  uploading a request whose reply then streamed back. The log showed a model call every one to
+  four minutes. The pass's thread gained a row at 18:45:56. A call that had used both of its
+  provider retries at 18:47 went through at 18:49.
+- **The pass was in its JSON retry.** At 18:24 its 45,582-character answer failed to parse at
+  line 342, on a placeholder key written without quotes. The same reply ended with the model
+  saying it would build the JSON with a script, and its corrective retry did: 14 model calls in
+  25 minutes, writing and editing four files in its workspace. A lenient parse would not have
+  saved the answer either: `strict=False` fails on it too.
+- **Why the screen froze.** A retry reached the model through `continue_conversation`, which
+  drains its own loop, so it yielded nothing: §26 had stated this as a limit. It ran under no
+  span, so the pass's row left the panel. Its reason was in the trace at once, but reached a
+  shell only at the next checkpoint, after the pass.
+- **Why each call took minutes.** The provider's entry sets `echoes_reasoning`, so every request
+  resends the thread with its reasoning: 463K characters of content and 630K of reasoning, and
+  1.09 MB acknowledged on the socket. Over a link that sent about 15% of its bytes again, the
+  upload alone took about a minute. Recorded as TECHNICAL_DEBT 123, not changed.
+
+**Settled with the owner.** Four questions, each answered with the recommended option:
+- Route the retry through the pass's own entry point, not a streaming sibling of chat's
+  `continue_conversation`.
+- Stream every pipeline pass's retries, and leave §20's reviewer as it was.
+- Show the retry's reason at once.
+- Let the retry's fetched pages into the corpus.
+
+**Built.**
+
+- `stream_deep_research_mode` takes a `follow_up`, which is sent into `resume_thread` before the
+  loop runs. A follow-up without a thread is refused. The follow-up is added as a user row
+  exactly as `continue_conversation` added it (SR1).
+- `json_retry.py`'s loops are generators that take the corrective turn as an argument
+  (`stream_until_json`, `stream_until_text`). `retry_until_json` is the first drained, with
+  `continue_conversation` as its turn, for the reviewer. `retry_until_text` had no caller left
+  and is gone (SR2, SR6).
+- The orchestrator's `_corrections` is a pass's turn: the corrective goes through the pass's
+  entry point and is translated like the attempt. Its tool calls reach both shells and its pages
+  reach the corpus (SR1, SR4).
+- `via()` hands each pass the run's `_Progress.checkpoint`, which the loop calls once a failed
+  attempt's line is appended. The line is then persisted and shown before the corrective goes
+  out (SR3).
+- One `_Streamed` per pass keeps its character total rising across attempts (SR5).
+
+**Caught on the way.**
+
+- **The checkpoint at the retry saves the run, so a failing database now ends the run there.**
+  `test_inner_storage_failure_propagates_original_exception_and_logs_run_id` failed every write,
+  and the retry's checkpoint raised before the pass could fail on its own. That is the rule at
+  every checkpoint, and at RS3's thread recorder. The test now fails only the failure-path write
+  it is about.
+- **The pass's activity row closes after the attempt and opens again for the retry.** Measured
+  in the panel's sink: the stack drops a row as soon as its span ends, so one pass never shows
+  as two.
+
+**Tests.** `tests/test_streamed_retry.py` (19) runs the real pipeline on the real loop with a
+scripted model. It breaks each of the ten model passes' first reply, and has the corrective
+retry fetch a page before answering. Every pass is checked for:
+
+- the reason arriving first and already saved;
+- the retry's fetch following as that pass's own tool call;
+- one retry.
+
+Further cases:
+
+- the pass's span is open for the retry and bound to its one thread;
+- the corrective and the retry's fetch are in that thread;
+- a quote from a page only the retry fetched is verified;
+- the character total rises across attempts;
+- the line is shown once;
+- a follow-up with no thread is refused;
+- the CLI and the TUI each render a real retry's events, the reason above the fetch, and the
+  TUI's panel counts it.
+
+Run against main's production files, 16 of the 19 fail. The three that pass there are guards
+that held before too: saved before shown, shown once, the same thread.
+
+The tests that faked a pass's retry on `continue_conversation` moved to
+`conftest.pass_and_corrections`, which tells an attempt from a retry by `follow_up`. Those were
+`test_json_retry.py`, three in `test_orchestrator.py`, and one each in
+`test_research_authorization.py`, `test_truncated_pass.py` and `test_pipeline_events.py`.
+`test_empty_research_pass.py`'s unit tests drive `stream_until_text`, gaining one for the order
+of the announcement and the corrective. Its pass tests now pin what the retry sends at the entry
+point.
+
+**Verified.** The full suite on Windows, in batch 268's venv (import-tested), with
+`AGENT_WORKSPACE` unset: 9848 passed, 88 skipped (9936: `main`'s 9916 and this batch's 20). The
+mutation pass ran on an export copy, after a green control. Its runner is `mutate270.py` in this
+session's scratchpad, and it killed 18 of 18:
+
+- the follow-up never added, taken as a resume, or allowed with no thread;
+- either loop's announcement dropped, or its turn's events swallowed;
+- the drained route losing the reviewer's prompt or the answer;
+- a retry's pages kept out of the corpus;
+- a retry's total started again, or not shared by the first attempt, or ignored by `_translate`;
+- a retry sent with no thread;
+- no checkpoint handed by `via()`, or none used by either pass function;
+- the checkpoint emitting without persisting.
+
+Three of those rows end the retried run itself, so the shells' shared fixture errors as well as
+17 tests failing; each is a kill.
+
+ruff is clean. bandit 1.9.4 reports 47 live findings and none new, and no count in its baseline
+grew. gitleaks 8.30.1 on an export of the tracked and new files finds nothing. No requirements
+or workflow file changed, so pip-audit was not re-run. Nothing here branches on the platform. The
+WSL evidence is the owner's live run, observed before the change, not re-run after it.
+
+- **Version:** the branch's beta identity, `0.3.19-b.1.streaming-json-retry.re3a362319dd4`.

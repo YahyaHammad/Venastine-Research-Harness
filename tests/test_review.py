@@ -258,12 +258,17 @@ def _stub_reviewer(mocker, findings, thread_id=None):
 
 
 def _stub_resynthesis(mocker, text="REPORT v2"):
-    """Patches the pass entry point the re-synthesis goes through."""
+    """Patches the pass entry point the re-synthesis goes through -- its
+    corrective retries too, since ROADMAP_v3 §99, which arrive with
+    `follow_up` set and are recorded with it."""
     calls = []
 
     def side_effect(*, pass_input, model, pass_id, **kwargs):
-        calls.append({"pass_id": pass_id, "input": pass_input})
-        return make_model_response(text=text)
+        calls.append({"pass_id": pass_id, "input": pass_input,
+                      "follow_up": kwargs.get("follow_up")})
+        response = make_model_response(text=text)
+        response.thread_id = kwargs.get("resume_thread") or uuid4()
+        return response
 
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(side_effect))
@@ -958,14 +963,14 @@ class TestReviewHardening:
         run = _reviewed_run()
         _stub_reviewer(mocker, [TEXT_FINDING])
         resynth = _stub_resynthesis(mocker, text="")
-        empty = make_model_response(text="")
-        hop = mocker.patch.object(RunAgentLoop, "continue_conversation",
-                                  return_value=empty)
 
         make_stage(run, mocker, consent=_consent(("accept", "")))
 
-        assert [c["pass_id"] for c in resynth] == ["Final synthesis"]
-        assert hop.call_count == config.MAX_JSON_RETRIES
+        attempts = [c for c in resynth if c["follow_up"] is None]
+        retries = [c for c in resynth if c["follow_up"] is not None]
+        assert [c["pass_id"] for c in attempts] == ["Final synthesis"]
+        assert len(retries) == config.MAX_JSON_RETRIES
+        assert {c["pass_id"] for c in retries} == {"Final synthesis"}
         assert run.final_report == "REPORT v1"
         assert run.claims[0].final_text == "original text"
         assert any("NOT applied" in line and "no text" in line

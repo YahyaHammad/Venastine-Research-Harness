@@ -26,9 +26,10 @@ first attempt's stop rule (one cut off with no text fails naming the stop,
 one cut off with text is used and traced), and an empty §20 re-synthesis
 is contained like a failed one (tests/test_review.py).
 
-The end-to-end tests run the REAL loop and the real `continue_conversation`
-under a scripted provider, so the retry is driven through RO2's own ask on
-every attempt, which is what makes one attempt cost two model calls.
+The end-to-end tests run the REAL loop under a scripted provider, and since
+ROADMAP_v3 §99 the retry reaches it through the pass's own entry point, so
+it is driven through RO2's own ask on every attempt, which is what makes
+one attempt cost two model calls.
 """
 
 import inspect
@@ -40,19 +41,19 @@ from uuid import uuid4
 import pytest
 
 import config
-import prompts.system_prompts as system_prompts
-from core.loop import REASONING_ONLY_END, RunAgentLoop, advertisement_facts
+from core.loop import REASONING_ONLY_END, RunAgentLoop
 from core.reasoning import json_retry, orchestrator
 from core.reasoning.json_retry import (
     _REASONING_IS_NOT_THE_REPLY,
     _TEXT_CORRECTIVE,
     _parse_corrective,
-    retry_until_text,
+    stream_until_text,
 )
 from tests.conftest import (
     drain,
     make_model_response,
     make_stream_sequence,
+    pass_and_corrections,
     pass_stream,
     well_shaped,
 )
@@ -74,73 +75,66 @@ def _answer(text="The answer, in prose."):
     return response
 
 
-def _continues(mocker, *responses):
-    """Patch the corrective hop; calls beyond the last repeat it."""
+def _turns(*responses):
+    """A corrective turn for `stream_until_text` (ROADMAP_v3 §99): answers
+    each corrective with the next response, repeating the last, and keeps
+    the messages it was sent on `.sent`."""
     queued = list(responses)
 
-    def side_effect(**kwargs):
+    def turn(message):
+        turn.sent.append(message)
+        yield from ()
         return queued.pop(0) if len(queued) > 1 else queued[0]
 
-    return mocker.patch.object(RunAgentLoop, "continue_conversation",
-                               side_effect=side_effect)
+    turn.sent = []
+    return turn
 
 
-def _retry(response, **kwargs):
+def _retry(response, *replies, **kwargs):
+    """`stream_until_text` drained, with `replies` answering its
+    correctives. Returns the text and the messages the turn was sent."""
+    turn = _turns(*replies) if replies else _turns(_answer("unused"))
     kwargs.setdefault("label", "Pass 1")
-    kwargs.setdefault("system_prompt", "the pass prompt")
-    kwargs.setdefault("model", "m")
-    kwargs.setdefault("provider_name", "P")
-    return retry_until_text(response, **kwargs)
+    return drain(stream_until_text(response, turn=turn, **kwargs)), turn.sent
 
 
 # ===========================================================================
-# ---- retry_until_text -----------------------------------------------------
+# ---- stream_until_text ----------------------------------------------------
 # ===========================================================================
 
-class TestRetryUntilText:
+class TestStreamUntilText:
 
-    def test_text_on_the_first_attempt_is_returned_without_asking(
-            self, mocker):
-        hop = _continues(mocker, _answer("unused"))
+    def test_text_on_the_first_attempt_is_returned_without_asking(self):
+        text, sent = _retry(_answer("first"))
 
-        assert _retry(_answer("first")) == "first"
-        hop.assert_not_called()
+        assert text == "first"
+        assert sent == []
 
-    def test_an_empty_reply_is_asked_again_in_its_own_thread(self, mocker):
-        """The same thread the attempt used, so the model sees its own
-        empty turn, and every argument the attempt ran under."""
-        first = _empty(reasoning_only=True)
-        hop = _continues(mocker, _answer("second"))
-        authorization, activity = object(), object()
+    def test_an_empty_reply_is_asked_again_with_the_text_corrective(self):
+        """WHERE it is asked -- the attempt's own thread, under every
+        argument the attempt ran under -- is the turn's business since
+        ROADMAP_v3 §99: `TestThePass` pins the pass's."""
+        text, sent = _retry(_empty(reasoning_only=True), _answer("second"))
 
-        assert _retry(first, temperature=0.3, authorization=authorization,
-                      effort="high", activity=activity) == "second"
-        hop.assert_called_once()
-        kwargs = hop.call_args.kwargs
-        assert kwargs["thread_id"] == first.thread_id
-        assert kwargs["message"] == _TEXT_CORRECTIVE
-        assert kwargs["system_prompt"] == "the pass prompt"
-        assert (kwargs["model"], kwargs["provider_name"]) == ("m", "P")
-        assert kwargs["temperature"] == 0.3
-        assert kwargs["authorization"] is authorization
-        assert kwargs["effort"] == "high"
-        assert kwargs["activity"] is activity
+        assert text == "second"
+        assert sent == [_TEXT_CORRECTIVE]
 
     @pytest.mark.parametrize("blank", ["", "   \n\t"],
                              ids=["empty", "whitespace"])
-    def test_whitespace_is_no_text(self, mocker, blank):
+    def test_whitespace_is_no_text(self, blank):
         """RO1 counts whitespace as none, and none of it reaches Pass 2."""
-        hop = _continues(mocker, _answer("real"))
+        text, sent = _retry(_empty(text=blank), _answer("real"))
 
-        assert _retry(_empty(text=blank)) == "real"
-        hop.assert_called_once()
+        assert text == "real"
+        assert len(sent) == 1
 
-    def test_still_empty_fails_after_every_attempt(self, mocker):
-        hop = _continues(mocker, _empty())
+    def test_still_empty_fails_after_every_attempt(self):
+        turn = _turns(_empty())
 
         with pytest.raises(ValueError, match=r"after 3 attempt\(s\)") as info:
-            _retry(_empty(), max_retries=2)
-        assert hop.call_count == 2
+            drain(stream_until_text(_empty(), "Pass 1", turn=turn,
+                                    max_retries=2))
+        assert len(turn.sent) == 2
         assert "Pass 1 returned no text" in str(info.value)
         assert "max_json_retries" in str(info.value)
 
@@ -149,37 +143,36 @@ class TestRetryUntilText:
         (False, "empty"),
     ], ids=["reasoning-only", "empty"])
     def test_the_failure_says_what_the_last_reply_was(
-            self, mocker, reasoning_only, why):
+            self, reasoning_only, why):
         """Read from RO2's end notice: the loop's own account of why it
         stopped, not one re-derived here."""
-        _continues(mocker, _empty(reasoning_only=reasoning_only))
-
         with pytest.raises(ValueError) as info:
-            _retry(_empty(), max_retries=1)
+            _retry(_empty(), _empty(reasoning_only=reasoning_only),
+                   max_retries=1)
         assert f"the last reply was {why}." in str(info.value)
 
-    def test_zero_retries_fails_without_asking(self, mocker):
+    def test_zero_retries_fails_without_asking(self):
         """`max_json_retries: 0` means no corrective attempt, for prose
         passes as for JSON ones -- and still no empty pass."""
-        hop = _continues(mocker, _answer("unused"))
+        turn = _turns(_answer("unused"))
 
         with pytest.raises(ValueError, match=r"after 1 attempt\(s\)"):
-            _retry(_empty(), max_retries=0)
-        hop.assert_not_called()
+            drain(stream_until_text(_empty(), "Pass 1", turn=turn,
+                                    max_retries=0))
+        assert turn.sent == []
 
-    def test_every_retry_reaches_on_response(self, mocker):
+    def test_every_retry_reaches_on_response(self):
         second, third = _empty(), _answer("third")
-        _continues(mocker, second, third)
         seen = []
 
-        assert _retry(_empty(), on_response=seen.append) == "third"
+        text, _ = _retry(_empty(), second, third, on_response=seen.append)
+        assert text == "third"
         assert seen == [second, third]
 
-    def test_the_trace_names_each_attempt(self, mocker):
-        _continues(mocker, _empty(), _answer())
+    def test_the_trace_names_each_attempt(self):
         trace = []
 
-        _retry(_empty(reasoning_only=True), trace=trace)
+        _retry(_empty(reasoning_only=True), _empty(), _answer(), trace=trace)
         assert trace == [
             "Pass 1: no text on attempt 1/3 (reasoning only, with no answer "
             "and no tool call), retrying with corrective message.",
@@ -187,9 +180,36 @@ class TestRetryUntilText:
             "corrective message.",
         ]
 
+    def test_each_attempt_is_announced_before_its_corrective(self):
+        """SR3: `announce` runs after the attempt's trace line is appended
+        and BEFORE the corrective goes out, so a shell can say why a pass
+        is running again before the retry's own events arrive."""
+        trace, order = [], []
+
+        def announce():
+            order.append(("announce", list(trace)))
+            yield "announced"
+
+        def turn(message):
+            order.append(("turn", list(trace)))
+            yield "retrying"
+            return _answer("second")
+
+        events = []
+        stream = stream_until_text(_empty(), "Pass 1", turn=turn,
+                                   trace=trace, announce=announce)
+        try:
+            while True:
+                events.append(next(stream))
+        except StopIteration as stop:
+            assert stop.value == "second"
+        assert events == ["announced", "retrying"]
+        assert [step for step, _ in order] == ["announce", "turn"]
+        assert len(order[0][1]) == 1, "the line is appended before announcing"
+
     def test_the_budget_is_max_json_retries(self):
         """Owner: the JSON passes' budget, not a second knob."""
-        default = inspect.signature(retry_until_text).parameters[
+        default = inspect.signature(stream_until_text).parameters[
             "max_retries"].default
         assert default == config.MAX_JSON_RETRIES
 
@@ -214,17 +234,28 @@ class TestTheCorrective:
 # ---- _run_pass: every prose pass goes through it ---------------------------
 # ===========================================================================
 
-def _pass_returning(mocker, response):
-    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
-                        side_effect=pass_stream(response))
+def _pass_returning(mocker, response, *retries):
+    """The pass's entry point answers its first attempt with `response`
+    and each corrective retry with the next of `retries`, repeating the
+    last (ROADMAP_v3 §99: a retry comes through the same entry point).
+    Returns the retries' log."""
+    queued = list(retries) or [_answer("unused")]
+    log = []
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_and_corrections(
+            response,
+            lambda **kw: queued.pop(0) if len(queued) > 1 else queued[0],
+            log))
+    return log
 
 
 class TestThePass:
 
     def test_an_empty_pass_answered_on_the_retry_returns_the_answer(
             self, mocker):
-        _pass_returning(mocker, _empty(reasoning_only=True))
-        _continues(mocker, _answer("recovered"))
+        _pass_returning(mocker, _empty(reasoning_only=True),
+                        _answer("recovered"))
 
         events = []
         gen = orchestrator._run_pass("Pass 1", "in", "m", "P")
@@ -238,8 +269,8 @@ class TestThePass:
             ("pass_start", None), ("pass_complete", True)]
 
     def test_a_pass_still_empty_reports_itself_failed(self, mocker):
-        _pass_returning(mocker, _empty(reasoning_only=True))
-        _continues(mocker, _empty(reasoning_only=True))
+        _pass_returning(mocker, _empty(reasoning_only=True),
+                        _empty(reasoning_only=True))
 
         events = []
         gen = orchestrator._run_pass("Final synthesis", "in", "m", "P")
@@ -250,42 +281,57 @@ class TestThePass:
         assert (failed.kind, failed.ok) == ("pass_complete", False)
         assert "no text" in failed.text and "reasoning only" in failed.text
 
-    def test_the_retry_runs_under_the_prompt_the_attempt_ran_under(
-            self, mocker):
-        _pass_returning(mocker, _empty())
-        hop = _continues(mocker, _answer())
-        authorization = None
+    def test_the_retry_is_the_same_pass_in_its_own_thread(self, mocker):
+        """The same thread the attempt used, so the model sees its own
+        empty turn, and every argument the attempt ran under. Through the
+        pass's own entry point since ROADMAP_v3 §99 (SR1), which builds the
+        attempt's prompt from the same pass id and authorization -- so a
+        retry cannot see a different tool set than the attempt it
+        corrects."""
+        first = _empty(reasoning_only=True)
+        log = _pass_returning(mocker, first, _answer("second"))
+        authorization, activity = object(), object()
 
-        drain(orchestrator._run_pass("Pass 1", "in", "m", "P",
-                                     authorization=authorization))
-        assert hop.call_args.kwargs["system_prompt"] == (
-            system_prompts.pass_prompt(
-                "Pass 1", *advertisement_facts(authorization)))
+        assert drain(orchestrator._run_pass(
+            "Pass 1", "in", "m", "P", temperature=0.3,
+            authorization=authorization, effort="high",
+            activity=activity)) == "second"
+        (retry,) = log
+        kwargs = retry["kwargs"]
+        assert retry["thread_id"] == first.thread_id
+        assert retry["message"] == _TEXT_CORRECTIVE
+        assert kwargs["pass_id"] == "Pass 1"
+        assert (kwargs["model"], kwargs["provider_name"]) == ("m", "P")
+        assert kwargs["temperature"] == 0.3
+        assert kwargs["authorization"] is authorization
+        assert kwargs["effort"] == "high"
+        assert kwargs["activity"] is activity
 
     def test_a_truncated_first_attempt_is_not_asked_again(self, mocker):
         """The stop rule runs BEFORE the retry, as it does for the JSON
         passes: a pass cut off by a ceiling is not fixed by asking."""
-        _pass_returning(mocker, _empty(stop_reason="token_budget_exceeded"))
-        hop = _continues(mocker, _answer())
+        log = _pass_returning(mocker,
+                              _empty(stop_reason="token_budget_exceeded"),
+                              _answer())
 
         with pytest.raises(ValueError, match="token_budget_exceeded"):
             drain(orchestrator._run_pass("Pass 1", "in", "m", "P"))
-        hop.assert_not_called()
+        assert log == []
 
     def test_a_retry_cut_off_with_no_text_fails_naming_the_stop(
             self, mocker):
-        _pass_returning(mocker, _empty())
-        hop = _continues(mocker, _empty(stop_reason="max_steps_reached"),
-                         _answer("never reached"))
+        log = _pass_returning(mocker, _empty(),
+                              _empty(stop_reason="max_steps_reached"),
+                              _answer("never reached"))
 
         with pytest.raises(ValueError, match="max_steps_reached"):
             drain(orchestrator._run_pass("Pass 1", "in", "m", "P"))
-        assert hop.call_count == 1
+        assert len(log) == 1
 
     def test_a_retry_cut_off_with_text_is_used_and_traced(self, mocker):
-        _pass_returning(mocker, _empty())
-        _continues(mocker, _empty(text="partial",
-                                  stop_reason="token_budget_exceeded"))
+        _pass_returning(mocker, _empty(),
+                        _empty(text="partial",
+                               stop_reason="token_budget_exceeded"))
         trace = []
 
         assert drain(orchestrator._run_pass(
@@ -293,13 +339,10 @@ class TestThePass:
         assert any("TRUNCATED" in line for line in trace)
 
     def test_a_retrys_granted_calls_join_the_audit_trail(self, mocker):
-        _pass_returning(mocker, _empty())
         retried = _answer()
         retried.granted_calls = [{"tool": "fetch_url"}]
-        _continues(mocker, retried)
+        _pass_returning(mocker, _empty(), retried)
         authorization = SimpleNamespace(granted_calls=[], tool_grants={})
-        mocker.patch.object(orchestrator, "advertisement_facts",
-                            return_value=(False, ()))
 
         drain(orchestrator._run_pass("Pass 1", "in", "m", "P",
                                      authorization=authorization))
@@ -307,13 +350,12 @@ class TestThePass:
             {"pass": "Pass 1", "tool": "fetch_url"}]
 
     def test_a_pass_with_text_is_untouched(self, mocker):
-        _pass_returning(mocker, _answer("the answer"))
-        hop = _continues(mocker, _answer("unused"))
+        log = _pass_returning(mocker, _answer("the answer"), _answer("unused"))
         trace = []
 
         assert drain(orchestrator._run_pass(
             "Pass 1", "in", "m", "P", trace=trace)) == "the answer"
-        hop.assert_not_called()
+        assert log == []
         assert trace == []
 
 
@@ -465,10 +507,12 @@ class TestThePipeline:
 
 
 def test_json_retry_still_continues_through_the_one_hop(mocker):
-    """`_corrective_turn` is the JSON retry's hop too since batch 267, so
-    the move must not have changed what the JSON retry sends."""
+    """`_corrective_turn` is the drained JSON retry's hop -- §20's
+    reviewer's route since ROADMAP_v3 §99 -- and batch 267's move must
+    not have changed what it sends."""
     first = _empty()
-    hop = _continues(mocker, _answer(json.dumps({"ok": 1})))
+    hop = mocker.patch.object(RunAgentLoop, "continue_conversation",
+                              return_value=_answer(json.dumps({"ok": 1})))
 
     json_retry.retry_until_json(
         first, label="Pass 0", system_prompt="sp", model="m",

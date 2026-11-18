@@ -41,7 +41,13 @@ from core.reasoning.authorization import (
     candidates,
     parse_grant_spec,
 )
-from tests.conftest import drain, pass_stream, run_pass, well_shaped
+from tests.conftest import (
+    drain,
+    pass_and_corrections,
+    pass_stream,
+    run_pass,
+    well_shaped,
+)
 from tools.base import (
     GRANT_ANYWHERE,
     GRANT_NEVER,
@@ -585,15 +591,16 @@ class TestAuthorizationReachesThePasses:
         malformed answer."""
         from core.reasoning import orchestrator
 
+        seen = []
+        # The retry comes through the pass's own entry point since
+        # ROADMAP_v3 §99, with follow_up= the corrective.
         mocker.patch.object(
             orchestrator.RunAgentLoop, "stream_deep_research_mode",
-            side_effect=pass_stream(_canned("Pass 2", text="not json")))
-        seen = []
-        mocker.patch.object(
-            orchestrator.RunAgentLoop, "continue_conversation",
-            side_effect=lambda **kw: (
-                seen.append(kw.get("authorization")),
-                _canned("Pass 2", text=well_shaped("Pass 2")))[1])
+            side_effect=pass_and_corrections(
+                _canned("Pass 2", text="not json"),
+                lambda **kw: (
+                    seen.append(kw.get("authorization")),
+                    _canned("Pass 2", text=well_shaped("Pass 2")))[1]))
 
         auth = RunAuthorization(granted_tools={"x"})
         drain(orchestrator._run_pass_with_json_retry(

@@ -24,14 +24,14 @@ checkout, which for §11's whole life it was not.
 
 ROADMAP §3 (malformed-JSON recovery): JSON-emitting passes are wrapped in
 _run_pass_with_json_retry, which on a parse failure re-enters the SAME
-pass-thread via RunAgentLoop.continue_conversation() with a corrective
-follow-up message. The failed assistant turn is already in the thread's
+pass-thread with a corrective follow-up message -- through the pass's own
+entry point since ROADMAP_v3 §99, so a retry streams like the attempt. The failed assistant turn is already in the thread's
 history (see _run()'s always-persist fix in core/loop.py), so the model
 sees its own prior output in context. Up to config.MAX_JSON_RETRIES
 corrective attempts are made; a final ValueError surfaces unrecoverable
 failures. ROADMAP_v3 §95 (RO6, amended in batch 267) gives the two prose
 passes the same recovery for a reply with no text: _run_pass sends it
-through retry_until_text, and a pass still empty fails.
+through stream_until_text, and a pass still empty fails.
 
 ROADMAP §5 (durable pipeline persistence): each run is wrapped in a
 try/except that records status='failed' (with a snapshot of the partial
@@ -77,15 +77,14 @@ import json
 import logging
 
 import config
-import prompts.system_prompts as system_prompts
 from core import pipeline_models
 from core.config_loader import effective_confidence, effective_source_scoring
-from core.loop import RunAgentLoop, advertisement_facts
+from core.loop import RunAgentLoop
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
 from core.reasoning.confidence_scoring import is_contested, run_confidence_tiering
 from core.reasoning.events import PipelineEvent
 from core.reasoning.json_retry import parse_json_response as _parse_json_response
-from core.reasoning.json_retry import retry_until_json, retry_until_text
+from core.reasoning.json_retry import stream_until_json, stream_until_text
 from core.reasoning.payload_validation import validate as _validate_payload
 from core.reasoning.pipeline_storage import (
     create_pipeline_run,
@@ -213,9 +212,30 @@ _ACTIVITY_CHARS = 2000
 # to where it now lives, not handed a local rebinding.
 
 
-def _translate(pass_id: str, stream, corpus=None):
+class _Streamed:
+    """How much one pass has streamed, across ALL its attempts (ROADMAP_v3
+    §99, SR5).
+
+    `pass_activity` carries a running total, and `_translate` used to keep
+    it in two locals -- right while one call made one attempt. A streamed
+    corrective retry is a second `_translate` of the same pass, and a total
+    started again from zero would make the panel's figure fall from 48k to
+    2k mid-pass: the jump backwards `_translate` already refuses for a
+    retraction, for the reason it gives there. So a pass makes one of these
+    and hands it to every attempt."""
+
+    def __init__(self) -> None:
+        self.chars = 0
+        self.announced = 0
+
+
+def _translate(pass_id: str, stream, corpus=None, streamed=None):
     """Turn one pass's LoopEvents into PipelineEvents, and return the
     ModelResponse the pass produced (ROADMAP_v2 §26).
+
+    `streamed` is the pass's `_Streamed` (ROADMAP_v3 §99): one per pass,
+    shared by its first attempt and its corrective retries, so the total
+    keeps counting. None, the default, is a total of this call alone.
 
     THE one place a LoopEvent becomes a PipelineEvent. Both _run_pass and
     _run_pass_with_json_retry consume this rather than each iterating the
@@ -288,8 +308,7 @@ def _translate(pass_id: str, stream, corpus=None):
     page nobody kept. None, the default, collects nothing: that is every
     caller that predates §45 and every test double."""
     names: dict = {}          # tool_call id -> name, since tool_result has none
-    streamed = 0
-    announced = 0
+    total = streamed if streamed is not None else _Streamed()
     while True:
         # next() rather than `for event in stream`, because a for loop
         # SWALLOWS the generator's return value -- and the response is
@@ -304,11 +323,11 @@ def _translate(pass_id: str, stream, corpus=None):
             return stop.value
 
         if event.token_delta:
-            streamed += len(event.token_delta)
-            if streamed - announced >= _ACTIVITY_CHARS:
-                announced = streamed
+            total.chars += len(event.token_delta)
+            if total.chars - total.announced >= _ACTIVITY_CHARS:
+                total.announced = total.chars
                 yield PipelineEvent(kind="pass_activity", pass_id=pass_id,
-                                    chars=streamed)
+                                    chars=total.chars)
         if event.notice:
             # ROADMAP_v3 §95 (RO8). Labelled by what the notice IS: the loop
             # emits a reasoning-only notice inside a pass too, and the trace
@@ -492,7 +511,7 @@ def _pass_kwargs(on_thread, resume_thread) -> dict:
 
 def _resumed_attempt(pass_id: str, thread_id, model: str, provider_name: str,
                      temperature, authorization, effort, activity, corpus,
-                     trace, on_thread):
+                     trace, on_thread, streamed=None):
     """The first attempt of a pass a resume hands its old thread (ROADMAP_v3
     §98, RS4). Returns the response to carry on with, or None when the
     thread cannot be continued and the pass must start again.
@@ -531,18 +550,43 @@ def _resumed_attempt(pass_id: str, thread_id, model: str, provider_name: str,
             provider_name=provider_name, temperature=temperature,
             authorization=authorization, effort=effort, activity=activity,
             **_pass_kwargs(on_thread, thread_id),
-        ), corpus=corpus))
+        ), corpus=corpus, streamed=streamed))
     if trace is not None:
         trace.append(f"{pass_id}: its thread could not be read back; "
                      f"starting the pass again.")
     return None
 
 
+def _corrections(pass_id: str, thread_id, model: str, provider_name: str,
+                 temperature, authorization, effort, activity, corpus,
+                 streamed, on_thread):
+    """The turn a pass's corrective retries go through (ROADMAP_v3 §99,
+    SR1): each corrective is sent into the pass's own thread through the
+    pass's own entry point, and translated like the attempt it corrects.
+
+    So a retry is the same pass continuing in every respect the attempt
+    had -- its span (the panel row stays), its prompt, backstop compaction,
+    its tool calls on screen, its fetched pages in the corpus (SR4) and its
+    output added to the same running total (SR5). Before §99 a retry went
+    through `continue_conversation`, which drains its own loop, and the
+    owner's Pass 6b spent 25 minutes and 14 model calls correcting one
+    answer with nothing on screen. `json_retry` holds the loop; this is
+    only its route into the model."""
+    def turn(message: str):
+        return _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
+            pass_input=None, model=model, pass_id=pass_id,
+            provider_name=provider_name, temperature=temperature,
+            authorization=authorization, effort=effort, activity=activity,
+            follow_up=message, **_pass_kwargs(on_thread, thread_id),
+        ), corpus=corpus, streamed=streamed)
+    return turn
+
+
 def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
               temperature: float | None = None, authorization=None,
               trace: list[str] | None = None, pass_threads: list | None = None,
               effort: str | None = None, corpus=None, activity=None,
-              on_thread=None, resume_thread=None):
+              on_thread=None, resume_thread=None, checkpoint=None):
     """One LLM-backed pass. Every actual model call in this file goes
     through this single function.
 
@@ -563,14 +607,13 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
     ROADMAP_v3 §95, amended in batch 267: every caller of this function is
     a PROSE pass (Pass 1, each ensemble candidate, Final synthesis), and a
     prose pass that comes back with no text is now asked again in its own
-    thread (retry_until_text, the JSON passes' recovery and budget) and
+    thread (stream_until_text, the JSON passes' recovery and budget) and
     FAILS if it is still empty. Before, a model that replied with
     reasoning only twice ended the pass `complete` with "", and the run
     finished with an empty raw response and an empty report.
 
-    The retries share the JSON passes' two §26 limits, stated at
-    `_run_pass_with_json_retry`: a tool call a corrective attempt makes
-    produces no tool_call event, and a page it fetches reaches no corpus.
+    The retries stream like the JSON passes' since ROADMAP_v3 §99 (SR2):
+    see `_run_pass_with_json_retry`, which says what that changes.
 
     ROADMAP_v3 §98: `on_thread` records the pass's thread as it opens
     (RS3), and `resume_thread` is a failed pass's thread for a resume to
@@ -578,38 +621,37 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
     same text retry as a fresh one.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
+    streamed = _Streamed()
     try:
         response = None
         if resume_thread is not None:
             response = yield from _resumed_attempt(
                 pass_id, resume_thread, model, provider_name, temperature,
-                authorization, effort, activity, corpus, trace, on_thread)
+                authorization, effort, activity, corpus, trace, on_thread,
+                streamed=streamed)
         if response is None:
             response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
                 pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
                 temperature=temperature, authorization=authorization, effort=effort,
                 activity=activity, **_pass_kwargs(on_thread, None),
-            ), corpus=corpus)
+            ), corpus=corpus, streamed=streamed)
         _record_granted_calls(pass_id, response, authorization)
         _record_pass_thread(pass_id, response, pass_threads)
         _check_not_truncated(pass_id, response, trace)
-        text = retry_until_text(
+        text = yield from stream_until_text(
             response,
             label=pass_id,
-            # The prompt the attempt ran under, as the JSON retry builds it
-            # and for its reason: a retry that saw a different tool set
+            # The pass's own entry point, so a retry runs under the prompt
+            # the attempt ran under: a retry that saw a different tool set
             # than the attempt it corrects is a different pass.
-            system_prompt=system_prompts.pass_prompt(
-                pass_id, *advertisement_facts(authorization)),
-            model=model,
-            provider_name=provider_name,
+            turn=_corrections(
+                pass_id, response.thread_id, model, provider_name,
+                temperature, authorization, effort, activity, corpus,
+                streamed, on_thread),
             trace=trace,
-            temperature=temperature,
-            authorization=authorization,
-            effort=effort,
             on_response=lambda r: _settle_text_retry(
                 pass_id, r, authorization, trace),
-            activity=activity,
+            announce=checkpoint,
         )
     except Exception as exc:
         # E14/#115, UNIFORM: a fatal pass reports itself before its
@@ -711,6 +753,7 @@ def _run_pass_with_json_retry(
     activity=None,
     on_thread=None,
     resume_thread=None,
+    checkpoint=None,
 ):
     """Runs one JSON-emitting pass and recovers from malformed JSON.
 
@@ -736,7 +779,7 @@ def _run_pass_with_json_retry(
     This function still returns TEXT, deliberately, even though it now
     parses the payload internally to check it. Around twenty test sites
     patch or drain it and assert on the returned string, and §20's
-    reviewer shares retry_until_json's contract; re-parsing a short string
+    reviewer shares the retry loop's contract; re-parsing a short string
     is cheaper than moving twenty seams in the batch that adds the check.
 
     `claim_ids` is the set the APPLY step will resolve against -- the
@@ -746,27 +789,28 @@ def _run_pass_with_json_retry(
     on nothing.
 
     §22: a generator, like _run_pass, and for the same reason. The
-    corrective attempts inside retry_until_json need no event kind of
-    their own -- that function already appends a trace line per failed
-    parse, so _Progress's watermark carries them to the consumer at the
-    next checkpoint with json_retry.py untouched. pass_complete fires
-    after the retries resolve, so a pass is not reported finished while
-    it is still arguing with the model about JSON.
+    corrective attempts need no event kind of their own -- json_retry.py
+    appends a trace line per failed parse, which _Progress's watermark
+    carries to the consumer. pass_complete fires after the retries
+    resolve, so a pass is not reported finished while it is still arguing
+    with the model about JSON.
 
-    §26 limit, stated rather than fixed: the FIRST attempt is translated,
-    the retries are not. retry_until_json reaches the model through
-    continue_conversation(), which drains its own loop internally, so a
-    tool call made while correcting malformed JSON produces no tool_call
-    event. Making it visible means a streaming sibling for
-    continue_conversation too, which is chat's entry point as well -- a
-    larger change than the thing it would show.
+    ROADMAP_v3 §99 lifted the limit §26 stated here: the FIRST attempt was
+    translated and the retries were not, because they reached the model
+    through continue_conversation(), which drains its own loop. The owner's
+    Pass 6b then spent 25 minutes and 14 model calls correcting one answer
+    with its tool count frozen and its panel row gone, and looked hung. A
+    retry now goes through `_corrections`, the pass's own entry point, so
+    it streams like the attempt (SR1). `checkpoint` is the run's
+    `_Progress.checkpoint`: called the moment a parse fails, it saves the
+    trace line and shows it, so the retry's tool calls appear under the
+    reason for them rather than 25 minutes before it (SR3). None, for a
+    caller with no run, leaves the line to the next checkpoint as before.
 
-    §45 inherits that limit rather than widening it: a page fetched during
-    a corrective retry reaches no corpus either, so a source cited only
-    from such a fetch scores with `similarity_method: "llm"` like any
-    other source with no captured text. It degrades to the documented
-    fallback instead of to a wrong number, which is why the limit is
-    stated here and not worked around.
+    §45's limit went with §26's: a page a corrective retry fetches reaches
+    the corpus like the attempt's (SR4), so a source cited from one is
+    scored against its text rather than falling back to
+    `similarity_method: "llm"`.
 
     ROADMAP_v3 §98: `on_thread` and `resume_thread` as for `_run_pass`. A
     resumed answer goes through the same retry loop as a fresh one, so the
@@ -774,20 +818,22 @@ def _run_pass_with_json_retry(
     this function's existing path rather than a second one.
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
+    streamed = _Streamed()
     try:
         response = None
         if resume_thread is not None:
             response = yield from _resumed_attempt(
                 pass_id, resume_thread, model, provider_name, temperature,
-                authorization, effort, activity, corpus, trace, on_thread)
+                authorization, effort, activity, corpus, trace, on_thread,
+                streamed=streamed)
         if response is None:
             response = yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
                 pass_input=pass_input, model=model, pass_id=pass_id, provider_name=provider_name,
                 temperature=temperature, authorization=authorization, effort=effort,
                 activity=activity, **_pass_kwargs(on_thread, None),
-            ), corpus=corpus)
+            ), corpus=corpus, streamed=streamed)
         _record_granted_calls(pass_id, response, authorization)
-        # §27: the retries re-enter THIS thread (continue_conversation), so one
+        # §27: the retries re-enter THIS thread (`_corrections`), so one
         # entry per pass is the whole truth however many corrections it took.
         _record_pass_thread(pass_id, response, pass_threads)
         # BEFORE the retry loop. A truncated pass returned no JSON because it
@@ -798,35 +844,24 @@ def _run_pass_with_json_retry(
         # because it was never finished.
         _check_not_truncated(pass_id, response, trace)
 
-        text = retry_until_json(
+        text = yield from stream_until_json(
             response,
             label=pass_id,
-            # pass_prompt(), NOT the raw pass file: BOTH the original attempt
-            # and its retry must carry the same catalogs, or a retry silently
-            # sees a different tool set than the attempt it is correcting.
-            # #68 makes that literal -- the same AUTHORIZATION decides the
-            # catalogs here as decided them for the attempt.
-            system_prompt=system_prompts.pass_prompt(
-                pass_id, *advertisement_facts(authorization)),
-            model=model,
-            provider_name=provider_name,
+            # The pass's own entry point (SR1), which builds pass_prompt()
+            # from the same AUTHORIZATION as the attempt did -- #68: a retry
+            # carrying different catalogs silently sees a different tool set
+            # than the attempt it corrects. It also carries §47's sink
+            # (batch 75's hop), the configured spend cap with no separate
+            # pass ceiling (#4), and the pass's thread.
+            turn=_corrections(
+                pass_id, response.thread_id, model, provider_name,
+                temperature, authorization, effort, activity, corpus,
+                streamed, on_thread),
             trace=trace,
-            temperature=temperature,
-            authorization=authorization,
-            effort=effort,
             on_response=lambda r: _record_granted_calls(pass_id, r, authorization),
-            # §47's sink, at the hop batch 73 missed (batch 75). A
-            # corrective attempt reaches the model through
-            # continue_conversation, which drains its own loop, so a
-            # subagent spawned while a pass is being corrected is visible
-            # through this channel or not at all.
-            activity=activity,
-            # The retry re-enters THIS pass's thread. No separate pass
-            # ceiling any more (#4): omitting the kwarg lets the wrapper
-            # resolve the configured spend cap, exactly as the pass itself
-            # did.
             validate=lambda payload: _validate_payload(
                 pass_id, payload, claim_ids=claim_ids, ensemble=ensemble),
+            announce=checkpoint,
         )
     except Exception as exc:
         # E14/#115: same uniform failure report as _run_pass -- a JSON
@@ -1439,9 +1474,12 @@ def stream_deep_research_pipeline(
 
     def via(pass_id: str) -> dict:
         """The §98 arguments one pass is given: its thread is recorded as
-        it opens (RS3), and a resume hands the failed pass its own (RS4)."""
+        it opens (RS3), and a resume hands the failed pass its own (RS4).
+        And §99's: the run's checkpoint, so a pass's retry line is saved
+        and shown the moment its parse fails (SR3)."""
         return {"on_thread": progress.recorder(pass_id),
-                "resume_thread": point.take_thread(pass_id) if point else None}
+                "resume_thread": point.take_thread(pass_id) if point else None,
+                "checkpoint": progress.checkpoint}
 
     # §98. A new run has a resume point before its first pass: "nothing
     # completed yet". Without it a run that failed in Pass 0 would carry no

@@ -1492,8 +1492,10 @@ class TestTheOrchestratorCarriesTheSink:
             "the number is derived from its context, never written as a 1")
 
     def test_a_corrective_retry_hands_the_sink_down(self, mocker):
-        """The hop batch 73 missed. A retry reaches the model through
-        `continue_conversation`, which drains its own loop -- so a subagent
+        """The hop batch 73 missed. A DRAINED retry -- §20's reviewer's,
+        since ROADMAP_v3 §99 moved the passes' retries to their own
+        streaming entry point -- reaches the model through
+        `continue_conversation`, which drains its own loop, so a subagent
         spawned while the model is being corrected about JSON is visible
         through this channel or not at all, which is the reason
         `tui/app.py`'s one-shot path carries it.

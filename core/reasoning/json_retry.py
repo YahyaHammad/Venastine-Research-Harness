@@ -42,16 +42,27 @@ status='failed' record.
 
 ROADMAP_v3 §95, amended in batch 267, added the THIRD thing worth
 correcting, for the two passes whose answer is prose (Pass 1 and Final
-synthesis): a reply with no text at all. `retry_until_text` is the same
+synthesis): a reply with no text at all. `stream_until_text` is the same
 recovery with the same thread, the same attempt arithmetic and the same
-`max_json_retries` budget, and both loops send their corrective through
-`_corrective_turn`, so the continuation's arguments have one copy.
+`max_json_retries` budget.
+
+ROADMAP_v3 §99 made the loops GENERATORS that take the corrective turn as
+an argument (`stream_until_json`, `stream_until_text`). The pipeline hands
+them a turn that streams through the pass's own entry point, so a retry's
+tool calls reach both shells and its fetched pages reach the corpus (SR1,
+SR4); before, every retry went through `continue_conversation`, which
+drains its own loop, and a pass being corrected went silent for as long as
+the correction took. `retry_until_json` is the same loop drained, with a
+turn that continues the thread through `continue_conversation` as before,
+for §20's reviewer: its first attempt is drained too, so a streamed retry
+would show half a run (SR2). One loop, two routes into it, so the attempt
+arithmetic, the corrective wording and the trace line keep one copy (SR6).
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, Optional
 
 import config
@@ -168,6 +179,49 @@ def retry_until_json(
                   that reason). No span is opened here: the caller's own
                   brackets the whole attempt-and-retry sequence, and a row
                   per correction would report one run as several.
+
+    ROADMAP_v3 §99: this is `stream_until_json` drained, with a turn that
+    continues the thread through `continue_conversation` as it always did.
+    Its one caller is §20's reviewer (SR2); the pipeline's passes stream.
+    """
+    return _drained(stream_until_json(
+        response, label,
+        turn=_continuing(
+            response, system_prompt=system_prompt, model=model,
+            provider_name=provider_name, temperature=temperature,
+            authorization=authorization, context=context, effort=effort,
+            activity=activity, max_total_tokens=max_total_tokens),
+        trace=trace, max_retries=max_retries, on_response=on_response,
+        validate=validate))
+
+
+def stream_until_json(
+    response,
+    label: str,
+    turn: Callable[[str], Iterator],
+    trace: Optional[list] = None,
+    max_retries: int = MAX_JSON_RETRIES,
+    on_response: Optional[Callable] = None,
+    validate: Optional[Callable] = None,
+    announce: Optional[Callable[[], Iterator]] = None,
+):
+    """The JSON recovery as a generator, RETURNING the first text that
+    parses and passes `validate` (ROADMAP_v3 §99). Raises ValueError, with
+    the last parse error, once every attempt has failed.
+
+    turn       called with each corrective message; returns a generator
+               that sends it into `response`'s thread and RETURNS the
+               reply. Everything it yields is yielded from here, which is
+               how a retry's tool calls reach a shell (SR1). Same thread,
+               same pass: a turn opens no thread of its own.
+    announce   called after each failed attempt's trace line is appended,
+               before the corrective goes out; whatever it yields is
+               yielded too. The pipeline passes its checkpoint, so the
+               line saying why a pass is running again is saved and shown
+               the moment it is true, not when the pass ends (SR3).
+
+    `label`, `trace`, `max_retries`, `on_response` and `validate` are
+    `retry_until_json`'s, which documents them.
     """
     raw_text = response.text
 
@@ -189,16 +243,13 @@ def retry_until_json(
                     f"{max_retries + 1} ({str(e).splitlines()[0]}), "
                     f"retrying with corrective message."
                 )
+            if announce is not None:
+                yield from announce()
             corrective = (
                 _shape_corrective(e, raw_text) if shape
                 else _parse_corrective(e, raw_text)
             )
-            retry_response = _corrective_turn(
-                response, corrective,
-                system_prompt=system_prompt, model=model,
-                provider_name=provider_name, temperature=temperature,
-                authorization=authorization, context=context, effort=effort,
-                activity=activity, max_total_tokens=max_total_tokens)
+            retry_response = yield from turn(corrective)
             if on_response is not None:
                 on_response(retry_response)
             raw_text = retry_response.text
@@ -208,22 +259,19 @@ def retry_until_json(
     return raw_text
 
 
-def retry_until_text(
+def stream_until_text(
     response,
     label: str,
-    system_prompt: str,
-    model: str,
-    provider_name: str,
+    turn: Callable[[str], Iterator],
     trace: Optional[list] = None,
-    temperature: Optional[float] = None,
-    authorization=None,
     max_retries: int = MAX_JSON_RETRIES,
     on_response: Optional[Callable] = None,
-    effort: Optional[str] = None,
-    activity=None,
-) -> str:
-    """Returns the first response text that is not empty, retrying by
-    continuing `response`'s thread. ROADMAP_v3 §95, amended in batch 267.
+    announce: Optional[Callable[[], Iterator]] = None,
+):
+    """The first response text that is not empty, retrying by continuing
+    `response`'s thread, as a generator. ROADMAP_v3 §95, amended in batch
+    267; a generator since §99, with `turn` and `announce` as
+    `stream_until_json` takes them.
 
     The owner's report: a research pass whose model replied with reasoning
     only twice ended `complete` with "" -- RO2 ends the TURN there, which
@@ -233,19 +281,19 @@ def retry_until_text(
     the same reply, because an empty string does not parse and RO6
     corrects it. A prose pass had nothing that failed.
 
-    So this is retry_until_json for a pass whose contract is "some text":
+    So this is stream_until_json for a pass whose contract is "some text":
     the same thread, the same `max_retries` (config.yaml's
     `max_json_retries`, owner's choice, rather than a second knob), and
     the same failure shape -- ValueError once every attempt came back
     empty, which the orchestrator turns into a failed pass and a failed
     run. Whitespace counts as no text, as RO1 counts it.
 
-    Each corrective attempt is a fresh `continue_conversation` run, so it
-    gets RO2's own ask too: one attempt can cost two model calls.
+    Each corrective attempt is a fresh run of the loop, so it gets RO2's
+    own ask too: one attempt can cost two model calls.
 
-    The arguments are retry_until_json's, minus the two only its callers
-    use (`context`, `max_total_tokens`) and `validate`, which has nothing
-    to apply to.
+    The arguments are `stream_until_json`'s minus `validate`, which has
+    nothing to apply to. There is no drained form: its one caller is the
+    orchestrator's `_run_pass`, and a pass streams its retries (SR2).
     """
     current = response
     for attempt in range(max_retries):
@@ -256,12 +304,9 @@ def retry_until_text(
                 f"{label}: no text on attempt {attempt + 1}/"
                 f"{max_retries + 1} ({_why_empty(current)}), "
                 f"retrying with corrective message.")
-        current = _corrective_turn(
-            response, _TEXT_CORRECTIVE,
-            system_prompt=system_prompt, model=model,
-            provider_name=provider_name, temperature=temperature,
-            authorization=authorization, context=None, effort=effort,
-            activity=activity, max_total_tokens=None)
+        if announce is not None:
+            yield from announce()
+        current = yield from turn(_TEXT_CORRECTIVE)
         if on_response is not None:
             on_response(current)
     if (current.text or "").strip():
@@ -285,15 +330,41 @@ def _why_empty(response) -> str:
     return "empty"
 
 
+def _drained(stream):
+    """A retry loop run to its end, returning what it returns. The drained
+    route yields nothing -- its turn is `_continuing`'s and it has no
+    `announce` -- so nothing is lost here; a `for` loop would lose the
+    RETURN value, which is the answer."""
+    while True:
+        try:
+            next(stream)
+        except StopIteration as stop:
+            return stop.value
+
+
+def _continuing(response, **arguments):
+    """The drained route's turn (ROADMAP_v3 §99): each corrective goes into
+    `response`'s thread through `_corrective_turn`, as every retry did
+    before §99. A generator function that yields nothing, so the loop's
+    `yield from turn(...)` takes the reply as its return value."""
+    def turn(message: str):
+        yield from ()
+        return _corrective_turn(response, message, **arguments)
+    return turn
+
+
 def _corrective_turn(response, message: str, *, system_prompt: str,
                      model: str, provider_name: str, temperature, authorization,
                      context, effort, activity, max_total_tokens):
-    """One corrective attempt, sent into the thread `response` came from.
+    """One corrective attempt, sent into the thread `response` came from,
+    through `continue_conversation`.
 
     Batch 267 moved this out of retry_until_json unchanged, so the JSON
-    retry and the text retry continue a thread with ONE set of arguments.
-    Every argument below was dropped at this hop once, and each comment
-    says what that cost.
+    retry and the text retry continued a thread with ONE set of arguments.
+    Since ROADMAP_v3 §99 only the drained route comes here -- §20's
+    reviewer -- and the pipeline's passes continue their threads through
+    their own entry point instead. Every argument below was dropped at this
+    hop once, and each comment says what that cost.
     """
     from core.loop import RunAgentLoop
 

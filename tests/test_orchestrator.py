@@ -47,8 +47,9 @@ this banner named the sprung version of it. Any change to:
       inner call again. THIS TEST PATCHES
       `RunAgentLoop.stream_deep_research_mode`, NOT `_run_pass`,
       `_run_pass_with_json_retry` or `run_deep_research_mode`.
-      -- The retry path calls `RunAgentLoop.continue_conversation` when the
-         initial response fails to parse as JSON. Existing tests queue valid
+      -- The retry path re-enters the same entry point, with `follow_up=`,
+         when the initial response fails to parse as JSON (ROADMAP_v3 §99;
+         `continue_conversation` before it). Existing tests queue valid
          JSON, so the retry path never fires; this test asserts only on the
          happy-path call order.
       -> IF the orchestrator's inner call moves again, repoint
@@ -86,7 +87,12 @@ import pytest
 import config
 from core.loop import RunAgentLoop
 from core.reasoning.pipeline_storage import load_pipeline_run
-from tests.conftest import make_model_response, pass_stream, run_pipeline
+from tests.conftest import (
+    make_model_response,
+    pass_and_corrections,
+    pass_stream,
+    run_pipeline,
+)
 
 # ---------------------------------------------------------------------------
 # ---- Mock helper ----------------------------------------------------------
@@ -695,21 +701,17 @@ def test_a_pass_6b_response_naming_NOTHING_in_the_batch_is_corrected(mocker):
                            for _ in range(max_retries)]
     corrective: list = []
 
-    def fake_continue(*, thread_id, message, system_prompt, model,
-                      provider_name="ANTHROPIC", **kwargs):
+    def fake_correction(**kwargs):
         # The corrective turn gets the same unusable payload back, so
         # every attempt fails and the pass raises rather than recovering.
-        corrective.append(message)
-        resp = make_model_response(text=_pass_6b_naming("C1"))
-        resp.thread_id = thread_id
-        return resp
+        corrective.append(kwargs["follow_up"])
+        return make_model_response(text=_pass_6b_naming("C1"))
 
     mocker.patch.object(
         RunAgentLoop, "stream_deep_research_mode",
-        side_effect=pass_stream(_build_pass_mock([], payloads)),
+        side_effect=pass_and_corrections(
+            _build_pass_mock([], payloads), fake_correction),
     )
-    mocker.patch.object(RunAgentLoop, "continue_conversation",
-                        side_effect=fake_continue)
 
     with pytest.raises(PayloadShapeError, match="claim_id"):
         run_pipeline(user_query="test query", model="claude-test",
@@ -1121,20 +1123,21 @@ def test_hard_kill_bypasses_except_block_checkpoint_survives(mocker):
 # ---- ROADMAP §3: JSON-retry mechanism -------------------------------------
 # ===========================================================================
 
-def test_json_retry_path_calls_continue_conversation_on_malformed_json(mocker):
+def test_json_retry_path_corrects_malformed_json_in_the_same_thread(mocker):
     """When a JSON-emitting pass returns malformed JSON on its first
     attempt, _run_pass_with_json_retry must:
 
-      1. Call RunAgentLoop.continue_conversation with the same thread_id
-         the initial run_deep_research_mode call returned.
+      1. Send a corrective into the same thread the initial attempt
+         returned, through the pass's own entry point (ROADMAP_v3 §99;
+         `continue_conversation` before it).
       2. Include in the corrective message: a phrase explaining the
          parse failure, and an instruction to respond with ONLY valid JSON.
       3. Stop retrying after MAX_JSON_RETRIES corrective attempts and
          raise ValueError (which the pipeline's try/except turns into a
          status='failed' record before re-raising).
 
-    Strategy: patch run_deep_research_mode and continue_conversation to
-    both always return malformed JSON, so all retry attempts fail. The
+    Strategy: patch the pass's entry point so the attempt and every
+    retry return malformed JSON, so all retry attempts fail. The
     test asserts the retry count and corrective message content. The
     trace-line format belongs in the unit test of
     _run_pass_with_json_retry (see tests/test_json_retry.py).
@@ -1151,18 +1154,12 @@ def test_json_retry_path_calls_continue_conversation_on_malformed_json(mocker):
 
     continue_calls: list = []
 
-    def fake_continue(*, thread_id, message, system_prompt, model, provider_name="ANTHROPIC", **kwargs):
-        continue_calls.append({
-            "thread_id": thread_id,
-            "message": message,
-        })
-        resp = make_model_response(text="still not json")
-        resp.thread_id = thread_id
-        return resp
-
-    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
-                        side_effect=pass_stream(fake_run_dr_mode))
-    mocker.patch.object(RunAgentLoop, "continue_conversation", side_effect=fake_continue)
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_and_corrections(
+            fake_run_dr_mode,
+            lambda **kwargs: make_model_response(text="still not json"),
+            continue_calls))
 
     with pytest.raises(ValueError, match="did not return valid JSON"):
         run_pipeline(
@@ -1171,12 +1168,12 @@ def test_json_retry_path_calls_continue_conversation_on_malformed_json(mocker):
             provider_name="ANTHROPIC",
         )
 
-    # Pass 0 should have made MAX_JSON_RETRIES corrective continue_conversation
-    # calls, all against the same thread_id.
+    # Pass 0 should have made MAX_JSON_RETRIES corrective retries, all
+    # against the same thread_id.
     expected_retries = config.MAX_JSON_RETRIES
     assert len(continue_calls) == expected_retries, (
-        f"Expected exactly {expected_retries} continue_conversation calls "
-        f"(1 initial run_deep_research_mode + {expected_retries} retries), "
+        f"Expected exactly {expected_retries} corrective retries "
+        f"(1 initial attempt + {expected_retries} retries), "
         f"got {len(continue_calls)}."
     )
     for call in continue_calls:
@@ -2329,7 +2326,7 @@ def test_without_an_effort_the_passes_receive_none(mocker):
 
 def test_the_json_retry_carries_the_pass_effort(mocker):
     """D5: a retry is the SAME pass continuing, so the corrective
-    continue_conversation carries the pass's effort too -- the same
+    retry carries the pass's effort too -- the same
     reasoning that already gives it the budget, the context and the
     authorization."""
     from uuid import uuid4
@@ -2342,17 +2339,13 @@ def test_the_json_retry_carries_the_pass_effort(mocker):
         resp.thread_id = fake_thread_id
         return resp
 
-    def fake_continue(*, thread_id, message, system_prompt, model,
-                      provider_name="ANTHROPIC", **kwargs):
+    def fake_correction(**kwargs):
         retry_efforts.append(kwargs.get("effort", "ABSENT"))
-        resp = make_model_response(text="still not json")
-        resp.thread_id = thread_id
-        return resp
+        return make_model_response(text="still not json")
 
-    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
-                        side_effect=pass_stream(fake_run_dr_mode))
-    mocker.patch.object(RunAgentLoop, "continue_conversation",
-                        side_effect=fake_continue)
+    mocker.patch.object(
+        RunAgentLoop, "stream_deep_research_mode",
+        side_effect=pass_and_corrections(fake_run_dr_mode, fake_correction))
 
     with pytest.raises(ValueError, match="did not return valid JSON"):
         run_pipeline(
