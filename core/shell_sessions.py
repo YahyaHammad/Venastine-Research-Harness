@@ -12,6 +12,17 @@ It differs in four places and nowhere else: its stdin is a pipe, its output
 passes through `core/ansi.py` first, it does not block the user's prompt
 (SS25), and its end is HELD rather than woken for (SS31).
 
+A FOURTH KIND SINCE ROADMAP_v3 §100: `subagent`, a background spawn. It is
+not a process at all -- it is a child agent run on a thread of its own --
+and it is here because the owner chose that it be COUNTED, LISTED, STOPPED
+AND WOKEN FOR exactly as a background shell is (BG2): one cap, one inbox,
+one post-turn wait, one kill path, one quit. What differs is confined to
+`start_subagent` and `_supervise_subagent`: its `process` is a
+`_SubagentRun` whose kill is the child's own CancelToken, its output is the
+child's final answer and nothing before it (§18 D6), and its ids are `a1`,
+`a2`, ... from a counter of their own, so a row says which kind it is
+before anything else does.
+
 WHY IN core/. The TUI, the CLI and a sleeping subagent all consume what a
 session produces, and D12 keeps the CLI a permanent fallback -- so the
 lifecycle cannot live in tui/, and it is not a tool's to own either: three
@@ -71,6 +82,10 @@ logger = logging.getLogger(__name__)
 KIND_BACKGROUND = "background"
 KIND_MONITOR = "monitor"
 KIND_INTERACTIVE = "interactive"
+# ROADMAP_v3 §100 (BG2). A background subagent, which waits on the same
+# terms as a background shell: the agent that started it is waiting on its
+# answer, so it is a BLOCKING kind below, and it holds a slot of the cap.
+KIND_SUBAGENT = "subagent"
 
 # The kinds a post-turn wait waits on, and whose being live holds the
 # shell's commands (SS2; a plain message is not held since batch 265,
@@ -81,7 +96,7 @@ KIND_INTERACTIVE = "interactive"
 # which for an idle REPL it is not (SS25). One list, two questions, and
 # `_live_locked` takes the kinds so neither caller can drift into the
 # other's answer.
-BLOCKING_KINDS = frozenset({KIND_BACKGROUND, KIND_MONITOR})
+BLOCKING_KINDS = frozenset({KIND_BACKGROUND, KIND_MONITOR, KIND_SUBAGENT})
 
 STARTING = "starting"
 RUNNING = "running"
@@ -178,6 +193,19 @@ _MAX_LINE_CHARS = 16_000
 _READ_CHUNK = 65_536
 _FINISHED_KEPT = 20
 _KILL_SETTLE_S = 15
+# ROADMAP_v3 §100. How long a stopped background subagent is given to reach
+# its next cancel site before its session is finished without it. A cancel
+# token is read BETWEEN operations (core/cancel.py), so a child inside a
+# model call stops when that call returns, which on a slow provider is
+# minutes; the session cannot be held open that long without holding the
+# post-turn wait and the cap with it. Shorter than `_KILL_SETTLE_S`, so a
+# model's own `shell_kill` still gets its report when the child does stop
+# in time.
+_SUBAGENT_STOP_SETTLE_S = 10
+# How long `start_subagent` waits for the child's thread to exist, so the
+# started result can carry its id and the line that started it can open
+# the run while it is still going (§47). Creating a thread is one insert.
+_SUBAGENT_THREAD_WAIT_S = 10.0
 # How much of a finished session's output the sandbox's credential
 # quarantine is shown (`SessionProcess.note_exit`). A refused login or
 # sudo password is the first thing a session prints, because nothing
@@ -456,6 +484,10 @@ class WakeEvent:
     # without asking the manager for a session it may have pruned.
     pattern: Optional[str] = None
     timeout_s: int = 0
+    # ROADMAP_v3 §100. A background subagent's agent name and the id of the
+    # thread it ran in, so a wake can name both. Empty for every other kind.
+    agent: str = ""
+    child_thread: str = ""
 
 
 @dataclass(frozen=True)
@@ -488,6 +520,11 @@ class SessionRow:
     # arrive in is not the order they end in. Last and defaulted, so a
     # row built by keyword elsewhere is still a whole row.
     finished_mono: Optional[float] = None
+    # ROADMAP_v3 §100, on `finished_mono`'s terms: last and defaulted. The
+    # spawned agent's name and its thread, for a background subagent's row
+    # -- the panel labels it with the first and opens the second.
+    agent: str = ""
+    child_thread: str = ""
 
 
 @dataclass
@@ -529,6 +566,9 @@ class _Session:
     # also holds when it reads the claim.
     kill_report_claimed: bool = False
     final_event: Optional[WakeEvent] = None
+    # Background subagent only (ROADMAP_v3 §100).
+    agent: str = ""
+    child_thread: str = ""
 
     def row(self) -> SessionRow:
         return SessionRow(
@@ -540,7 +580,8 @@ class _Session:
             started_wall=self.started_wall, timeout_s=self.timeout_s,
             match_count=self.match_count, output_chars=self.output.total,
             ran_on=self.ran_on, tier=self.tier, return_code=self.return_code,
-            finished_mono=self.finished_mono)
+            finished_mono=self.finished_mono, agent=self.agent,
+            child_thread=self.child_thread)
 
 
 @dataclass
@@ -588,6 +629,55 @@ def _default_starter(*args, **kwargs):
 
 
 
+#: Why a stopped background subagent stopped, as its own thread records it
+#: (core/cancel.py's reason). Keyed by the session's kill reason; a timeout
+#: is `_stop_reason`'s own sentence because it names the number.
+_SUBAGENT_STOPPED_BECAUSE = {
+    KILL_MODEL: "stopped by the agent that started it",
+    KILL_USER: "stopped by the user",
+    KILL_QUIT: "stopped when the harness quit",
+    KILL_OWNER_FAILED: "stopped because the run that started it failed",
+    KILL_WAKE_LIMIT: ("stopped because the run that started it ran out of "
+                      "wakes"),
+}
+
+
+class _SubagentRun:
+    """What `_Session.process` is for a background subagent (§100).
+
+    The manager asks a session's process for three things -- `kill()`,
+    `ran_on` and `tier` -- and `close()` and `kill()` call the first
+    without knowing the kind. So this is the one object that has to look
+    like a process, and the only thing its kill can do is ASK: the child is
+    cooperative (core/cancel.py), and the token is the child's own.
+
+    `settled` is set once the child's thread exists or the child has ended,
+    whichever is first; `start_subagent` waits on it. `stopping` tells the
+    supervisor a kill arrived; `done` and `code` are the child's end.
+    """
+
+    ran_on = ""
+    tier = ""
+
+    def __init__(self, cancel, reason: Callable[[], str]) -> None:
+        self._cancel = cancel
+        self._reason = reason
+        self.settled = threading.Event()
+        self.stopping = threading.Event()
+        self.done = threading.Event()
+        self.code: Optional[int] = None
+
+    def kill(self) -> None:
+        self.stopping.set()
+        if self._cancel is not None:
+            self._cancel.cancel(self._reason())
+
+    def finished(self, code: int) -> None:
+        self.code = code
+        self.done.set()
+        self.settled.set()
+
+
 def _new_prompt_token() -> str:
     """One interactive session's prompt token (SS34).
 
@@ -616,6 +706,10 @@ class SessionManager:
         self._sessions: dict[str, _Session] = {}
         self._inboxes: dict[str, _Inbox] = {}
         self._ids = itertools.count(1)
+        # ROADMAP_v3 §100, the owner's call: a background subagent's id must
+        # not read as a shell's, so it is `a<n>` from a counter of its own.
+        # Two prefixes cannot collide, so the table stays keyed by id alone.
+        self._agent_ids = itertools.count(1)
         self._closing = False
         self._sink: SessionActivity = NULL_SINK
 
@@ -678,8 +772,13 @@ class SessionManager:
         else:
             mine = (" None of them is this conversation's, so wait for one "
                     "to finish.")
+        # "background shells and background subagents" since ROADMAP_v3
+        # §100: both hold a slot of this one cap (BG2), so a refusal that
+        # named shells alone would send the agent looking for a shell that
+        # is not there.
         return (f"{len(live)} background sessions are already running, which "
-                f"is the limit, shared with any subagents.{mine}")
+                f"is the limit, shared by background shells and background "
+                f"subagents, yours and any subagent's.{mine}")
 
     def start(self, *, kind: str, command: str, profile, docker_available: bool,
               requested_timeout_s: int, owner_thread, workspace_dir: str,
@@ -817,6 +916,8 @@ class SessionManager:
 
     def _started_result(self, session: _Session) -> dict:
         cap = int(config.SHELL_SESSION_TIMEOUT_CAP_S)
+        if session.kind == KIND_SUBAGENT:
+            return self._subagent_started(session, cap)
         if session.kind == KIND_INTERACTIVE:
             idle = int(config.SHELL_SESSION_IDLE_TIMEOUT_S)
             note = (
@@ -845,6 +946,184 @@ class SessionManager:
         if session.kind == KIND_MONITOR:
             result["pattern"] = session.pattern
         return result
+
+    # -- background subagents (ROADMAP_v3 §100) ----------------------------------
+
+    def start_subagent(self, *, task: str, agent: str, owner_thread,
+                       call_id: str, run: Callable, cancel,
+                       thread_wait_s: float = _SUBAGENT_THREAD_WAIT_S) -> dict:
+        """Start a background subagent as a session and return what the
+        spawning agent is told (BG1, BG2). Raises SessionRefused.
+
+        `run(on_thread)` is the child's whole run: the span, the loop, any
+        sleep for its own sessions (SS9). It is called on a thread of its
+        own, INSIDE A COPY OF THE CALLER'S CONTEXT -- the reason
+        `_dispatch_parallel` submits through `copy_context()`: the child's
+        span finds its real parent through a ContextVar, and so does SS17's
+        consumer mark. It calls `on_thread(thread_id)` once its thread
+        exists and returns the child's final text.
+
+        `cancel` is the CHILD'S OWN CancelToken, set by a kill, its timeout
+        and a quit, and by nothing else: the turn's escape leaves it running
+        (BG4), as it leaves a background shell running (§61 CN2).
+
+        Returns once the child's thread exists, bounded by `thread_wait_s`,
+        so the result can name it and the `▸ spawn_subagent` line opens
+        the run while it is still going (§47). A child that ends before
+        that point still returns a started result; how it ended arrives as
+        its wake, which is the one place a session's end is ever reported.
+        """
+        refusal = self.start_refusal(KIND_SUBAGENT, None, owner_thread)
+        if refusal:
+            raise SessionRefused(refusal)
+        # The session cap, unasked (BG7). A shell names its own timeout
+        # because only its author knows how long a command takes; a child
+        # agent is bounded by its steps and its spend already, and the cap is
+        # the backstop that keeps a wedged one from holding the wait forever.
+        timeout_s = int(config.SHELL_SESSION_TIMEOUT_CAP_S)
+        span = agent_activity.current()
+        with self._lock:
+            refusal = self._capacity_refusal_locked(owner_thread)
+            if refusal:
+                raise SessionRefused(refusal)
+            session = _Session(
+                id=f"a{next(self._agent_ids)}", kind=KIND_SUBAGENT,
+                command=task, rationale="", pattern=None,
+                owner_thread=str(owner_thread),
+                owner_agent=span.name if span else None,
+                owner_depth=span.depth if span else 0,
+                owner_span_id=span.id if span else None,
+                call_id=call_id or "",
+                requested_timeout_s=timeout_s, timeout_s=timeout_s,
+                capped=False,
+                output=OutputBuffer(int(config.SHELL_SESSION_OUTPUT_HEAD_CHARS),
+                                    int(config.SHELL_SESSION_OUTPUT_TAIL_CHARS)),
+                started_mono=self._clock(), started_wall=self._wall_clock(),
+                state=RUNNING, agent=agent or "")
+            session.process = _SubagentRun(
+                cancel, lambda: self._stop_reason(session))
+            self._sessions[session.id] = session
+            rows = self._rows_locked()
+        context = contextvars.copy_context()
+        threading.Thread(target=context.run,
+                         args=(self._run_subagent, session, run),
+                         name=f"subagent-session-{session.id}",
+                         daemon=True).start()
+        threading.Thread(target=self._supervise_subagent, args=(session,),
+                         name=f"subagent-session-{session.id}-supervisor",
+                         daemon=True).start()
+        self._post(rows)
+        session.process.settled.wait(thread_wait_s)
+        return self._started_result(session)
+
+    def _subagent_started(self, session: _Session, cap: int) -> dict:
+        """What the spawning agent is told about a background subagent.
+
+        THE NOTE IS AN INSTRUCTION ABOUT WAITING, because the failure it
+        exists to prevent is the one a model reaches for first: asking
+        again. The answer arrives as a harness message (SS5) whether the
+        agent polls or not, and the post-turn wait keeps the conversation
+        alive until it does, so ending the turn is the right move when
+        there is nothing else to do.
+        """
+        with self._lock:
+            child_thread = session.child_thread
+        note = (f"Runs in the background, so you can keep working. Its answer "
+                f"arrives as a harness message when it finishes: do not poll "
+                f"for it, and when you have nothing else to do, end your turn "
+                f"-- you will be woken with it. It is stopped if it runs "
+                f"longer than {session.timeout_s}s. If you have the "
+                f"shell_kill tool, it stops this one early by its session "
+                f"id.")
+        result = {"session": session.id, "kind": session.kind,
+                  "status": RUNNING, "agent": session.agent,
+                  "task": session.command, "timeout_s": session.timeout_s,
+                  "timeout_cap_s": cap, "note": note}
+        if child_thread:
+            result["subagent_thread_id"] = child_thread
+        return result
+
+    @staticmethod
+    def _stop_reason(session: _Session) -> str:
+        """What a stopped background subagent's own thread records as why
+        (core/cancel.py's `reason`), read when the stop happens."""
+        if session.timed_out:
+            return (f"stopped at its {session.timeout_s}s timeout as a "
+                    f"background session")
+        return _SUBAGENT_STOPPED_BECAUSE.get(
+            session.kill_reason, "stopped as a background session")
+
+    def _run_subagent(self, session: _Session, run: Callable) -> None:
+        """The child's thread: run it, keep its answer, say it ended.
+
+        A RAISE IS AN ANSWER HERE, not an escape. A blocking spawn's child
+        raises into `registry.dispatch`, which contains it as that call's
+        error result; this child has no call left to answer, so the error
+        becomes its output and its return code is 1, and the wake says it
+        failed. Logged first, because the wake carries the message and not
+        the traceback.
+
+        AN ANSWER THAT ARRIVES AFTER THE SESSION ENDED IS DROPPED, and
+        logged. That is a child stopped by a kill or its timeout that only
+        reached its next cancel site after `_SUBAGENT_STOP_SETTLE_S`: its
+        session was already reported as stopped, and appending to a
+        finished session's output would make `shell_output` disagree with
+        the wake that reported it.
+        """
+        process = session.process
+
+        def on_thread(thread_id) -> None:
+            with self._lock:
+                session.child_thread = str(thread_id)
+                rows = self._rows_locked()
+            process.settled.set()
+            self._post(rows)
+
+        code, text = 1, ""
+        try:
+            text = run(on_thread) or ""
+            code = 0
+        except Exception as e:                  # noqa: BLE001 -- reported
+            logger.exception("background subagent %s raised", session.id)
+            text = f"The subagent's run failed: {type(e).__name__}: {e}"
+        finally:
+            with self._lock:
+                late = session.state not in LIVE_STATES
+            if late:
+                logger.warning(
+                    "background subagent %s finished after its session was "
+                    "stopped; its answer (%d chars) was not kept",
+                    session.id, len(text))
+            else:
+                session.output.append(text)
+            process.finished(code)
+
+    def _supervise_subagent(self, session: _Session) -> None:
+        """`_supervise`'s job for a background subagent: its timeout, its
+        kill, and the one call to `_finish`.
+
+        A STOP IS A REQUEST. The kill sets the child's cancel token, which
+        the child reads between operations; this then gives it
+        `_SUBAGENT_STOP_SETTLE_S` to get there and finishes the session
+        with or without it. An answer that made it in time is kept and
+        reported with the stop.
+        """
+        process = session.process
+        deadline = session.started_mono + session.timeout_s
+        while not process.done.is_set():
+            remaining = deadline - self._clock()
+            if remaining <= 0:
+                with self._lock:
+                    if not session.kill_reason:
+                        session.timed_out = True
+                process.kill()
+                break
+            if process.stopping.is_set():
+                break
+            process.done.wait(min(remaining, self._poll_s))
+        if not process.done.is_set():
+            process.done.wait(_SUBAGENT_STOP_SETTLE_S)
+        self._finish(session, process.code if process.done.is_set() else None)
 
     # -- the two threads -------------------------------------------------------
 
@@ -1036,7 +1315,8 @@ class SessionManager:
             elapsed_s=round(self._clock() - session.started_mono, 1),
             ran_on=session.ran_on, tier=session.tier,
             kill_reason=session.kill_reason, pattern=session.pattern,
-            timeout_s=session.timeout_s)
+            timeout_s=session.timeout_s, agent=session.agent,
+            child_thread=session.child_thread)
 
     def _prune_locked(self) -> None:
         finished = sorted((s for s in self._sessions.values()
@@ -1252,14 +1532,24 @@ class SessionManager:
         with self._lock:
             sessions = [s for s in self._sessions.values()
                         if s.owner_thread == str(owner_thread)]
-            return [{"session": s.id, "kind": s.kind, "command": s.command,
-                     "status": s.state,
-                     "elapsed_s": round((s.finished_mono or now)
-                                        - s.started_mono, 1),
-                     "timeout_s": s.timeout_s, "return_code": s.return_code,
-                     "output_chars": s.output.total,
-                     "match_count": s.match_count}
-                    for s in sessions]
+            listed = []
+            for s in sessions:
+                entry = {"session": s.id, "kind": s.kind, "command": s.command,
+                         "status": s.state,
+                         "elapsed_s": round((s.finished_mono or now)
+                                            - s.started_mono, 1),
+                         "timeout_s": s.timeout_s,
+                         "return_code": s.return_code,
+                         "output_chars": s.output.total,
+                         "match_count": s.match_count}
+                # §100. A subagent's `command` is its task; the agent and
+                # its thread are what tell two runs of one task apart.
+                if s.kind == KIND_SUBAGENT:
+                    entry["agent"] = s.agent
+                    if s.child_thread:
+                        entry["subagent_thread_id"] = s.child_thread
+                listed.append(entry)
+            return listed
 
     def output(self, session_id: str, owner_thread, offset: int = 0,
                limit: Optional[int] = None) -> dict:
@@ -1496,6 +1786,10 @@ class SessionManager:
                   "output_truncated": event.output_truncated,
                   "note": "Stopped. This is its final report; you will not "
                           "be woken for it."}
+        if event.kind == KIND_SUBAGENT:
+            # §100. `output_tail` is its answer when one made it in before
+            # the stop, and empty otherwise; the agent names which run.
+            report["agent"] = event.agent
         if event.match_count:
             report["unreported_matches"] = {"count": event.match_count,
                                             "lines": list(event.lines)}

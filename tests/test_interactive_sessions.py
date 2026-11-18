@@ -1170,7 +1170,10 @@ class TestTheTwoCountsAreNotTheSameQuestion:
         assert time.monotonic() - started < 1.0
 
     def test_the_kinds_counted_are_named_once(self):
-        assert ss.BLOCKING_KINDS == {ss.KIND_BACKGROUND, ss.KIND_MONITOR}
+        # ROADMAP_v3 §100 (BG2): a background subagent is waited on like a
+        # background shell; an interactive shell still is not (SS25).
+        assert ss.BLOCKING_KINDS == {ss.KIND_BACKGROUND, ss.KIND_MONITOR,
+                                     ss.KIND_SUBAGENT}
         assert ss.KIND_INTERACTIVE not in ss.BLOCKING_KINDS
 
 

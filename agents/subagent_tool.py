@@ -20,6 +20,15 @@ inside a JSON blob in one message row, which nothing could query and
 replay skips. Stored on the child's own row, it survives the process and
 lets a `▸ spawn_subagent` line still open its run tomorrow.
 
+ROADMAP_v3 §100 adds `background`. With it true the spawn RETURNS AT ONCE
+and the child runs as a session of the shell-session manager (BG1, BG2):
+counted against the one cap, listed by `shell_sessions`, stopped by
+`shell_kill`, ctrl+b and quit, and reported as a wake turn (SS5) when it
+answers. Before it, a spawn blocked its parent until the child returned
+and NA9's parallelism existed only within one response -- §49 recorded
+both, and SS10 deferred this to its own section. The child's run is the
+same function either way (`_child_run`); what differs is who waits for it.
+
 core.loop is imported INSIDE run(), not at module top: tools/registry.py
 imports this module to register it, and core.loop imports tools.registry
 -- a top-level import here would close that cycle at import time.
@@ -50,6 +59,20 @@ TOOL_SCHEMA = {
                 "type": "string",
                 "description": "The self-contained task description the "
                                "subagent receives as its first message.",
+            },
+            # ROADMAP_v3 §100 (BG1). Optional, and false when absent, so a
+            # model that never names it gets the blocking spawn it always
+            # got.
+            "background": {
+                "type": "boolean",
+                "description": "false (the default) waits for the "
+                               "subagent's answer. true starts it and "
+                               "returns at once with a session id, so you "
+                               "can keep working or start others; its "
+                               "answer arrives later as a harness message. "
+                               "Do not poll for it: when you have nothing "
+                               "else to do, end your turn and you will be "
+                               "woken.",
             },
         },
         "required": ["agent_name", "task"],
@@ -177,6 +200,19 @@ def refusal_reason(params: dict, context=None):
         return (f"{name!r} is not an agent this one may spawn. "
                 f"Available here: "
                 f"{', '.join(sorted(parent.spawn_targets)) or 'none'}.")
+    # ROADMAP_v3 §100, after everything above: whether THIS agent may be
+    # spawned is the same question in both modes, and only then is it worth
+    # asking whether it can run in the background. Here, not in run(), for
+    # A7's reason -- a spawn the cap or the run's shape will refuse must be
+    # refused BEFORE a human is asked to sign it off.
+    background = params.get("background", False)
+    if not isinstance(background, bool):
+        return "spawn_subagent's 'background' must be true or false."
+    if background:
+        from core import shell_sessions
+
+        return shell_sessions.sessions.start_refusal(
+            shell_sessions.KIND_SUBAGENT)
     return None
 
 
@@ -196,6 +232,16 @@ def approval_notice(params: dict, context=None) -> str:
         return ""
     child = manager.child_context(agent, context or ToolContext())
     candidates = manager.candidate_approvals(child)
+    # ROADMAP_v3 §100. A background child outlives the turn that spawns it,
+    # so "the rest of this turn" would understate what a yes covers: the
+    # grant is the child's, for its whole run.
+    if params.get("background") is True:
+        if not candidates:
+            return (f"{agent.name} runs in the background and needs no "
+                    f"approval-gated tools.")
+        listed = "\n".join(f"  - {name}" for name in candidates)
+        return (f"{agent.name} runs in the background and may use these "
+                f"without asking again, for the whole of its run:\n{listed}")
     if not candidates:
         return f"{agent.name} needs no approval-gated tools."
     listed = "\n".join(f"  - {name}" for name in candidates)
@@ -264,11 +310,7 @@ def run(params: dict, parent_context=None, parent_run=None,
         response_channel=None, signoff=None, activity=None,
         memory=None, call_id=None, cancel=None) -> dict:
     from agents.manager import manager
-    from core.loop import (
-        DEFAULT_SYSTEM_PROMPT,
-        RunAgentLoop,
-        with_persona,
-    )
+    from core.loop import DEFAULT_SYSTEM_PROMPT, with_persona
 
     parent = parent_context or ToolContext()
     # §32 A7. The SAME function the loop consulted before deciding
@@ -333,6 +375,18 @@ def run(params: dict, parent_context=None, parent_run=None,
     # that number and a second one would be free to disagree with it.
     from core import shell_sessions
 
+    background = params.get("background") is True
+    # ROADMAP_v3 §100 (BG4). A background child gets a token of its OWN,
+    # set by its kill, its timeout and a quit. The turn's token stops the
+    # turn; handing it to a child that outlives the turn would make escape
+    # stop work the owner chose to leave running, as it leaves a background
+    # shell running (§61 CN2). A blocking child still shares the turn's
+    # (CN7), because it is part of the turn.
+    if background:
+        from core.cancel import CancelToken
+
+        cancel = CancelToken()
+
     # ROADMAP_v3 §49 (SS9). Everything the child's first turn and any wake
     # turn after it share. A wake IS that run continuing -- the same
     # prompt, context, channel, grant and sink -- so the two calls take one
@@ -370,6 +424,49 @@ def run(params: dict, parent_context=None, parent_run=None,
         # already asked to end.
         cancel=cancel,
     )
+    if not background:
+        response = _child_run(agent, task, child, common, activity=activity,
+                              memory=memory, call_id=call_id)
+        return {
+            "result": response.text,
+            "subagent_thread_id": str(response.thread_id),
+        }
+    # ROADMAP_v3 §100 (BG1, BG2). The same run, on a session's thread. The
+    # owner is the PARENT'S thread, because that is the conversation its
+    # answer wakes; a run with no thread has nothing to wake, which is
+    # every caller that reaches run() directly rather than through
+    # dispatch.
+    owner = getattr(memory, "thread_id", None)
+    if owner is None:
+        return {"error": "A background spawn needs a conversation to report "
+                         "to, and this run has none. Spawn it without "
+                         "background."}
+    try:
+        return shell_sessions.sessions.start_subagent(
+            task=task, agent=agent.name, owner_thread=owner,
+            call_id=call_id or "", cancel=cancel,
+            run=lambda on_thread: _child_run(
+                agent, task, child, common, activity=activity,
+                memory=memory, call_id=call_id, on_thread=on_thread).text)
+    except shell_sessions.SessionRefused as e:
+        return {"error": str(e)}
+
+
+def _child_run(agent, task, child, common: dict, *, activity, memory,
+               call_id, on_thread=None):
+    """One spawned child's whole run, blocking or background, returning
+    the response it ends on.
+
+    ONE COPY FOR BOTH MODES (ROADMAP_v3 §100). A background spawn calls
+    this on a session's thread and a blocking one on the caller's; the
+    span, the consumer mark, the parent edge, SS9's sleep and the failure
+    sweep are the same either way, which is the point -- a child that
+    behaved differently depending on who waited for it would be the
+    /agent-against-spawn divergence §18 S1 removed.
+    """
+    from core import shell_sessions
+    from core.loop import RunAgentLoop
+
     with agent_activity.span(activity, agent.name, child.subagent_depth,
                              call_id) as span:
         # ROADMAP_v3 §49 (SS17). The child is a wake CONSUMER: a session it
@@ -402,6 +499,13 @@ def run(params: dict, parent_context=None, parent_run=None,
                     thread_parent=getattr(memory, "thread_id", None),
                     thread_parent_call=call_id,
                     thread_agent=agent.name,
+                    # §100. Passed ONLY for a background spawn, the rule
+                    # `backend` follows in core/shell_sessions.py: a
+                    # blocking spawn learns the thread from the response it
+                    # waits for, and a stand-in written before this
+                    # argument existed still sees the call it always saw.
+                    **({"on_thread": on_thread} if on_thread is not None
+                       else {}),
                     **common,
                 )
                 # SS9. The child does not answer its parent while its own
@@ -421,10 +525,7 @@ def run(params: dict, parent_context=None, parent_run=None,
                 shell_sessions.sessions.kill_by_span(
                     span.id, shell_sessions.KILL_OWNER_FAILED)
                 raise
-    return {
-        "result": response.text,
-        "subagent_thread_id": str(response.thread_id),
-    }
+    return response
 
 
 def _sleep_for_sessions(response, common: dict):

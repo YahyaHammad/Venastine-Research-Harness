@@ -100,11 +100,20 @@ def _start(name="shell_background", params=None, memory=None, call_id="c1"):
 
 class TestRegistration:
 
-    def test_all_five_are_registered_and_ship_disabled(self):
+    def test_all_seven_are_registered_and_only_the_three_that_start_nothing_ship_on(
+            self):
+        """SS11 as amended by ROADMAP_v3 §100 (BG6): the tools that START a
+        session or TYPE INTO one ship off; the three that list, read and
+        stop the conversation's own sessions ship on, because a background
+        subagent is a session and they are how the agent sees and stops
+        one."""
         permissions = config.ToolPermissions()
         for name in NAMES:
             assert name in registry._tools, name
+        for name in STARTERS + ("shell_input",):
             assert getattr(permissions, name) is False, name
+        for name in ("shell_sessions", "shell_output", "shell_kill"):
+            assert getattr(permissions, name) is True, name
 
     def test_only_the_start_tools_skip_the_approvals_table(self):
         """SS11/SS16: starting a session is a command, so it is gated by
@@ -324,15 +333,20 @@ class TestAdvertisement:
 
         assert set(NAMES) <= advertised
 
-    def test_still_hidden_by_the_permission_alone(self, monkeypatch):
-        """The shipped install: enabling nothing must not depend on the
-        consumer rule having noticed."""
+    def test_the_shipped_install_offers_only_the_three_that_start_nothing(
+            self, monkeypatch):
+        """The shipped install, in a run that will be woken: nothing that
+        starts or types into a session is offered, and that must not depend
+        on the consumer rule having noticed. Since ROADMAP_v3 §100 (BG6) the
+        three that list, read and stop ARE offered -- a background subagent
+        is a session they reach."""
         set_posture(monkeypatch, shell_approval_mode="never")
 
         with ss.consuming():
             advertised = {s["name"] for s in registry.schemas(None)}
 
-        assert not advertised & set(NAMES)
+        assert not advertised & set(STARTERS + ("shell_input",))
+        assert {"shell_sessions", "shell_output", "shell_kill"} <= advertised
 
 
 # ===========================================================================

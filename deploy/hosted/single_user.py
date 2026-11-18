@@ -52,7 +52,10 @@ _PRIVATE_STATUSES = frozenset({401, 403, 404})
 # What single-user mode turns on. Interactive sessions are not in it: they
 # need Docker or Podman, which no Space has, and there is no fallback for
 # them -- enabling the permission would only advertise a tool that always
-# fails.
+# fails. shell_sessions, shell_output and shell_kill ship on since
+# ROADMAP_v3 §100 (BG6) and stay listed, so this mode does not rest on a
+# default that could change again; writing a value that is already set is
+# a no-op (`unlock_config` writes only what differs).
 UNLOCKED = (
     "tool_permissions.read",
     "tool_permissions.write",

@@ -198,7 +198,9 @@ class InputParams(BaseModel):
 
 class OutputParams(BaseModel):
     session: str = Field(..., min_length=1,
-                         description="The session id, such as \"s1\".")
+                         description=("The session id, such as \"s1\" (a "
+                                      "shell command) or \"a1\" (a background "
+                                      "subagent)."))
     offset: StrictInt = Field(
         default=0, ge=0,
         description=("The character to start from. Use `next_offset` from the "
@@ -211,12 +213,15 @@ class OutputParams(BaseModel):
 
 class KillParams(BaseModel):
     session: str = Field(..., min_length=1,
-                         description="The session id, such as \"s1\".")
+                         description=("The session id, such as \"s1\" (a "
+                                      "shell command) or \"a1\" (a background "
+                                      "subagent)."))
 
 
 _SHARED = (
     f"At most {config.SHELL_SESSION_MAX_LIVE} sessions run at once, shared with "
-    "any subagents. While one of yours runs the user can still message you: "
+    "background subagents and with any subagent's sessions. While one of "
+    "yours runs the user can still message you: "
     "each message is a turn of its own, and a result that lands meanwhile "
     "wakes you after it. Read output with shell_output and stop a session "
     "with shell_kill.")
@@ -254,7 +259,8 @@ MONITOR_TOOL_SCHEMA = _schema(
 
 _INTERACTIVE_SHARED = (
     f"At most {config.SHELL_SESSION_MAX_LIVE} sessions run at once, shared "
-    "with any subagents. Unlike a background command an open shell does "
+    "with background subagents and with any subagent's sessions. Unlike a "
+    "background command an open shell does "
     "NOT block the user, and nothing wakes you when it closes -- so close "
     "it with shell_kill when you are done. It closes itself after "
     f"{config.SHELL_SESSION_IDLE_TIMEOUT_S}s with nothing typed into it.")
@@ -287,30 +293,43 @@ INPUT_TOOL_SCHEMA = _schema(
     "command's.",
     InputParams, ("session",))
 
+# ROADMAP_v3 §100. These three also see BACKGROUND SUBAGENTS -- a
+# `spawn_subagent` with `background: true` is a session of kind `subagent`,
+# id `a1`, `a2`, ... -- and since BG6 they ship enabled while the tools
+# that start a shell session do not, so for a stock install a background
+# subagent is the only session they ever list. The descriptions say so,
+# because a model told only about shell commands would not look here for
+# its children.
 SESSIONS_TOOL_SCHEMA = {
     "name": "shell_sessions",
     "description": (
-        "List this conversation's background and monitor sessions: id, kind, "
-        "command, status, elapsed time, timeout, exit code, how much output "
-        "each has written and how many lines matched. Finished sessions stay "
-        "listed for a while."),
+        "List this conversation's background sessions: background and "
+        "monitor shell commands, and background subagents (kind "
+        "\"subagent\", ids a1, a2, ...). For each: id, kind, command (a "
+        "subagent's task), status, elapsed time, timeout, exit code, how "
+        "much output each has written and how many lines matched. Finished "
+        "sessions stay listed for a while."),
     "input_schema": {"type": "object", "properties": {}, "required": []},
 }
 
 OUTPUT_TOOL_SCHEMA = _schema(
     "shell_output",
     "Read one of this conversation's background sessions' output by character "
-    f"offset. Only its first {config.SHELL_SESSION_OUTPUT_HEAD_CHARS} and most "
-    f"recent {config.SHELL_SESSION_OUTPUT_TAIL_CHARS} characters are kept; a "
-    "page that reaches the dropped middle says where the gap is and continues "
-    "past it. Output is not kept after the harness exits.",
+    "offset -- for a background subagent, its answer, which is there once it "
+    f"has finished. Only the first {config.SHELL_SESSION_OUTPUT_HEAD_CHARS} and "
+    f"most recent {config.SHELL_SESSION_OUTPUT_TAIL_CHARS} characters are kept; "
+    "a page that reaches the dropped middle says where the gap is and "
+    "continues past it. Output is not kept after the harness exits.",
     OutputParams, ("session",))
 
 KILL_TOOL_SCHEMA = _schema(
     "shell_kill",
-    "Stop one of this conversation's background sessions. Returns its final "
-    "status, the end of its output and any matched lines you had not yet "
-    "been shown. You are not woken for a session you stopped yourself.",
+    "Stop one of this conversation's background sessions -- a shell command, "
+    "or a background subagent you no longer need. Returns its final status, "
+    "the end of its output and any matched lines you had not yet been shown. "
+    "A subagent stops at its next step, so one in the middle of a model call "
+    "finishes that call first. You are not woken for a session you stopped "
+    "yourself.",
     KillParams, ("session",))
 
 

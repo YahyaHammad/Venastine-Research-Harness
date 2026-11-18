@@ -1984,23 +1984,34 @@ the tool was added. Allowed by default, matching web_search -- it is
 already constrained by policy_enforcement's blocked-domain list and
 its output goes through secret redaction like every other tool's.
 
-#### `tool_permissions.shell_background` / `shell_monitor` / `shell_sessions` / `shell_output` / `shell_kill`  -- ship `false`
+#### `tool_permissions.shell_background` / `shell_monitor`  -- ship `false`
 
-ROADMAP_v3 §49 (SS11). The five background-session tools, shipped disabled
-for `shell`'s reason and not a weaker one: a session IS a shell command, and
-one that keeps running after the call that started it has been answered.
-Enabling them without `shell` is allowed and coherent -- a session is
-classified, approved and routed by exactly the same rules -- but a session
-also holds a container for as long as its timeout, holds the user's
-thread- and model-changing commands while it runs, and can wake the agent,
-so it is more authority rather than less.
+ROADMAP_v3 §49 (SS11). The two tools that START a background session,
+shipped disabled for `shell`'s reason and not a weaker one: a session IS a
+shell command, and one that keeps running after the call that started it
+has been answered. Enabling them without `shell` is allowed and coherent --
+a session is classified, approved and routed by exactly the same rules --
+but a session also holds a container for as long as its timeout, holds the
+user's thread- and model-changing commands while it runs, and can wake the
+agent, so it is more authority rather than less. They are approval-gated by
+`shell_approval_mode` alone (SS16) and have no `tool_approvals` key, exactly
+like `shell`.
 
-The two that START one are approval-gated by `shell_approval_mode` alone
-(SS16) and have no `tool_approvals` key, exactly like `shell`; the three
-that list, read and stop need no approval, because they act only on sessions
-this conversation already had approved. All five are additionally hidden
-wherever nothing would ever wake the run -- a research pass, or any run
-outside a chat turn or a subagent (SS17).
+#### `tool_permissions.shell_sessions` / `shell_output` / `shell_kill`  -- ship `true`
+
+ROADMAP_v3 §100 (BG6), amending SS11, which shipped them `false` beside the
+two above. They LIST, READ and STOP this conversation's own sessions and
+nothing else: none of them starts a process or types into one, so turning
+them on gives a stock install no way to run anything. They ship on because
+a background subagent (`spawn_subagent` with `background: true`) is a
+session, and these three are how the agent sees one and stops one it no
+longer needs; with every tool that starts a shell session off, a background
+subagent is the only session they can reach. They need no approval, because
+they act only on sessions this conversation started (see
+`tool_approvals.shell_sessions` below).
+
+All five are hidden wherever nothing would ever wake the run -- a research
+pass, or any run outside a chat turn or a subagent (SS17).
 
 #### `tool_permissions.spawn_subagent`  -- ships `true`
 

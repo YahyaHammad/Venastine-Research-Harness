@@ -1145,9 +1145,15 @@ hf_oauth_client_id: "3a823316-767d-4abe-8e55-6c0354ce2c27"
 # tool context can never widen it, so a false here cannot be re-enabled at
 # runtime by an agent, a skill or a settings file -- only by editing this
 # file. read / view_image / write / edit / shell ship false for that reason,
-# and so do the five background-session tools after shell: a session is a
-# shell command that keeps running, and enabling one without the others is
-# allowed but rarely useful. view_image follows read because it reads a file
+# and so do the four tools that START a session or TYPE INTO one
+# (shell_background, shell_monitor, shell_interactive, shell_input): a
+# session is a shell command that keeps running. shell_sessions,
+# shell_output and shell_kill ship TRUE since ROADMAP_v3 §100: they list,
+# read and stop this conversation's own sessions and cannot start or type
+# anything, and a background subagent (spawn_subagent with background: true)
+# is a session -- these are how the agent sees and stops one. With the four
+# above off, a background subagent is the only session they can ever reach.
+# view_image follows read because it reads a file
 # off disk the same way; it also needs a provider marked `accepts_images` in
 # providers.json before it is offered at all (ROADMAP_v3 §81, IM6).
 # Every registered tool must appear in BOTH tables or the harness refuses
@@ -1172,9 +1178,9 @@ tool_permissions:
   shell_monitor: false
   shell_interactive: false
   shell_input: false
-  shell_sessions: false
-  shell_output: false
-  shell_kill: false
+  shell_sessions: true
+  shell_output: true
+  shell_kill: true
   load_skill: true
   spawn_subagent: true
   pin: true

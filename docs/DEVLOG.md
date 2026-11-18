@@ -32553,3 +32553,88 @@ or workflow file changed, so pip-audit was not re-run. Nothing here branches on 
 WSL evidence is the owner's live run, observed before the change, not re-run after it.
 
 - **Version:** the branch's beta identity, `0.3.19-b.1.streaming-json-retry.re3a362319dd4`.
+
+## Batch 271 -- a subagent that runs while its parent works (ROADMAP_v3 §100) (2026-11-18)
+
+**Asked.** In chat mode, can the main agent spawn subagents and keep working, as `shell_background`
+lets it run a command? If not, give `spawn_subagent` a flag choosing between waiting for the child and
+going on: "the entire point of subagents is to be able to parallelize work". Checked against the code
+first, then "design it".
+
+**What the code did.** A spawn blocked: the handler called `run_agent_conversation` and returned the
+child's text as the tool result, and the loop answers every call of a response before its next step.
+NA9 ran several spawns of one reply at once (up to `subagent_max_parallel`, 3), but the parent waited
+for all of them. §49 recorded both, and its SS10 deferred background subagents to a section of their
+own that nothing had taken up since batch 104.
+
+**Settled with the owner.** Five questions:
+- A `background` flag on `spawn_subagent`, over a separate tool (recommended).
+- Tracked as a session, with ids of a letter of their own, because `s<n>` already names a shell (the
+  owner's amendment to the recommended option).
+- A child that needs a human asks as a blocking one does (recommended).
+- Escape leaves it running, like a background shell (recommended).
+- `shell_sessions`, `shell_output` and `shell_kill` ship on. The owner asked first whether that would
+  let a stock install run anything; checked, it does not: the three reach the manager only through
+  `list_for`, `output` and `kill`, on the caller's own sessions.
+
+**Measured.** The CLI's single stdin reader had two takers once a child could ask from its own thread:
+the chat's wait polls the same line queue a question reads. With the real reader and the wait's real
+poll shape, an answer typed 0.3-0.7 s into a question went to the wait 1 time in 100; one typed within
+0.25 s of the question appearing went to the wait 46 times in 100, as a chat message to the model.
+With the read lock, 0 in 100.
+
+**Built.** BG1-BG10 (ROADMAP_v3 §100).
+- `core/shell_sessions.py`: the `subagent` kind, blocking, `a<n>` ids, `start_subagent` and its runner
+  and supervisor, `_SubagentRun`, the agent and thread on rows and events.
+- `core/session_wake.py`: a subagent's wake says it answered or failed and carries the answer under
+  `spawn_subagent`'s output policy.
+- `core/loop.py`: `on_thread` on `run_agent_conversation`.
+- `agents/subagent_tool.py`: the flag, its refusals before the sign-off, the sign-off's wording, the
+  background route, and `_child_run` shared by both modes.
+- `main.py`: `_StdinReader._read_lock`.
+- `tui/app.py`: the rows name the agent, a subagent row opens its run.
+- `tools/builtin/shell_sessions.py`, `config.yaml`, `CONFIG_ARCHITECTURE.md`: BG6.
+
+**Opened.** TECHNICAL_DEBT 124: four background children each fanning out three more is seventeen
+writers, past the sixteen at which `database.py` measured a lock.
+
+**Verified.** The full suite on Windows, in a venv built for this batch from main's pins (batch
+268's lost `pydantic` partway through this session: another session's scratchpad was being cleaned
+under it), with `AGENT_WORKSPACE` unset: 9895 passed, 88 skipped (9983: `main`'s 9936 and this
+batch's 47). Against main's production files, 40 of the new file's first 46 tests fail; the six
+that pass are controls and guards that held before too (a blocking spawn still waits and shares the
+turn's token, nothing that starts a session ships on, the three tools start nothing, the wait still
+reads when nothing is asked, a question from a thread reaches the TUI's modal). Four existing tests
+pinned what BG2 and BG6 change and now pin the new decisions; `tests/BREAKING_CHANGES.md` lists
+them. The run took 22:31 rather than the usual minute and a half: the owner's research run in WSL
+was loading the machine. The run before it, equally slow, failed three timing-bound tests (two
+compute-tool clock tests and a TUI teardown, `No screens on stack`) that pass on their own, and
+the documented count, which this one does not.
+
+The mutation pass ran on an export copy, after a green control. Its runner is `mutate271.py` in
+this session's scratchpad, and it killed 27 of 27:
+
+- a subagent not blocking, its ids from the shell counter, the cap not applied to it;
+- a kill not setting the child's token, the supervisor ignoring a stop, a late answer appended,
+  a raise not turned into an answer, the timeout never enforced, the started result not waiting
+  for the child's thread;
+- `on_thread` never called, or never handed to the child's run;
+- the flag ignored, the turn's token handed to a background child, the refusal before the sign-off
+  dropped, a non-boolean flag accepted, the parent's channel lost on the background route;
+- the wake's subagent block, its policy name, its failed wording or its summary line lost;
+- a question not holding the read lock, the wait or the chat prompt reading past it;
+- a subagent row opening a session view, the panel not naming the agent, a failure shown as an
+  exit code;
+- `shell_kill` shipped off.
+
+The first pass let one survive: with the thread wait removed, a child that reports its thread at
+once still won the race, so `test_the_started_result_waits_for_a_slow_thread` was added and the
+row run again.
+
+ruff is clean. bandit 1.9.4 reports 47 live findings and none new, and `bandit-count-check.py`
+finds no baselined (file, test) pair grown. gitleaks 8.30.1 on an export of the tracked and new
+files finds nothing. No requirements or workflow file changed, so pip-audit was not re-run. Nothing
+here branches on the platform except the CLI reader's terminal flush, which this batch does not
+change. Not run against a live provider: every model in the new tests is scripted.
+
+- **Version:** the branch's beta identity, `0.3.20-b.1.background-subagents.r74780fef5406`.
