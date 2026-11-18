@@ -3320,7 +3320,7 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   and source files are out of scope entirely — widening to those turns it into
   `read` with no gate. But the set is not small: the tool takes a PATH, resolves
   anywhere under the project, and admits `.md`/`.markdown`/`.rst`/`.txt` plus ten
-  named build files, which on a clean checkout of this repository is **68 files
+  named build files, which on a clean checkout of this repository is **69 files
   and under 6 MB at depths 0-3**, including every agent and skill body under
   `agents/builtin/` and `skills/builtin/` and the whole of `docs/`. The 61st is
   `docs/REVIEW_MARATHON.md` (batch 129), and the per-scope review reports it
@@ -3342,7 +3342,10 @@ is gone outright, not kept as a fallback. `doc_path()` is one join now.
   `scripts/plugin-ci-requirements.txt` (batch 252), read before it was counted:
   the pinned names, versions and hashes of the pytest a plugin's own tests run
   with in CI, and a comment saying how to make it again, no configuration or
-  executable content. **It said 40
+  executable content. The 69th is `scripts/plugin-review-requirements.txt`
+  (batch 275), read before it was counted: PyYAML's pin and the hash of
+  every file it ships, which the plugin review job installs with
+  `--require-hashes`, no configuration or executable content. **It said 40
   files and ~1.1 MB until batch 128**, when it was re-measured through the
   tool's own `is_readable_doc` at 60 files and 3.58 MB -- a 3.3x
   understatement, and almost all of the growth is this record: `DEVLOG.md`

@@ -32164,3 +32164,35 @@ pushes this branch.
 - **Gates:** ruff is clean. bandit's exit is 0, and its count check is green (62 pairs).
 - **Not run:** GitHub Actions itself; the workflow change is checked by its tests, which parse
   it.
+
+## Batch 276 -- PR #287's first CI run on the security round's fixes (2026-11-18)
+
+The owner pushed batches 272-275, and four jobs failed: `pytest`, `py313-info` and
+`docs-consistency` on one test, and `integration` on another. Two causes, neither in the
+plugin code.
+
+**What failed, and why:**
+- **`test_the_documented_doc_read_bound_is_not_understated`** (three jobs). Batch 275 added
+  `scripts/plugin-review-requirements.txt`, a tracked `.txt`, so `read_project_doc` reaches
+  69 files on a clean checkout and AGENTS.md said 68. The file was read before it was counted:
+  PyYAML's pin and the hash of every file it ships, no configuration or executable content.
+  AGENTS.md now says 69 and names it as the 69th, and PL37's row carries the figure's history
+  one step further.
+- **Why batch 275's own full run was green:** the gate counts tracked files only (`git
+  ls-files`), and that run ran before the new file was added to git. It was untracked, so it
+  was not counted. A gate that asks git what ships has to run on what will ship: staged, or
+  better, committed.
+- **`integration`: an error at the teardown of `test_the_image_holds_exactly_the_bundles_files`**,
+  which itself passed. The suite's home guard found uv's managed Python under
+  `~/.local/share/uv/python`. This is the failure main fixed in `a0de145` (batch 256):
+  `ubuntu-latest` is 26.04, with no Python 3.12, and the bundle's locks are compiled for 3.12,
+  so uv downloads one into the home. This branch starts at 0.3.13, before that fix. The fix is
+  carried over word for word, `UV_PYTHON_INSTALL_DIR` sent to `tmp_path`, so a later merge of
+  main meets the same text on both sides. `scripts/build_demo_bundle.py` is identical to the
+  one `a0de145` was measured against.
+
+**Verification:**
+- The docs gate fails before the change (69 against 68) and passes after it.
+  `tests/test_docs_consistency.py` and `tests/test_demo_bundle.py` pass; ruff is clean.
+- **Not run:** the bundle image test itself, which needs a Docker daemon. Its fix is main's,
+  measured there in WSL by hiding 3.12 from PATH.
