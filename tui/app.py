@@ -700,6 +700,13 @@ def _panel_outcome(row) -> tuple[str, str]:
     """
     if row.state in shell_sessions.LIVE_STATES:
         return "running", ""
+    if row.state == shell_sessions.EXITED \
+            and row.kind == shell_sessions.KIND_SUBAGENT:
+        # ROADMAP_v3 §100. A background subagent that returned answered;
+        # one whose run raised failed, and `1` is not a code anyone looks
+        # up -- it is `_run_subagent`'s word for "raised".
+        return (("done", "") if row.return_code == 0
+                else ("failed", "error"))
     if row.state == shell_sessions.EXITED:
         if row.return_code is None:
             return "failed", "exited"
@@ -728,9 +735,17 @@ def _panel_rows(rows) -> list[dict]:
     for row in rows:
         matches = (f" {row.match_count}✓"
                    if row.kind == "monitor" and row.match_count else "")
+        # ROADMAP_v3 §100. A background subagent's row leads with WHICH
+        # agent, then its task: the task is the `command` it was given, and
+        # two children of one turn often share an agent and differ only
+        # there.
+        named = (f" {row.agent}:"
+                 if row.kind == shell_sessions.KIND_SUBAGENT and row.agent
+                 else "")
         status, outcome = _panel_outcome(row)
         out.append({"id": row.id,
-                    "label": f"{row.id}{matches} {_redacted_command(row)}",
+                    "label": (f"{row.id}{matches}{named} "
+                              f"{_redacted_command(row)}"),
                     "status": status, "outcome": outcome})
     return out
 
@@ -746,12 +761,17 @@ def _kill_rows(rows) -> list[dict]:
     for row in rows:
         command = _redacted_command(row)
         elapsed = max(0, int(time() - row.started_wall))
+        # §100: a background subagent says which agent, as its panel row
+        # does.
+        kind = (f"{row.kind} {row.agent}"
+                if row.kind == shell_sessions.KIND_SUBAGENT and row.agent
+                else row.kind)
         out.append({
             "id": row.id,
             # The id leads: it is what `/kill <id>` and the model's own
             # `shell_kill` both take, so the picker teaches the name of
             # the thing it is stopping.
-            "label": f"{row.id}  {row.kind}  {elapsed}s  {command}",
+            "label": f"{row.id}  {kind}  {elapsed}s  {command}",
         })
     return out
 
@@ -2597,6 +2617,13 @@ class VenastineApp(App):
             self._visible_transcript.write_system(
                 f"Session {session_id} is no longer here — it finished and "
                 f"aged out. Its result is on the line that started it.")
+            return
+        if row.kind == shell_sessions.KIND_SUBAGENT and row.child_thread:
+            # ROADMAP_v3 §100. A background subagent's view IS its run, and
+            # §47 already draws a run: the same viewer its agent-panel row
+            # and its `▸ spawn_subagent` line open. A session view would
+            # show only the answer, which the wake already carries.
+            self.open_agent_thread(row.child_thread)
             return
         self._paint_session_view(row)
         self._viewing = (_VIEW_LIVE, str(session_id))

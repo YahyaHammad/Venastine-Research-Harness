@@ -6680,6 +6680,27 @@ documentation or a measured probe: send a request without the older reasoning an
 it is accepted and answered as well. The other lever, compressing request bodies, needs the
 provider to accept a compressed body, which is not measured either.
 
+## 124. Background subagents can raise the database's concurrent writers past the measured clean point (open, found batch 271)
+
+**What changed.** Before ROADMAP_v3 §100 the most runs writing at once was one parent's NA9 group:
+`subagent_max_parallel` (3) children, with their parent waiting. A background subagent writes to its
+own thread while its parent keeps writing to its, and `shell_session_max_live` (4) of them can run at
+once, each able to run its own NA9 group of three blocking peers. That is up to 17 writers with the
+parent, from the shipped configuration.
+
+**What was measured, and when.** `database.py` records it for NA9: 200 messages per writer, WAL on,
+0 errors at 8 writers and one `database is locked` at 16. A lost write is a lost message rather than a
+slow one. Nothing has measured the shape §100 makes possible, where a model call sits between writes
+and the writes are therefore far sparser than that benchmark's.
+
+**Severity `S3`, `correctness`, reachable only at the edge.** Four background children that each
+fan out three more is a deliberate swarm, not a default; the benchmark's writers wrote back to back.
+
+**Shape, not done here.** Measure first, with the benchmark's harness at 17 writers and with a model
+call's pause between writes. If it locks, the cheap lever is the busy timeout (5000 ms today, stated
+in `database.py`); the structural one is a cap on concurrent runs across both mechanisms rather than
+one per mechanism.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both

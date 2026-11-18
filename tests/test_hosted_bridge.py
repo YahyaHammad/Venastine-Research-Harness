@@ -787,7 +787,13 @@ class TestTheSingleUserGate:
         target = tmp_path / "config.yaml"
         shutil.copyfile(config_schema.CONFIG_PATH, target)
         monkeypatch.setattr(config_schema, "CONFIG_PATH", str(target))
-        assert single_user.unlock_config() == list(single_user.UNLOCKED)
+        # What the shipped file has OFF, which is what the first unlock
+        # writes. Since ROADMAP_v3 §100 (BG6) three of UNLOCKED ship on, and
+        # they stay listed so single-user mode does not rest on a default.
+        shipped_off = [name for name in single_user.UNLOCKED
+                       if config_edit.file_value(name) is not True]
+        assert "tool_permissions.shell_kill" not in shipped_off
+        assert single_user.unlock_config() == shipped_off
         for name in single_user.UNLOCKED:
             assert config_edit.file_value(name) is True, name
         assert single_user.unlock_config() == []

@@ -1239,6 +1239,21 @@ class _StdinReader:
         # because the reasons differ -- stdin ENDED versus stdin is no
         # longer ours to read -- even though both answers are the same.
         self._released = False
+        # ROADMAP_v3 §100 (BG3). WHO MAY TAKE THE NEXT LINE. Until a
+        # background subagent could ask a question, every read of this queue
+        # happened on the chat's own thread, one after another, so "one
+        # reader at a time" held by construction. A background child asks
+        # from ITS thread while the chat's wait polls, or while the chat
+        # prompt waits, and a Queue hands a line to whichever `get` is
+        # waiting first -- measured, the wait took 1 answer in 100 and sent
+        # it to the model as a chat message.
+        #
+        # So a question HOLDS THIS LOCK FROM BEFORE ITS PROMPT IS PRINTED
+        # until its answer is read, and the two chat-side reads take it only
+        # for one short slice at a time. A line typed after the question
+        # appears can then only reach the question; a line typed before it
+        # is dropped by the drain, as it always was.
+        self._read_lock = threading.Lock()
 
     def _pump(self):
         try:
@@ -1364,31 +1379,36 @@ class _StdinReader:
             # word for that -- interaction.decode turns it into the
             # kind's declining default.
             return None
-        # §88 (A83): the terminal's own buffer first, and BEFORE the pump
-        # can start, so on a process's first ask() there is nothing left
-        # for it to read; then the queue, for what it already took.
-        self._flush_terminal()
-        self._start()
-        while True:                      # drop anything typed too late
+        # §100: the read lock before the flush, the drain and the prompt,
+        # so the chat's own reads have let go before anything can be typed
+        # in answer -- see `_read_lock` in __init__.
+        with self._read_lock:
+            # §88 (A83): the terminal's own buffer first, and BEFORE the
+            # pump can start, so on a process's first ask() there is
+            # nothing left for it to read; then the queue, for what it
+            # already took.
+            self._flush_terminal()
+            self._start()
+            while True:                      # drop anything typed too late
+                try:
+                    self._lines.get_nowait()
+                except _queue.Empty:
+                    break
+            print(prompt, end="", flush=True)
+            if self._ended():
+                # Nobody can answer, so waiting out a 600s deadline for an
+                # answer that cannot come is just a slower version of this.
+                print()
+                return None
             try:
-                self._lines.get_nowait()
+                line = self._lines.get(timeout=timeout)
             except _queue.Empty:
-                break
-        print(prompt, end="", flush=True)
-        if self._ended():
-            # Nobody can answer, so waiting out a 600s deadline for an
-            # answer that cannot come is just a slower version of this.
-            print()
-            return None
-        try:
-            line = self._lines.get(timeout=timeout)
-        except _queue.Empty:
-            print()
-            return None
-        if line is self._EOF:
-            print()
-            return None
-        return line
+                print()
+                return None
+            if line is self._EOF:
+                print()
+                return None
+            return line
 
     def readline(self, prompt: str) -> str:
         """The chat prompt and the one-shot startup prompts.
@@ -1431,10 +1451,28 @@ class _StdinReader:
             return self._read_inline()
         if self._ended():
             raise EOFError
-        line = self._lines.get()
+        line = self._take_slices()
         if line is self._EOF:
             raise EOFError
         return line.rstrip("\r\n")
+
+    #: How long one chat-side read holds `_read_lock` before letting a
+    #: question have it (§100). Short enough that a background subagent's
+    #: question appears without a visible pause.
+    _READ_SLICE_S = 0.1
+
+    def _take_slices(self):
+        """The next line, read in `_READ_SLICE_S` slices under the read lock
+        so a question can take the terminal between any two (§100). No
+        deadline: readline() has none (N2)."""
+        import queue as _queue
+
+        while True:
+            with self._read_lock:
+                try:
+                    return self._lines.get(timeout=self._READ_SLICE_S)
+                except _queue.Empty:
+                    pass
 
     def poll(self, timeout: float):
         """A line typed while the chat waits on background sessions, or
@@ -1461,10 +1499,20 @@ class _StdinReader:
         self._start()
         if self._ended():
             raise EOFError
+        # §100. A question holds the read lock for as long as it is on
+        # screen, and a line typed meanwhile is its answer -- so a wait that
+        # cannot have the lock at once waits out its slice WITHOUT reading,
+        # and says nothing arrived.
+        if not self._read_lock.acquire(blocking=False):
+            if timeout:
+                time.sleep(timeout)
+            return None
         try:
             line = self._lines.get(timeout=timeout)
         except _queue.Empty:
             return None
+        finally:
+            self._read_lock.release()
         if line is self._EOF:
             raise EOFError
         return line.rstrip("\r\n")
@@ -1520,23 +1568,26 @@ class _StdinReader:
                 return None
         except (AttributeError, ValueError):
             return None
-        self._start()
-        print(prompt, end="", flush=True)
-        if self._ended():
-            print()
-            return None
-        restore = _echo_off()
-        if restore is None:
-            print()
-            print("  [this terminal cannot hide what you type; "
-                  "nothing was read]")
-            return None
-        try:
-            line = self._lines.get()
-        finally:
-            restore()
-            # The newline the terminal did not echo on Enter.
-            print()
+        # §100: a secret is a question like any other, and the line typed
+        # into it must not be a chat message -- `_read_lock` in __init__.
+        with self._read_lock:
+            self._start()
+            print(prompt, end="", flush=True)
+            if self._ended():
+                print()
+                return None
+            restore = _echo_off()
+            if restore is None:
+                print()
+                print("  [this terminal cannot hide what you type; "
+                      "nothing was read]")
+                return None
+            try:
+                line = self._lines.get()
+            finally:
+                restore()
+                # The newline the terminal did not echo on Enter.
+                print()
         if line is self._EOF:
             return None
         return line.rstrip("\r\n")

@@ -53,6 +53,7 @@ from core.shell_sessions import (
     KILL_USER,
     KILL_WAKE_LIMIT,
     KILLED,
+    KIND_SUBAGENT,
     SHAPE_MATCHED,
     TIMED_OUT,
     SessionRow,
@@ -69,9 +70,14 @@ HARNESS_KILLED_AT_QUIT = "session_killed_at_quit"
 # the kill picker -- because the name decides which output policy redacts
 # the command, and a surface that guessed it would redact by a different
 # rule than the one the model is shown.
+#
+# ROADMAP_v3 §100: a background subagent is started by `spawn_subagent`, so
+# its task and its answer are redacted under that tool's name -- the name
+# its answer would have been redacted under had the spawn blocked.
 TOOL_FOR_KIND = {"background": "shell_background",
                  "monitor": "shell_monitor",
-                 "interactive": "shell_interactive"}
+                 "interactive": "shell_interactive",
+                 KIND_SUBAGENT: "spawn_subagent"}
 
 # The same mapping backwards, for a surface that has the tool name and
 # wants the kind. Derived rather than written out: two literals would be
@@ -144,6 +150,11 @@ def _redacted(event: WakeEvent, tail_budget: int) -> tuple[dict, bool]:
 
 
 def _what_happened(event: WakeEvent) -> str:
+    if event.kind == KIND_SUBAGENT and event.shape == EXITED:
+        # §100. A child that returned has ANSWERED; one whose run raised
+        # has failed, and its output is the error (`_run_subagent`). An
+        # exit code is a process's word and would read as one here.
+        return "answered" if event.return_code == 0 else "failed"
     if event.shape == SHAPE_MATCHED:
         noun = "line" if event.match_count == 1 else "lines"
         return f"matched {event.match_count} {noun} and is still running"
@@ -163,6 +174,9 @@ def _summary(events: list[WakeEvent]) -> str:
     without the body."""
     if len(events) == 1:
         event = events[0]
+        if event.kind == KIND_SUBAGENT:
+            return (f"Background subagent {event.session_id} "
+                    f"(`{event.agent}`) {_what_happened(event)}.")
         return f"Background session {event.session_id} {_what_happened(event)}."
     parts = "; ".join(f"{e.session_id} {_what_happened(e)}" for e in events)
     return f"{len(events)} background sessions reported: {parts}."
@@ -173,6 +187,9 @@ def _body(events: list[WakeEvent]) -> list[str]:
     blocks = []
     for event in events:
         clean, cut = _redacted(event, budget)
+        if event.kind == KIND_SUBAGENT:
+            blocks.append(_subagent_block(event, clean, cut))
+            continue
         where = where_ran(event.ran_on)
         block = [f"Session {event.session_id} ({event.kind}) `{clean['command']}`"
                  f" {_what_happened(event)} after {event.elapsed_s}s{where}."]
@@ -192,6 +209,30 @@ def _body(events: list[WakeEvent]) -> list[str]:
         block.append(f'Read more with shell_output, session "{event.session_id}".')
         blocks.append("\n".join(block))
     return blocks
+
+
+def _subagent_block(event: WakeEvent, clean: dict, cut: bool) -> str:
+    """One background subagent's part of a wake (ROADMAP_v3 §100).
+
+    ITS ANSWER AND NOTHING BEFORE IT, which is §18 D6 unchanged: the wake
+    carries what a blocking spawn's result would have carried, through the
+    same output policy (`_redacted`, under `spawn_subagent`'s name), and
+    the child's own steps stay in its own thread, which the thread id
+    names for a reader who wants them.
+    """
+    block = [f"Subagent {event.session_id} (`{event.agent}`), given "
+             f"`{clean['command']}`, {_what_happened(event)} after "
+             f"{event.elapsed_s}s."]
+    if clean["output_tail"]:
+        label = ("Its answer" if event.shape == EXITED and event.return_code == 0
+                 else "What it returned")
+        block.append(label + (" (the start is omitted)" if cut else "") + ":")
+        block.append(clean["output_tail"].rstrip("\n"))
+    else:
+        block.append("It returned no answer.")
+    block.append(f'Read the whole of it with shell_output, session '
+                 f'"{event.session_id}".')
+    return "\n".join(block)
 
 
 def _record(kind: str, events: Iterable) -> dict:

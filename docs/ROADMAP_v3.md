@@ -47,6 +47,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§97. Usage figures: the rate's clock, thoughts, k/M/B and `/usage`** - **(BUILT in batch 264)** (the completion line divided the output count by the whole turn, tools and the wait on background sessions included, and kept only the last wake turn's count; Google's output left out the thoughts; `billed` read in thousands past a million; and no cache count was read. The rate now divides by generating time while `took` stays the turn's time, thoughts count as output, the usage line writes k, M and B, and `/usage` shows four provider-reported rows for this thread in both shells, with input the whole prompt on every branch; UF1-UF5)
 - **§98. A failed research run, resumed where it stopped** - **(BUILT in batch 269)** (a run that failed or was abandoned could only be started again from Pass 0: the owner's failed after 4h53m in Pass 3a on an answer that was a complete array followed by a stray closing fence. Each stage now ends with a resume point, a pass's thread is recorded as it opens, and `/research --resume` or `--resume` skips every completed stage and continues the failed pass in its own thread -- its stored answer checked again with no model call, or the request it died on resent -- with the corpus rebuilt from the stored tool results, and the parser takes a fence at either end; RS1-RS9)
 - **§99. A pass being corrected is seen while it runs** - **(BUILT in batch 270)** (a JSON pass's corrective retry, and a prose pass's no-text one, reached the model through `continue_conversation`, which drains its own loop: the owner's resumed Pass 6b spent 25 minutes and 14 model calls correcting one answer with its tool count frozen and its row gone from the panel, and looked hung. A retry now goes through the pass's own entry point, so its tool calls, its row and its character total show as the attempt's do, its reason is saved and shown the moment the parse fails, and its fetched pages reach the corpus; SR1-SR6)
+- **§100. A subagent that runs while its parent works** - **(BUILT in batch 271)** (a spawn blocked its parent until the child answered, and NA9's parallelism existed only within one reply, so the main agent could not delegate and keep working; SS10 had deferred background subagents since §49. `spawn_subagent` takes `background: true`, which returns at once and runs the child as a session of kind `subagent` (ids `a1`, `a2`, ...) that shares the session cap, the post-turn wait, kill and quit, and wakes the parent with its answer; it asks for approval as a blocking child does, escape leaves it running, the CLI's reader gives a question the terminal, and `shell_sessions`, `shell_output` and `shell_kill` ship on; BG1-BG10)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -341,8 +342,8 @@ read.
 | **SS7** | **A monitor wakes on every matching line.** Matches arriving during a running turn coalesce into one wake; exit and timeout also wake; the shapes are `matched`, `exited`, `timed_out` and `killed` |
 | **SS8** | **Monitor patterns use RE2 (`google-re2`),** pinned exactly, imported by one module. An invalid pattern is refused before approval; the live stream is matched line by line; what is returned is redacted, not what is matched. Every legal document is updated with the pin |
 | **SS9** | **A subagent with live sessions sleeps inside its spawn call,** is woken there, then answers its parent. Nothing new crosses to the parent (D6); its sessions count toward the cap |
-| **SS10** | **Background subagents are their own section after slice 5,** reusing SS5 |
-| **SS11** | **Separate tools, each with its own `tool_permissions` flag shipped false:** `shell_background`, `shell_monitor`, `shell_sessions`, `shell_output`, `shell_kill`. Reading output and killing need no approval |
+| **SS10** | **Background subagents are their own section after slice 5,** reusing SS5 **Built in batch 271 as §100 (BG1-BG10):** a `background` flag on `spawn_subagent`, the child a session of kind `subagent` with `a<n>` ids, its answer a wake turn |
+| **SS11** | **Separate tools, each with its own `tool_permissions` flag shipped false:** `shell_background`, `shell_monitor`, `shell_sessions`, `shell_output`, `shell_kill`. Reading output and killing need no approval **Amended in batch 271 (2026-11-18), the owner's choice (§100, BG6):** `shell_sessions`, `shell_output` and `shell_kill` ship `true`. They list, read and stop this conversation's own sessions and start or type nothing, and a background subagent is a session they are how the agent sees and stops. The tools that start or type into a shell session still ship `false` |
 | **SS12** | **Defaults** (config.yaml, editable through `/config`, not frozen posture): a 3600 s timeout cap, 4 live sessions process-wide, 10 consecutive wakes, and each session's output kept in memory as its first 10 000 and last 190 000 characters |
 | **SS13** | **A timeout above the cap is clamped in one place,** and the started result says so |
 | **SS14** | **The sidebar shows live sessions only;** a finished session opens by ctrl+click on its inline tool-call line (NA6's pattern, resolved at press time) **Amended in batch 258, the owner's choice:** the sidebar shows every running session, then the five most recent finished ones, newest first, each marked `☑` (exit 0) or `☒` with its exit code, `killed`, `timed out` or `failed`, and a click opens either. Live-only was measured wrong in use: a session left the panel the moment it ended, and its end is the wake that starts the agent's next turn, so the row seemed to be taken by the turn and nothing on screen said which sessions had finished. The tool-call line still opens a session of any age |
@@ -559,7 +560,7 @@ the password becoming the command's input is SS72's stdin guard. The container i
    measured on two sudo implementations, with the flag and without it.
    §49 is complete.
 
-Then background subagents as their own section (SS10).
+Then background subagents as their own section (SS10). Built as §100 in batch 271.
 
 ### Gap register for the later slices
 
@@ -3066,6 +3067,117 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §100. A subagent that runs while its parent works
+
+**Added and built in batch 271, from the owner's question** (2026-11-18): in chat mode, can the main
+agent spawn subagents and keep working, the way `shell_background` lets it, and if not, could
+`spawn_subagent` take a flag choosing between blocking and that? "The entire point of subagents is
+to be able to parallelize work."
+
+### What the code did (2026-11-18)
+
+- **A spawn blocked its parent.** `agents/subagent_tool.py` called `run_agent_conversation` and
+  returned the child's final text as the tool result, and the loop answers every call of a response
+  before its next step (D20, NA11). §49 recorded it in *What the code could not do*.
+- **Parallelism existed only within one response.** NA9 runs consecutive `spawn_subagent` calls of
+  one reply on a pool of `subagent_max_parallel` (3), and the parent waits for all of them. A
+  non-parallel call between two spawns splits the group.
+- **It was planned and never built.** SS10 deferred background subagents to "their own section
+  after slice 5, reusing SS5". §49 finished in batch 104, and nothing took it up.
+- **Most of what it needs already existed**, for background shells: SS5's wake turn, the session
+  inbox that coalesces what lands mid-turn, the post-turn wait in both shells, SS2 as amended
+  (type while it waits), the wake limit, kill and quit, SS9's sleeping subagent.
+
+### What was measured
+
+- **The CLI's one reader had two takers.** A background child asks from its own thread while the
+  chat's wait polls the same line queue, and `Queue.get` hands a line to whichever reader is waiting
+  first. With the real `_StdinReader` and the wait's real poll shape (0.2 s, then 0 s), an answer
+  typed 0.3-0.7 s after the question started went to the wait 1 time in 100; one typed within
+  0.25 s of the question appearing went to the wait 46 times in 100, and reached the model as a
+  chat message. With the read lock (BG3), 0 in 100. A probe, `probe271_stdin.py`, against the
+  reader on main and on this branch.
+- **The three session tools start nothing.** `sessions_run`, `output_run` and `kill_run` reach the
+  manager only through `list_for`, `output` and `kill`, each scoped to the calling thread. The owner
+  asked for this to be checked before BG6, and a test now holds it.
+- **A question from a thread with no turn running reaches the TUI's modal.** The approval path is
+  `call_from_thread` from any worker, as §25's attended research already used it; a test drives it
+  with the app idle.
+
+### Decisions (BG1-BG10)
+
+| # | Decision |
+|---|---|
+| **BG1** | **A flag on `spawn_subagent`, `background`** (owner, over a separate tool as SS11 did for shells). False when absent, so a model that never names it gets the blocking spawn it always got. True returns at once with a session id, the agent, the task and the child's thread. Refused before the sign-off (A7) when it is not a boolean, when nothing would be woken (SS17), or when the cap is full; a blocking spawn is never refused by the cap |
+| **BG2** | **A background subagent is a session** (owner). It is a fourth kind, `subagent`, in the shell-session manager: one cap (`shell_session_max_live`, 4) shared with background shells, one inbox, the post-turn wait, `shell_sessions`, `shell_output`, `shell_kill`, ctrl+b, `/kill` and the quit confirmation, SS19's hold for a kill the user makes, SS20's wake limit, the sessions panel. **Its ids are `a1`, `a2`, ... from a counter of their own** (owner: `s<n>` already names a shell). Its `command` is its task and its output is its answer |
+| **BG3** | **A background child asks as a blocking one does** (owner, over the spawn-time grant only). It inherits the parent's response channel, so a question names the asking agent and can appear while the user types or the parent works. In the CLI, a question holds the reader's read lock from before its prompt is printed until its answer is read, and the wait and the chat prompt read in 0.1-0.2 s slices under it, so a line typed after a question appears can only answer it. A line typed before it is still dropped by the drain (A83) |
+| **BG4** | **Escape leaves it running** (owner, like a background shell under §61 CN2). The child gets a cancel token of its own, set by its kill, its timeout and a quit. A blocking child still shares the turn's (CN7) |
+| **BG5** | **Its answer is its wake.** The wake says `Background subagent a1 (\`explore\`) answered.` (or `failed.`), gives the task, and carries the answer through the real output policy under `spawn_subagent`'s name, the name a blocking spawn's answer is redacted under. Nothing before the answer crosses (§18 D6); the child's steps stay in its own thread |
+| **BG6** | **`shell_sessions`, `shell_output` and `shell_kill` ship on** (owner, after the check above; amends SS11). They act only on this conversation's own sessions and start or type nothing. The four tools that start or type into a shell session (`shell_background`, `shell_monitor`, `shell_interactive`, `shell_input`) and `shell` stay off, so on a stock install a background subagent is the only session they reach. Users who never edited the keys get the new values on update (config_update's three-way merge) |
+| **BG7** | **It runs under the session cap as its timeout**, unasked. A shell names its own timeout because only its author knows how long a command takes; a child is already bounded by its steps and its spend, and the cap (`shell_session_timeout_cap_s`, 3600 s) is the backstop that keeps a wedged one from holding the wait forever |
+| **BG8** | **A stop is a request.** A kill, a timeout or a quit sets the child's token, which the child reads between operations (core/cancel.py's stated limit), so a child inside a model call stops when that call returns. The session is finished after `_SUBAGENT_STOP_SETTLE_S` (10 s) with or without it; an answer that arrived in time is kept and reported with the stop, and one that arrives later is dropped and logged rather than appended to a session already reported stopped |
+| **BG9** | **The started result names the child's thread.** `run_agent_conversation` gains `on_thread`, called the moment the thread exists, as `stream_deep_research_mode` has had since §98; the spawn waits for it (at most 10 s). So the `▸ spawn_subagent` line opens the run while it is still going, and a sessions-panel row for a subagent opens the same thread viewer its agent-panel row does |
+| **BG10** | **One copy of the child's run for both modes.** `_child_run` holds the span, the consumer mark, the parent edge, SS9's sleep and the failure sweep; a blocking spawn calls it on the caller's thread and a background one on the session's, inside a copy of the caller's context (NA10's reason: the span's parent and the consumer mark are ContextVars) |
+
+BG1, BG2 (with its id letter), BG3, BG4 and BG6 are the owner's choices. BG5 and BG7-BG10 are what
+they need.
+
+### What §100 deliberately does not change
+
+- **The blocking spawn.** Without the flag, the call, the result, the cancel token it shares and the
+  call it makes to `run_agent_conversation` are what they were; `on_thread` is passed only for a
+  background spawn.
+- **NA9.** Several spawns in one reply still run together, and a background spawn in such a group
+  returns at once.
+- **D6.** What crosses to the parent is one answer.
+- **Where it can run.** A research pass is never a wake consumer (SS17), so it can neither spawn in
+  the background nor see the three session tools.
+
+### Built (batch 271)
+
+- **`core/shell_sessions.py`**: `KIND_SUBAGENT` among `BLOCKING_KINDS`; `start_subagent`,
+  `_run_subagent`, `_supervise_subagent`, `_SubagentRun`; `a<n>` ids; `agent` and `child_thread` on
+  `WakeEvent`, `SessionRow` and `_Session`; the subagent fields in `list_for` and the kill report;
+  the cap's refusal names both kinds.
+- **`core/session_wake.py`**: `subagent` -> `spawn_subagent` in `TOOL_FOR_KIND`; the answered and
+  failed wording and `_subagent_block`.
+- **`core/loop.py`**: `on_thread` on `run_agent_conversation`.
+- **`agents/subagent_tool.py`**: the `background` parameter, its refusals, the sign-off's wording, the
+  background route and `_child_run`.
+- **`main.py`**: `_StdinReader._read_lock`, held by `ask` and `readline_masked`, taken in slices by
+  `readline` and `poll`.
+- **`tui/app.py`**: the panel row and the kill picker name the agent; a subagent row opens its
+  thread; `done` or `failed`/`error` for how it ended.
+- **`tools/builtin/shell_sessions.py`**: the three tools' descriptions name background subagents.
+- **`config.yaml`** and **`CONFIG_ARCHITECTURE.md`**: BG6.
+
+Tests: `tests/test_background_subagents.py`. Its first class drives the real loop and the real
+dispatch, and makes the parent's NEXT model call the thing the child waits for, so it passes only if
+the spawn let the parent go on; the control shows a blocking spawn still waits. The rest follow the
+decisions: the flag's refusals before the sign-off, the ids, the shared cap, the wait, an answer, a
+raise, a kill with and without the child stopping in time, the timeout, SS19's hold, quit, SS9's
+sleep through the new kind, the inherited channel and the child's own token, `on_thread` before the
+first model call, the wake's wording and redaction, the CLI reader handing a question the terminal
+(deterministically, against both the wait and the chat prompt), a CLI chat woken by a child's answer,
+the TUI's rows and a question shown with no turn running, and the shipped defaults. Against main's
+production files, 40 of its first 46 tests fail; the other six are controls and guards that held
+before too. The 47th, a child slow to report its thread, was added when the mutation pass showed
+the wait for it going unremarked.
+
+### Gap register
+
+- **Not run against a live provider.** Every model here is scripted.
+- **A stopped child finishes its current step** (BG8). Its in-flight model call is spent and its
+  answer to it is dropped. Interrupting a call inside the SDK is §61's stated limit, and nothing here
+  changes it.
+- **More runs can write to the database at once** (TECHNICAL_DEBT 124). Four background children,
+  each running NA9's three blocking peers, is seventeen writers with the parent, from the shipped
+  configuration. `database.py` measured WAL clean at eight and one `database is locked` at sixteen,
+  with writers writing back to back; a child's writes have a model call between them, which that
+  benchmark does not model. Not measured here.
+
 ---
 
 ## §99. A pass being corrected is seen while it runs

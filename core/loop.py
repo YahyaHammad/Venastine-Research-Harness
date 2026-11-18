@@ -2331,6 +2331,7 @@ class RunAgentLoop:
         cancel=None,
         observe=None,
         active_skills=(),
+        on_thread=None,
     ) -> ModelResponse:
         """Regular conversation — full tool set, default system prompt,
         one continuous thread. Pass thread_id to resume an existing
@@ -2385,7 +2386,15 @@ class RunAgentLoop:
         active_skills (§89) are the session's `/skill` activations: marked
         in the default prompt's catalog and their bodies pinned last by
         session_tiers (§19 K1). The TUI builds its own prompt and passes
-        none here; the CLI passes its session's."""
+        none here; the CLI passes its session's.
+
+        on_thread (ROADMAP_v3 §100) is called with the thread's id the
+        moment it exists, before the first model call -- the same moment
+        `agent_activity.bind` gives a span its address, and for the same
+        reason: a BACKGROUND spawn returns to its parent while this run is
+        still going, and its result names the child's thread so the line
+        that started it can open the run. `stream_deep_research_mode` has
+        had the same argument since §98."""
         if authorization is not None and granted_tools is not None:
             raise ValueError(
                 "run_agent_conversation: pass authorization= or "
@@ -2404,6 +2413,8 @@ class RunAgentLoop:
         # for them. A no-op when no span is open, which is every
         # top-level conversation, so this needs no branch.
         agent_activity.bind(activity, memory.thread_id)
+        if on_thread is not None:
+            on_thread(memory.thread_id)
         memory.add_user_message(user_goal)
         # ROADMAP_v3 §49: shared with wake_conversation, so a turn a
         # background session starts runs under the same prompt tiers.
