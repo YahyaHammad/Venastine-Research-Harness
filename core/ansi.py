@@ -256,13 +256,42 @@ def for_display(text) -> str:
 #: and isolates, the marks, the zero-width characters and the byte-order
 #: mark, the invisible operators, and the TAG block -- which is ASCII
 #: spelled invisibly, and the published way to smuggle text past a reader.
+#: Characters that draw nothing although their category does not say so
+#: (batch 273, the plugin security round): the combining grapheme joiner,
+#: the Hangul fillers, the Khmer inherent vowels, the Mongolian variation
+#: selectors, the braille blank, the unassigned default-ignorables, and
+#: the variation selectors supplement past the TAG block, the published
+#: channel for smuggling bytes one selector at a time. The plugin format
+#: refuses them in a manifest's fields and the plugin scanner names them.
+BLANK = frozenset(
+    [0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2065, 0x2800, 0x3164, 0xFFA0]
+    + list(range(0x180B, 0x1810))
+    + list(range(0xFFF0, 0xFFF9))
+    + list(range(0xE0080, 0xE1000)))
+#: The variation selectors that follow an emoji to choose how it is drawn.
+#: One after a character is ordinary text; a run of them carries data.
+SELECTORS = frozenset(range(0xFE00, 0xFE10)) | frozenset(range(0xE0100, 0xE01F0))
+
+
+def selector_run(text) -> bool:
+    """Whether `text` holds two variation selectors in a row: one chooses
+    an emoji's presentation, and a run is a byte stream (batch 273)."""
+    previous = False
+    for ch in str(text):
+        current = ord(ch) in SELECTORS
+        if current and previous:
+            return True
+        previous = current
+    return False
+
+
 _INVISIBLE = frozenset(
     [0x061C, 0x180E, 0xFEFF]
     + list(range(0x200B, 0x2010))
     + list(range(0x202A, 0x202F))
     + list(range(0x2060, 0x2065))
     + list(range(0x2066, 0x206A))
-    + list(range(0xE0000, 0xE0080)))
+    + list(range(0xE0000, 0xE0080))) | BLANK
 _REVEALED = {code: f"<U+{code:04X}>" for code in _INVISIBLE}
 
 

@@ -35,6 +35,8 @@ from typing import Optional
 
 import yaml
 
+from core import ansi
+
 #: PL1. A folder whose name ends in this is a plugin, and no other folder
 #: is. The install id is its path under `plugins/` with this removed, so
 #: `plugins/math.plugin` is `math` and can sit beside the category
@@ -208,12 +210,19 @@ def folder_of(parts: tuple) -> str:
 _HIDDEN = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
 
+def hidden_char(ch: str) -> bool:
+    """Control, format (bidi overrides, zero-width marks), lone surrogates,
+    line or paragraph separators, and the characters that draw nothing
+    whatever their category (`ansi.BLANK`, batch 273: a Hangul filler or a
+    braille blank passed the categories alone)."""
+    return unicodedata.category(ch) in _HIDDEN or ord(ch) in ansi.BLANK
+
+
 def _invisible(text: str) -> bool:
-    """Control, format (bidi overrides, zero-width marks), lone surrogates
-    and line or paragraph separators. Each one makes what a reviewer reads
-    and what a reader prints differ, so no field of the manifest may hold
-    one."""
-    return any(unicodedata.category(ch) in _HIDDEN for ch in text)
+    """Whether `text` holds a hidden character or a run of variation
+    selectors. Each makes what a reviewer reads and what a reader prints
+    differ, so no field of the manifest may hold one."""
+    return any(hidden_char(ch) for ch in text) or ansi.selector_run(text)
 
 
 def _half_pair(text: str) -> bool:
@@ -249,9 +258,21 @@ def version_tuple(text: str) -> tuple:
 
 # ---- settings ------------------------------------------------------------
 
+#: The largest whole number a JSON reader keeps exactly, a double's 53 bits.
+#: Past it a number is not one JSON holds, and `math.isfinite` raised
+#: OverflowError on a 400-digit one instead of a format problem (batch 273).
+MAX_EXACT_INT = 2 ** 53
+
+
+def _whole(value) -> bool:
+    return (isinstance(value, int) and not isinstance(value, bool)
+            and -MAX_EXACT_INT <= value <= MAX_EXACT_INT)
+
+
 def _number(value) -> bool:
-    return (isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(value))
+    if isinstance(value, int):
+        return _whole(value)
+    return isinstance(value, float) and math.isfinite(value)
 
 
 @dataclass(frozen=True)
@@ -273,8 +294,9 @@ class Setting:
         if self.type == "boolean":
             return None if isinstance(value, bool) else "must be true or false"
         if self.type == "integer":
-            if not isinstance(value, int) or isinstance(value, bool):
-                return "must be a whole number"
+            if not _whole(value):
+                return (f"must be a whole number from -{MAX_EXACT_INT:,} to "
+                        f"{MAX_EXACT_INT:,}")
         elif self.type == "number":
             if not _number(value):
                 return "must be a number"
@@ -390,8 +412,7 @@ def _parse_setting(key, spec, problems: list) -> Optional[Setting]:
         for bound in ("min", "max"):
             if bound in spec:
                 value = spec[bound]
-                ok = (_number(value) if kind == "number"
-                      else isinstance(value, int) and not isinstance(value, bool))
+                ok = _number(value) if kind == "number" else _whole(value)
                 if not ok:
                     problems.append(f"{where}.{bound}: must be "
                                     f"{'a number' if kind == 'number' else 'a whole number'}")
@@ -490,8 +511,8 @@ def _layout_only(text: str) -> bool:
     """`_invisible`, except that a newline or a tab is layout: a tool's
     description is written for the model, and YAML's block scalars end
     their lines with one."""
-    return not any(unicodedata.category(ch) in _HIDDEN
-                   and ch not in "\n\t" for ch in text)
+    return not (any(hidden_char(ch) and ch not in "\n\t" for ch in text)
+                or ansi.selector_run(text))
 
 
 def _json_like(value, depth: int = 0) -> Optional[str]:

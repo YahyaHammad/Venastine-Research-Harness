@@ -71,7 +71,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 10274 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 10330 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1787,7 +1787,9 @@ A plugin is a `<name>.plugin` folder of skills, agents, tools, MCP servers and s
 
 - **The manifest parser is part of the security boundary** (PL2). `plugin_format.load_yaml` is
   `yaml.safe_load` with aliases and duplicate keys refused, and `parse_manifest` refuses every
-  unknown key and every field of the wrong type. Do not "simplify" it to `yaml.safe_load`, and do
+  unknown key and every field of the wrong type. A plugin's skill and agent frontmatter goes
+  through the same loader since batch 273, where `yaml.safe_load` kept the last of two
+  `allowed_tools:` keys. Do not "simplify" it to `yaml.safe_load`, and do
   not let a manifest field reach `config.yaml`: the owner kept plugin settings out of the core's
   config precisely so no plugin can steer the core's parser (PL6).
 - **What loads is what the modal showed** (PL8, PL15). The registry holds every file's SHA-256 and

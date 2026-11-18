@@ -6172,6 +6172,19 @@ def _cmd_classifier(app: VenastineApp, args: str) -> None:
                    name="classifier-test")
 
 
+def _plugin_confirm_on_the_ui_thread(title: str, body: str) -> bool:
+    """A `/plugin` command run on the UI thread has no modal to ask with:
+    `ask_confirm_blocking` there would wait on the thread that draws it.
+    Only `install` asks today, and it is in `plugin_commands._NETWORK`, so
+    it runs in a worker. A command that starts asking without joining it
+    fails here by name, where `lambda: False` refused it silently (batch
+    273, from the outside review of the plugin pull request)."""
+    raise RuntimeError(
+        f"/plugin asked {title!r} on the UI thread, where no modal can "
+        f"answer; a /plugin command that asks belongs in "
+        f"plugin_commands._NETWORK, which runs in a worker")
+
+
 def _cmd_plugin(app: VenastineApp, args: str) -> None:
     """ROADMAP_v3 §94: install and manage plugins. `core.plugin_commands`
     owns the logic and every word, which the CLI prints too; this lends it
@@ -6185,7 +6198,7 @@ def _cmd_plugin(app: VenastineApp, args: str) -> None:
         plugin_commands.run(args, plugin_commands.Shell(
             out=app._transcript.write_system,
             error=app._transcript.write_error,
-            confirm=lambda title, body: False))
+            confirm=_plugin_confirm_on_the_ui_thread))
         return
 
     def confirm(title: str, body: str) -> bool:

@@ -15,6 +15,19 @@ other name.
 
 ---
 
+## Plugins, the security round: the format, the folder and the modal (batch 273)
+
+| Change | Test | Fix |
+|---|---|---|
+| Follow an NTFS junction in a `--from` folder, or read a walked file by its path again | `test_a_junction_is_refused_like_a_link`, `test_a_file_swapped_after_the_walk_is_not_read`, `test_a_fifo_swapped_in_does_not_hang_the_read` | `plugin_source._linked`, `_read_walked`: identity and size checked on the open file |
+| Read a plugin's frontmatter with `yaml.safe_load` | `test_a_key_written_twice_refuses_the_install`, `test_the_other_tiers_read_as_they_always_have` | `_parse_frontmatter(strict=True)` for the plugin tier: PL2's loader |
+| Stage a plugin whose store path passes 259 characters on a Windows without long paths | `test_it_is_refused_before_anything_is_staged`, `test_long_paths_or_another_system_take_it` | `plugin_store.path_problem`, before `stage` |
+| Let a number JSON cannot hold exactly reach `math.isfinite` or `str()` | `TestANumberJSONCannotHold` | `plugin_format._whole`, `MAX_EXACT_INT` |
+| Treat only Cc, Cf, Cs, Zl and Zp as hidden | `TestCharactersThatDrawNothing` | `ansi.BLANK` and `ansi.selector_run`, read by the format, the modal's reveal and the scanner |
+| Leave a `tools/` helper module unnamed in the modal | `TestHelperCode` | PL20 amended; `_tool_lines` takes the files |
+| Pass `min_harness` when the version cannot be read | `TestAVersionThisInstallCannotRead` | PL18: it refuses |
+| Answer no for the TUI's `/plugin` on the UI thread | `TestTheOnlyCommandThatAsks` | `tui.app._plugin_confirm_on_the_ui_thread` raises by name |
+
 ## Plugins, the security round: the scanner (batch 272)
 
 | Change | Test | Fix |

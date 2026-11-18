@@ -31975,3 +31975,73 @@ no S1. Two of the outside review's five were wrong. This batch fixes the scanner
 - **Gates:** ruff is clean. bandit's exit is 0 with the rewritten baseline, and its count check
   is green (62 pairs).
 - **Not run:** WSL, Docker, any GitHub workflow, and a live PyPI.
+
+## Batch 273 -- Plugins: the security round's format, folder and modal findings (2026-11-18)
+
+The second of the round's fix batches, after batch 272's scanner. It covers:
+- the format's four findings (s1-1 to s1-4);
+- the fetch section's two leads (s2-1, s2-2);
+- the outside review's three that held (F-2, F-3, F-4).
+
+The owner kept helper modules under `tools/`, with PL20's wording amended.
+
+**What changed:**
+- **A `--from` folder is read as it was walked** (s2-1, s2-2, both S3).
+  - `os.path.islink` is False for an NTFS junction, and `os.walk` went through one, so a fake
+    `~/.ssh` key outside the folder was installed as `tests/id_ed25519`. The modal's 40-line
+    file list did not name it.
+  - A link of any kind is now refused: a symbolic link, or a reparse tag with the
+    name-surrogate bit, which a junction has and a cloud placeholder does not.
+  - Each file the walk checked used to be opened again by its path. It is now opened without
+    following a link where the system can say so, and with `O_NONBLOCK`. It is refused unless
+    it is still a regular file with the walk's device, inode and size. A link, a FIFO or a new
+    file put at the path between the two is refused, and a FIFO no longer hangs the install.
+- **A plugin's frontmatter is read strictly** (s1-3, S3). Skill and agent frontmatter went
+  through `yaml.safe_load`, which keeps the last of two keys, so a reviewer reading
+  `allowed_tools: [read]` saw a policy the agent did not get. The plugin tier now reads it with
+  PL2's strict loader, and a key written twice refuses the install. The user and project tiers
+  read as they did.
+- **A Windows path the store cannot hold** (s1-4, S3). The format bounds a path inside a plugin
+  at 200 characters, and the store puts its own folder in front. Without long paths, an install
+  past 259 characters wrote its files and then could not read them back, so it never loaded.
+  `plugin_store.path_problem` now refuses it before staging, naming the setting that would take
+  it.
+- **A number JSON holds exactly** (s1-1, S3). A 400-digit integer reached `math.isfinite` and
+  raised OverflowError. A 4000-digit hex one passed every check and raised ValueError when
+  printed. A whole number is now within 2^53, which is what a double keeps exactly; past it,
+  it is a format problem.
+- **Characters that draw nothing** (s1-2, S3). The format refused only Cc, Cf, Cs, Zl and Zp,
+  and the modal's reveal and the scanner missed a Hangul filler, a braille blank, a combining
+  grapheme joiner and others. `ansi.BLANK` holds them, and `ansi.selector_run` finds two
+  variation selectors in a row. The format, the modal's reveal and the scanner all read both.
+  One selector after an emoji is still text.
+- **Helper code** (F-2, S4). PL20 said a `.py` with no declared tool is refused, and the code
+  took any number of them beside one tool. The owner kept them, so PL20 is amended, and the
+  trust modal names each helper under `tools/`.
+- **An unreadable version** (F-4, S4). `min_harness` was skipped when the install's
+  package.json could not be read. It now refuses (PL18).
+- **The TUI's confirm with no network** (F-3, S4). The UI thread's confirm always said no, so a
+  command that started asking would have been refused silently. It now raises by name. A test
+  holds `install` as the only command that asks, and another holds the TUI to lending the
+  raising confirm.
+
+**Found while building:**
+- The bandit count check caught `lent.update(shell=shell)` in a test as B604. The key is
+  renamed rather than suppressed.
+
+**Verification:**
+- **Full suite:** 10227 passed and 99 skipped (10330 tests, 56 more than 10274). Four failed,
+  all in `test_tool_budgets.py`: the math child's 20 s clock ran out on a machine loaded
+  enough to stretch a 3.5-minute suite to 25 minutes. The file passes alone (32 passed), and
+  the next batch's full run covers it again.
+- **Breakages:** 20 of 20 reverted fixes each turned a named test red
+  (`scratchpad/mutate273.py`).
+- **The round's own probes,** re-run on the fix:
+  - every huge integer is a format problem;
+  - the strict loader refuses both duplicate keys;
+  - a long path is refused with long paths off and shown with them on;
+  - the junction is refused.
+  A same-size rewrite in place is still read, as the same file, and the gap register says so.
+- **Gates:** ruff is clean. bandit's exit is 0, and its count check is green (62 pairs).
+- **Not run:** WSL (the FIFO test is POSIX's, and skips here), Docker, and any GitHub
+  workflow.

@@ -85,7 +85,7 @@ from typing import Optional
 
 import yaml
 
-from core import plugin_format
+from core import ansi, plugin_format
 
 HIGH = "high"
 NOTE = "note"
@@ -181,8 +181,10 @@ def _hidden(char: str) -> bool:
     code = ord(char)
     if code in _LAYOUT:
         return False
+    # ansi.BLANK since batch 273: a Hangul filler, a braille blank or a
+    # combining grapheme joiner draws nothing whatever its category says.
     return (unicodedata.category(char) in _HIDDEN_CATEGORIES
-            or code in _SMUGGLING)
+            or code in _SMUGGLING or code in ansi.BLANK)
 
 
 def _codepoint(char: str) -> str:
@@ -834,6 +836,11 @@ def _text(path: str, text: str, add) -> None:
             add(HIGH, "hidden-char", path, number,
                 f"holds {_codepoint(char)}, which shows differently from "
                 f"what a program or the model reads")
+        if ansi.selector_run(line):
+            # One selector after an emoji is ordinary; a run is bytes.
+            add(HIGH, "hidden-char", path, number,
+                "holds a run of variation selectors, which draw nothing and "
+                "can carry text no reader sees")
         for run in _BLOB.findall(line):
             if _entropy(run) >= BLOB_ENTROPY:
                 add(NOTE, "blob", path, number,

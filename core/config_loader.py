@@ -361,12 +361,18 @@ def _catalog_text(value) -> str:
     return text[:cap - 1].rstrip() + "\u2026"
 
 
-def _parse_frontmatter(text: str) -> tuple[dict, str]:
+def _parse_frontmatter(text: str, strict: bool = False) -> tuple[dict, str]:
     """Returns (frontmatter_dict, body). Uses a delimiter that must occupy
     its own line -- NOT text.find("---"), which matches the first bare
     '---' anywhere in the file, including a markdown horizontal rule
     inside the body itself (a very common convention in longer
     instructional content, which is exactly what agent/skill bodies are).
+
+    `strict` is a plugin's (batch 273, ROADMAP_v3 §94 PL2): its
+    frontmatter is read by the manifest's strict loader, which refuses a
+    key written twice and an alias. `yaml.safe_load` kept the LAST of two
+    `allowed_tools:` keys, so a reviewer reading the first saw a policy
+    the agent did not get.
     """
     matches = list(_FRONTMATTER_DELIM.finditer(text))
     if len(matches) < 2:
@@ -382,6 +388,10 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
             "(the opening '---' must be the first line)")
     frontmatter_text = text[matches[0].end():matches[1].start()]
     body = text[matches[1].end():].strip()
+    if strict:
+        from core import plugin_format
+
+        return plugin_format.load_yaml(frontmatter_text), body
     return yaml.safe_load(frontmatter_text), body
 
 
@@ -400,7 +410,7 @@ def _parse_md_file(path: str, kind: str, tier: str, category: str = ""):
         # /dev/zero was read until memory ran out. The refusal is an
         # OSError, so it warns and skips below like any broken definition.
         text = read_regular_text(path)
-        fm, body = _parse_frontmatter(text)
+        fm, body = _parse_frontmatter(text, strict=tier == "plugin")
     except (OSError, ValueError, yaml.YAMLError, RecursionError) as e:
         # RecursionError (batch 255): frontmatter nested deeper than the
         # stack, which PyYAML's composer recurses through -- a plugin's

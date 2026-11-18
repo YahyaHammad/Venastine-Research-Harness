@@ -1532,3 +1532,366 @@ class TestTheConfigKeys:
     def test_the_marketplace_must_be_owner_slash_name(self, value):
         with pytest.raises(ValueError):
             config_schema._github_repo(value)
+
+
+# ---- batch 273: the security round's format, folder and modal findings ----
+
+TOOLED = """tools:
+  - name: probe
+    description: A probe.
+    input_schema: {schema}
+access:
+  workspace: none
+  network: false
+"""
+RUN = b"def run(params, context):\n    return {}\n"
+
+
+def tooled(schema="{type: object}", *, more=None, extra="") -> dict:
+    files = plugin_files("demo", extra=TOOLED.format(schema=schema) + extra,
+                         skills=(), agents=())
+    files["tools/probe.py"] = RUN
+    files.update(more or {})
+    return files
+
+
+def problems_of(files: dict) -> list:
+    with pytest.raises(PluginFormatError) as caught:
+        plugin_format.validate("demo", files)
+    return caught.value.problems
+
+
+BIG = "9" * 400
+
+
+class TestANumberJSONCannotHold:
+    """s1-1. A 400-digit integer reached `math.isfinite` and raised
+    OverflowError, and a long hex one passed every check and raised
+    ValueError printing it; neither was a format problem."""
+
+    @pytest.mark.parametrize("extra", [
+        f"settings:\n  depth: {{type: integer, default: {BIG}, description: D.}}\n",
+        f"settings:\n  depth: {{type: integer, default: 0x{'f' * 4000}, description: D.}}\n",
+        f"settings:\n  depth: {{type: integer, default: 1, min: -{BIG}, description: D.}}\n",
+        f"settings:\n  ratio: {{type: number, default: {BIG}, description: R.}}\n",
+    ])
+    def test_a_setting_past_json_is_a_format_problem(self, extra):
+        assert any("settings." in p for p in problems_of(tooled(extra=extra)))
+
+    def test_a_schema_bound_past_json_is_a_format_problem(self):
+        schema = f"{{type: object, properties: {{n: {{type: integer, maximum: {BIG}}}}}}}"
+        assert any("input_schema" in p for p in problems_of(tooled(schema)))
+
+    def test_a_server_schema_past_json_is_a_format_problem(self):
+        listing = [{"name": "look", "description": "d", "inputSchema": {
+            "type": "object", "properties": {"n": {"type": "integer"}}}}]
+        text = json.dumps({"mcpServers": {"notes": {
+            "command": "python", "args": ["-m", "notes"], "tools": listing}}})
+        text = text.replace('"type": "integer"}',
+                            f'"type": "integer", "maximum": {BIG}}}')
+        files = tooled(more={"mcp.json": text.encode(),
+                             "servers/notes.py": b"print(1)\n"})
+        assert problems_of(files)
+
+    @pytest.mark.parametrize("value, ok", [(2 ** 53, True), (-(2 ** 53), True),
+                                           (2 ** 53 + 1, False)])
+    def test_the_bound_is_a_doubles_53_bits(self, value, ok):
+        extra = (f"settings:\n  depth: {{type: integer, default: {value}, "
+                 f"description: D.}}\n")
+        if ok:
+            plugin_format.validate("demo", tooled(extra=extra))
+        else:
+            assert problems_of(tooled(extra=extra))
+
+    def test_info_says_so_instead_of_failing(self, home, tmp_path):
+        extra = (f"settings:\n  depth: {{type: integer, default: 0x{'f' * 4000}"
+                 f", description: D.}}\n")
+        folder = write_plugin(tmp_path, "demo", tooled(extra=extra))
+        rec = run(f"info --from {folder}")
+        assert any("is not a valid plugin" in e for e in rec.errors)
+
+
+#: Characters that draw nothing, written by code point so no line of this
+#: file holds one.
+BLANKS = [0x3164, 0x115F, 0xFFA0, 0x2800, 0x034F, 0x17B4, 0x180B, 0xE0100]
+
+
+class TestCharactersThatDrawNothing:
+    """s1-2. The format refused only Cc, Cf, Cs, Zl and Zp, and the modal's
+    reveal and the scanner missed the rest of what draws nothing."""
+
+    @pytest.mark.parametrize("code", BLANKS)
+    def test_a_manifest_field_holding_one_is_refused(self, code):
+        files = tooled()
+        files["plugin.yaml"] = plugin_files(
+            "demo", description=f"A plugin{chr(code)} for tests.",
+            extra=TOOLED.format(schema="{type: object}"))["plugin.yaml"]
+        assert any("description" in p for p in problems_of(files))
+
+    @pytest.mark.parametrize("code", BLANKS)
+    def test_the_modal_reveals_one(self, code):
+        from core import ansi
+
+        shown, count = ansi.reveal_invisible_counted(f"a{chr(code)}b")
+        assert count == 1 and f"<U+{code:04X}>" in shown
+
+    @pytest.mark.parametrize("code", BLANKS)
+    def test_the_scanner_names_one(self, code):
+        from core import plugin_scan
+
+        files = tooled(more={"README.md": f"# demo\n\nA{chr(code)}b.\n".encode()})
+        report = plugin_scan.scan(files, plugin_format.validate("demo", files))
+        assert any(f.rule == "hidden-char" for f in report.high)
+
+    def test_one_selector_after_an_emoji_is_ordinary(self):
+        heart = chr(0x2764) + chr(0xFE0F)
+        files = tooled()
+        files["plugin.yaml"] = plugin_files(
+            "demo", description=f"Made with {heart}.",
+            extra=TOOLED.format(schema="{type: object}"))["plugin.yaml"]
+        plugin_format.validate("demo", files)
+
+    def test_a_run_of_selectors_is_refused_and_named(self):
+        from core import plugin_scan
+
+        run_of = "".join(chr(0xFE00 + i) for i in (3, 7, 1))
+        files = tooled()
+        files["plugin.yaml"] = plugin_files(
+            "demo", description=f"Plain{run_of} text.",
+            extra=TOOLED.format(schema="{type: object}"))["plugin.yaml"]
+        assert any("description" in p for p in problems_of(files))
+        files = tooled(more={"README.md": f"# demo\n\nx{run_of}\n".encode()})
+        report = plugin_scan.scan(files, plugin_format.validate("demo", files))
+        assert any("variation selectors" in f.message for f in report.high)
+
+
+TWICE = """---
+name: method
+description: The method skill
+description: Something else
+---
+
+The method.
+"""
+TWICE_AGENT = """---
+name: helper
+description: An agent for tests
+allowed_tools: [read]
+spawnable: true
+allowed_tools: [read, write, shell]
+---
+
+You are helper.
+"""
+
+
+class TestPluginFrontmatterIsReadStrictly:
+    """s1-3. A plugin's skill and agent frontmatter went through
+    `yaml.safe_load`, which keeps the LAST of two keys, so a reviewer
+    reading `allowed_tools: [read]` saw a policy the agent did not get."""
+
+    @pytest.mark.parametrize("path, text", [
+        ("skills/method.md", TWICE), ("agents/helper.md", TWICE_AGENT)])
+    def test_a_key_written_twice_refuses_the_install(self, home, tmp_path,
+                                                      path, text):
+        files = plugin_files("demo", more={path: text.encode()})
+        folder = write_plugin(tmp_path, "demo", files)
+        rec = run(f"install --from {folder}", answer=True)
+        assert rec.asked == []
+        assert any("is not a valid plugin" in e for e in rec.errors)
+        assert plugin_store.installed() == {}
+
+    def test_the_other_tiers_read_as_they_always_have(self, tmp_path):
+        path = tmp_path / "method.md"
+        path.write_text(TWICE, encoding="utf-8")
+        skill = config_loader._parse_md_file(str(path), "skills", "user")
+        assert skill is not None and skill.description == "Something else"
+
+
+class TestAPathWindowsCannotOpen:
+    """s1-4. The format bounds a path inside a plugin; the store's own
+    folder goes in front of it, and without long paths a Windows install
+    past 259 characters wrote its files and could never read them back."""
+
+    def long_files(self) -> dict:
+        # 182 characters: inside the format's 200, past Windows' 259 once
+        # the store's folder is in front of it.
+        deep = "/".join(["d" * 80] * 2) + "/" + "f" * 10 + ".md"
+        return plugin_files("demo", more={f"skills/{deep}": SKILL.format(
+            name="f" * 10, description="Deep").encode()})
+
+    def test_it_is_refused_before_anything_is_staged(self, home, tmp_path,
+                                                     monkeypatch):
+        monkeypatch.setattr(plugin_store, "_windows", lambda: True)
+        monkeypatch.setattr(plugin_store, "_long_paths", lambda: False)
+        folder = write_plugin(tmp_path, "demo", self.long_files())
+        rec = run(f"install --from {folder}", answer=True)
+        assert rec.asked == []
+        assert any("past the 259 Windows allows" in e for e in rec.errors)
+        store = plugin_store.store_dir()
+        assert not os.path.isdir(store) or not [
+            e for e in os.listdir(store) if e.startswith(".staging-")]
+
+    @pytest.mark.parametrize("windows, long_paths", [(True, True),
+                                                     (False, False)])
+    def test_long_paths_or_another_system_take_it(self, home, monkeypatch,
+                                                  windows, long_paths):
+        monkeypatch.setattr(plugin_store, "_windows", lambda: windows)
+        monkeypatch.setattr(plugin_store, "_long_paths", lambda: long_paths)
+        assert plugin_store.path_problem("demo", self.long_files()) is None
+
+    def test_a_short_one_is_no_problem_anywhere(self, home, monkeypatch):
+        monkeypatch.setattr(plugin_store, "_windows", lambda: True)
+        monkeypatch.setattr(plugin_store, "_long_paths", lambda: False)
+        assert plugin_store.path_problem("demo", plugin_files("demo")) is None
+
+
+class TestAFolderReadAsItWasWalked:
+    """s2-1 and s2-2. `os.path.islink` is False for an NTFS junction and
+    `os.walk` follows one, so a folder outside the plugin was installed as
+    its own files; and a file was checked as a path, then opened again,
+    so one swapped in between was read."""
+
+    @pytest.mark.skipif(os.name != "nt", reason="NTFS junctions are Windows'")
+    def test_a_junction_is_refused_like_a_link(self, home, tmp_path):
+        import _winapi
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "id_ed25519").write_text("not a real key\n")
+        folder = write_plugin(tmp_path, "demo", plugin_files("demo"))
+        _winapi.CreateJunction(str(outside), str(folder / "tests"))
+        with pytest.raises(PluginFormatError) as caught:
+            plugin_source.read_folder(str(folder))
+        assert any("symbolic link or junction" in p
+                   for p in caught.value.problems)
+        rec = run(f"install --from {folder}", answer=True)
+        assert rec.asked == [] and plugin_store.installed() == {}
+
+    def test_a_file_swapped_after_the_walk_is_not_read(self, tmp_path,
+                                                       monkeypatch):
+        folder = write_plugin(tmp_path, "demo", plugin_files("demo"))
+        skill = folder / "skills" / "method.md"
+        other = tmp_path / "other.md"
+        other.write_bytes(b"x" * skill.stat().st_size)   # the same size
+        checked = plugin_format.check_files
+
+        def swap_then_check(sizes):
+            os.replace(other, skill)     # a new file at the walked path
+            return checked(sizes)
+
+        monkeypatch.setattr(plugin_format, "check_files", swap_then_check)
+        with pytest.raises(FetchError, match="changed while it was being read"):
+            plugin_source.read_folder(str(folder))
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a FIFO")
+    def test_a_fifo_swapped_in_does_not_hang_the_read(self, tmp_path,
+                                                      monkeypatch):
+        folder = write_plugin(tmp_path, "demo", plugin_files("demo"))
+        skill = folder / "skills" / "method.md"
+        checked = plugin_format.check_files
+
+        def swap_then_check(sizes):
+            skill.unlink()
+            os.mkfifo(skill)
+            return checked(sizes)
+
+        monkeypatch.setattr(plugin_format, "check_files", swap_then_check)
+        with pytest.raises(FetchError):
+            plugin_source.read_folder(str(folder))
+
+    def test_an_unchanged_folder_reads_as_before(self, tmp_path):
+        files = plugin_files("demo")
+        folder = write_plugin(tmp_path, "demo", files)
+        assert plugin_source.read_folder(str(folder)).files == files
+
+
+class TestHelperCode:
+    """The outside review's F-2. PL20 said a .py with no declared tool is
+    refused, and the code let any number of them sit beside one tool; the
+    owner kept them, as helpers, named in the modal (batch 273)."""
+
+    def test_a_helper_beside_a_tool_is_named_in_the_modal(self, home,
+                                                         tmp_path):
+        files = tooled(more={"tools/shared.py": b"VALUE = 1\n"})
+        plugin_format.validate("demo", files)
+        folder = write_plugin(tmp_path, "demo", files)
+        title, body = run(f"install --from {folder}").asked[0]
+        assert "Helper code under tools/" in body
+        assert "    tools/shared.py" in body
+        assert "    tools/probe.py" not in body.split("Helper code")[1].split(
+            "Each call asks")[0]
+
+    def test_a_tool_alone_names_no_helper(self, home, tmp_path):
+        folder = write_plugin(tmp_path, "demo", tooled())
+        title, body = run(f"install --from {folder}").asked[0]
+        assert "Helper code" not in body
+
+    def test_code_with_no_declared_tool_is_still_refused(self):
+        files = plugin_files("demo", more={"tools/shared.py": b"VALUE = 1\n"})
+        assert any("declares no tools" in p for p in problems_of(files))
+
+
+class TestTheOnlyCommandThatAsks:
+    """The outside review's F-3. The TUI runs a /plugin command without
+    the network on its UI thread with a confirm that always said no; one
+    that started asking would have been refused without a word."""
+
+    def test_only_install_asks_and_install_runs_in_a_worker(self):
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(plugin_commands))
+        asking = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                for inner in ast.walk(node):
+                    if (isinstance(inner, ast.Attribute)
+                            and inner.attr == "confirm"
+                            and isinstance(inner.value, ast.Name)
+                            and inner.value.id == "shell"):
+                        asking.add(node.name)
+        assert asking == {"_install"}
+        assert "install" in plugin_commands._NETWORK
+
+    def test_the_ui_threads_confirm_fails_by_name(self):
+        from tui import app
+
+        with pytest.raises(RuntimeError, match="_NETWORK"):
+            app._plugin_confirm_on_the_ui_thread("Install demo?", "body")
+
+    def test_the_tui_lends_it_to_a_command_without_the_network(self,
+                                                              monkeypatch):
+        from tui import app
+
+        lent = {}
+        monkeypatch.setattr(plugin_commands, "run",
+                            lambda args, shell: lent.update(lent_shell=shell))
+        transcript = types.SimpleNamespace(write_system=lambda line: None,
+                                           write_error=lambda line: None)
+        app._cmd_plugin(types.SimpleNamespace(_transcript=transcript),
+                        "disable demo")
+        assert lent["lent_shell"].confirm is app._plugin_confirm_on_the_ui_thread
+
+
+class TestAVersionThisInstallCannotRead:
+    """The outside review's F-4. `min_harness` was checked only when
+    package.json could be read; a broken install, where a newer plugin
+    hurts most, skipped the check."""
+
+    def manifest(self):
+        return plugin_format.parse_manifest(
+            MANIFEST.format(name="demo", version="1.0.0", description="d",
+                            extra="min_harness: 0.3.0\n"), "demo")
+
+    @pytest.mark.parametrize("version", [None, "not a version"])
+    def test_it_refuses(self, monkeypatch, version):
+        monkeypatch.setattr(plugin_commands, "harness_version", lambda: version)
+        said = plugin_commands._too_new(self.manifest())
+        assert said and "cannot be read from its package.json" in said
+
+    def test_a_readable_one_decides_as_before(self, monkeypatch):
+        monkeypatch.setattr(plugin_commands, "harness_version", lambda: "0.3.13")
+        assert plugin_commands._too_new(self.manifest()) is None
+        monkeypatch.setattr(plugin_commands, "harness_version", lambda: "0.2.0")
+        assert "needs harness 0.3.0" in plugin_commands._too_new(self.manifest())

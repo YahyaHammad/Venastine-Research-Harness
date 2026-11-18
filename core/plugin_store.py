@@ -87,6 +87,51 @@ def store_dir() -> str:
     return os.path.join(os.path.expanduser("~/.config/venastine"), "plugins")
 
 
+# ---- paths Windows can hold ------------------------------------------------
+
+#: The longest path Windows opens without long paths: MAX_PATH, 260 with
+#: the terminating NUL.
+WINDOWS_MAX_PATH = 259
+
+
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+def _long_paths() -> bool:
+    """Whether this Windows lets this process past MAX_PATH: the
+    LongPathsEnabled policy, which python.exe's manifest opts into."""
+    try:
+        import ctypes
+
+        check = ctypes.WinDLL("ntdll").RtlAreLongPathsEnabled
+        check.restype = ctypes.c_ubyte
+        return bool(check())
+    except (OSError, AttributeError):
+        return False
+
+
+def path_problem(name: str, paths) -> Optional[str]:
+    """Why a plugin called `name` with files at `paths` cannot sit in this
+    store, or None. The format bounds a path inside a plugin (PL3); the
+    store adds its own folder in front of it, and without long paths a
+    Windows install past 259 characters wrote its files and then could not
+    read them back, so it never loaded (batch 273)."""
+    if not _windows() or _long_paths():
+        return None
+    longest = max(paths, key=len, default="")
+    hexed = 12      # secrets.token_hex(6)
+    deepest = max(len(_STAGING) + hexed, len(name) + 1 + len(FILES),
+                  len(name) + 1 + len(_OLD) + hexed)
+    total = len(store_dir()) + 1 + deepest + 1 + len(longest)
+    if total <= WINDOWS_MAX_PATH:
+        return None
+    return (f"its longest file, {longest!r}, would sit at a path of {total} "
+            f"characters in the plugin store ({store_dir()}), past the "
+            f"{WINDOWS_MAX_PATH} Windows allows without long paths; turn "
+            f"long paths on (LongPathsEnabled) or shorten the plugin's paths")
+
+
 # ---- the locks -----------------------------------------------------------
 
 class StoreBusy(OSError):

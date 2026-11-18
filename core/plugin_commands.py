@@ -258,6 +258,10 @@ def _prepare(candidate, shell: Shell) -> Optional[Prepared]:
     except PluginFormatError as exc:
         _format_problems(candidate.id, exc, shell)
         return None
+    problem = plugin_store.path_problem(manifest.name, candidate.files)
+    if problem:
+        _format_problems(candidate.id, PluginFormatError([problem]), shell)
+        return None
     staging = plugin_store.stage(candidate.files)
     skills, agents, problems = config_loader.preview_plugin(
         staging, manifest.name, candidate.id)
@@ -291,17 +295,24 @@ def harness_version() -> Optional[str]:
 
 
 def _too_new(manifest) -> Optional[str]:
+    """Why this harness is too old for the plugin, or None (PL18). A version
+    this install cannot read is a refusal, not a pass (batch 273): a broken
+    install is exactly when a plugin written for a newer one hurts."""
     if not manifest.min_harness:
         return None
     running = harness_version()
+    unreadable = (f"{manifest.name} needs harness {manifest.min_harness} or "
+                  f"later, and this install's version cannot be read from "
+                  f"its package.json. Reinstall the harness, then install "
+                  f"it.")
     if running is None:
-        return None
+        return unreadable
     try:
         if plugin_format.version_tuple(running) >= \
                 plugin_format.version_tuple(manifest.min_harness):
             return None
     except ValueError:
-        return None
+        return unreadable
     return (f"{manifest.name} needs harness {manifest.min_harness} or later, "
             f"and this is {running}. Update the harness, then install it.")
 
@@ -365,7 +376,7 @@ def describe(prepared: Prepared, replacing=None) -> list:
                            for name, a in sorted(prepared.agents.items())],
                           MAX_LISTED_DEFINITIONS, "agents")
     if manifest.has_code:
-        lines += _tool_lines(candidate.id, manifest)
+        lines += _tool_lines(candidate.id, manifest, candidate.files)
     if manifest.settings:
         lines.append(f"  Settings, yours to change with /plugin config "
                      f"{candidate.id}:")
@@ -433,7 +444,7 @@ def _shown_description(text: str) -> str:
             f"reads all {len(line):,} characters]")
 
 
-def _tool_lines(plugin_id: str, manifest) -> list:
+def _tool_lines(plugin_id: str, manifest, files=()) -> list:
     """The modal's account of a plugin's code (PL20-PL25, PL27-PL29): what
     the model can call, where it runs, what it asks to touch, and what it
     installs. A description is shown as the model will read it, up to
@@ -446,6 +457,16 @@ def _tool_lines(plugin_id: str, manifest) -> list:
             [f"    {plugin_format.tool_name(manifest.name, t.name)}  "
              f"{_shown_description(t.description)}" for t in manifest.tools],
             MAX_LISTED_DEFINITIONS, "tools")
+        # PL20, amended (owner, batch 273): a tool may import modules of
+        # its own beside it. Named here, since no tool name says they exist.
+        declared = {t.path for t in manifest.tools}
+        helpers = sorted(p for p in files
+                         if p.startswith("tools/") and p not in declared)
+        if helpers:
+            lines.append("  Helper code under tools/, which the tools may "
+                         "import and the model never calls by name:")
+            lines += _bounded([f"    {_one_line(p)}" for p in helpers],
+                              MAX_LISTED_DEFINITIONS, "files")
     if manifest.servers:
         lines.append(f"  MCP servers. Each starts the first time the model "
                      f"calls one of its tools, and runs "

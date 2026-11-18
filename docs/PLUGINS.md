@@ -220,6 +220,10 @@ ignored:
 
 - A field that is not in the table is refused.
 - A key that appears twice is refused, since a reviewer reads the first and a reader would keep the last.
+  The same holds for your skills' and agents' frontmatter.
+- A character that draws nothing is refused in every field: a control or format character, a Hangul
+  filler, a braille blank, or two variation selectors in a row. One selector after an emoji is fine.
+- A whole number past 2^53, which JSON cannot hold exactly, is refused.
 - YAML aliases (`&name` / `*name`) are refused.
 - No field may hold control characters or invisible ones, such as a right-to-left override.
 - Quote versions: YAML reads `1.0` as a number.
@@ -318,8 +322,10 @@ def run(params, context):
 - **Plan for no access.** A tool must cope with `context.workspace` being `None` and with
   the network being refused, because either is what a project that said no gets.
 
-Every tool you declare needs its file, and a `.py` file with no declared tool is refused, so
-there is no dead code for a reviewer to wonder about.
+Every tool you declare needs its file. Other modules under `tools/` are your tools' helpers,
+which they may import: the trust modal names each one, since no tool's name says it is there.
+A `tools/` folder with no declared tool at all is refused. Your Python is UTF-8: a file that
+declares another encoding (`# coding: latin-1`) is refused, so what a reviewer reads is what runs.
 
 ### MCP servers
 

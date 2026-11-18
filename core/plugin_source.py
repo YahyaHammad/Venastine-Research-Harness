@@ -35,6 +35,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess  # nosec B404 - runs Git with explicit arguments and no shell
 import tempfile
 import time
@@ -370,6 +371,46 @@ def listing(repo: str, category: str = "") -> Listing:
 
 # ---- a folder on this computer -------------------------------------------
 
+#: A reparse tag whose target is another name: a symbolic link or an NTFS
+#: junction (IO_REPARSE_TAG_SYMLINK, _MOUNT_POINT). A cloud placeholder's
+#: tag lacks the bit, and is a file like any other.
+_NAME_SURROGATE = 0x20000000
+
+
+def _linked(status) -> bool:
+    """Whether an lstat result is a link of any kind. `os.path.islink` is
+    False for a junction, and `os.walk` went through one, so a folder
+    outside the plugin was installed as its own files (batch 273)."""
+    return (stat.S_ISLNK(status.st_mode)
+            or bool(getattr(status, "st_reparse_tag", 0) & _NAME_SURROGATE))
+
+
+def _read_walked(full: str, rel: str, walked) -> bytes:
+    """The bytes of the file the walk saw at `full`, or FetchError. The
+    walk's checks are a path's; this opens without following a link where
+    the system can say so, and refuses the open file unless it is still a
+    regular file with the walk's identity and size, so a link or a FIFO
+    swapped in between is not read (batch 273)."""
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    changed = FetchError(f"{rel} changed while it was being read")
+    try:
+        fd = os.open(full, flags)
+    except OSError as exc:
+        # ELOOP is O_NOFOLLOW meeting a link put there since the walk.
+        raise FetchError(f"{rel} could not be read now ({exc.strerror}); it "
+                         f"may have changed while it was being read") from None
+    with os.fdopen(fd, "rb") as handle:
+        now = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(now.st_mode) or now.st_size != walked.st_size
+                or (now.st_dev, now.st_ino) != (walked.st_dev, walked.st_ino)):
+            raise changed
+        data = handle.read(plugin_format.MAX_FILE_BYTES + 1)
+    if len(data) != walked.st_size:
+        raise changed
+    return data
+
+
 def read_folder(path: str) -> Candidate:
     """The plugin in the folder `path`, read from disk (PL13). Its id is
     its name. Raises FetchError or PluginFormatError."""
@@ -390,29 +431,25 @@ def read_folder(path: str) -> Candidate:
             if entry in _SKIPPED_DIRS:
                 skipped.append(rel + "/")
                 dirs.remove(entry)
-            elif os.path.islink(full):
-                problems.append(f"{rel!r}: a symbolic link, which a plugin "
-                                f"may not hold")
+            elif _linked(os.lstat(full)):
+                problems.append(f"{rel!r}: a symbolic link or junction, "
+                                f"which a plugin may not hold")
                 dirs.remove(entry)
         for entry in sorted(files):
             full = os.path.join(dirpath, entry)
             rel = os.path.relpath(full, real).replace(os.sep, "/")
-            if os.path.islink(full) or not os.path.isfile(full):
+            walked = os.lstat(full)
+            if _linked(walked) or not stat.S_ISREG(walked.st_mode):
                 problems.append(f"{rel!r}: not an ordinary file, which a "
                                 f"plugin may not hold")
                 continue
-            sizes[rel] = os.path.getsize(full)
-            paths[rel] = full
+            sizes[rel] = walked.st_size
+            paths[rel] = (full, walked)
     problems.extend(plugin_format.check_files(sizes))
     if problems:
         raise PluginFormatError(problems)
-    files = {}
-    for rel, full in sorted(paths.items()):
-        with open(full, "rb") as handle:
-            data = handle.read(plugin_format.MAX_FILE_BYTES + 1)
-        if len(data) != sizes[rel]:
-            raise FetchError(f"{rel} changed while it was being read")
-        files[rel] = data
+    files = {rel: _read_walked(full, rel, walked)
+             for rel, (full, walked) in sorted(paths.items())}
     return Candidate(id=name, name=name, files=files,
                      source={"kind": "folder", "path": real},
                      skipped=tuple(skipped))
