@@ -429,8 +429,23 @@ class _Cancelled(Exception):
 
 #: The SDK's codes for a connection that is gone or a request nobody
 #: answered: after either, a plugin's server is started again (PL30). A
-#: JSON-RPC error a server sends about the call itself is not one.
+#: JSON-RPC error a server sends about the call itself is not one -- but a
+#: server can SEND either code, and the SDK raises the same error for it,
+#: so a ping decides (PL46, the owner's answer in batch 274).
 _BROKEN_CODES = frozenset({CONNECTION_CLOSED, REQUEST_TIMEOUT})
+#: How long a server has to answer that ping.
+PING_TIMEOUT_S = 5.0
+
+
+def _bounded_error(text: str) -> str:
+    """An error's text as a result's would be: at most `max_read_chars`,
+    with a note when cut. A server's own message went to the model whole
+    (batch 274), where A79 bounds its results."""
+    bound = int(_harness_config.MAX_READ_CHARS)
+    if len(text) <= bound:
+        return text
+    return (_cut(text, bound) + f" [MCP error cut: it had {len(text):,} "
+            f"characters, and the first {bound:,} are shown, max_read_chars]")
 
 
 def _result(future, timeout: float, cancel):
@@ -746,9 +761,9 @@ class MCPClient:
             # which is code -32001 -- where v1 reported everything in
             # band. Map onto the same {"error": ...} convention so the
             # loop keeps exactly one error shape to understand.
-            if e.code in _BROKEN_CODES:
+            if e.code in _BROKEN_CODES and not self._answers(client, loop):
                 self.broken.add(server_name)
-            return {"error": f"MCP call failed: {e}"}
+            return {"error": _bounded_error(f"MCP call failed: {e}")}
         except TimeoutError:
             # The protocol timeout should have fired first. Reaching here
             # means the loop itself is wedged; cancel so the coroutine
@@ -768,7 +783,25 @@ class MCPClient:
             # passes -- on one buggy third-party server. D23 promises this
             # function returns ONE error shape; that has to mean always.
             logger.debug("MCP call raised", exc_info=True)
-            return {"error": f"MCP call failed: {type(e).__name__}: {e}"}
+            return {"error": _bounded_error(
+                f"MCP call failed: {type(e).__name__}: {e}")}
+
+    @staticmethod
+    def _answers(client, loop) -> bool:
+        """Whether the session still answers a ping within PING_TIMEOUT_S:
+        the line between a server that sent a broken code and one whose
+        connection is gone (PL46)."""
+        future = asyncio.run_coroutine_threadsafe(client.send_ping(), loop)
+        try:
+            future.result(timeout=PING_TIMEOUT_S)
+            return True
+        except MCPError as e:
+            # A server that refuses the ping still answered it; only the
+            # SDK's own codes say nothing did.
+            return e.code not in _BROKEN_CODES
+        except Exception:  # noqa: BLE001 - any other failure is no answer
+            future.cancel()
+            return False
 
     # -- shutdown --------------------------------------------------------
 

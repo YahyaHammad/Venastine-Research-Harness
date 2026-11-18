@@ -28,6 +28,7 @@ import json
 import math
 import re
 import shlex
+import sys
 import tokenize
 import unicodedata
 from dataclasses import dataclass, field, replace
@@ -1472,6 +1473,15 @@ def _code_files(manifest: Manifest, files, servers: tuple) -> list:
     shipped = [path for path in files if path.startswith(SERVERS + "/")]
     for server in servers:
         top = server.module.split(".")[0]
+        if top in sys.stdlib_module_names:
+            # `python -m timeit '<code>'` with any lock at all ran code no
+            # file of the plugin holds (batch 274). The standard library is
+            # first on a server's path, so servers/timeit.py would not run
+            # either: the name is refused, whatever the plugin ships.
+            problems.append(f"mcpServers.{server.name}: runs {server.module}, "
+                            f"which is Python's standard library rather than "
+                            f"this plugin's code or its lock's")
+            continue
         if (f"{SERVERS}/{top}.py" in files
                 or any(p.startswith(f"{SERVERS}/{top}/") for p in shipped)):
             continue

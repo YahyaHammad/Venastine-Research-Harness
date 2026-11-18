@@ -15,6 +15,16 @@ other name.
 
 ---
 
+## Plugins, the security round: MCP servers (batch 274)
+
+| Change | Test | Fix |
+|---|---|---|
+| Start a plugin's MCP server straight from the SDK's stdio transport | `TestTheRelay`, `test_lines_that_are_not_json_rpc_reach_no_log`, `test_a_flood_of_them_stops_it`, `test_a_line_that_never_ends_stops_it` | PL45: `plugin_mcp._PluginClient` starts `core/plugin_relay.py`, which starts the server |
+| Mark a server broken on -32000 or -32001 without asking it | `test_its_own_broken_code_leaves_it_running`, `test_a_ping_decides` | PL46: `MCPClient._answers`; a refused ping is an answer |
+| Return an MCP error's text unbounded | `test_its_error_is_bounded_as_a_result_is` | `mcp_client.client._bounded_error` |
+| Accept a standard-library module as a plugin's server, or leave a server's arguments unread | `TestWhatAServerMayRun` | `plugin_format._code_files`; `plugin_scan._server_args` |
+| Add a tool to the test server without listing it | `test_a_valid_plugin_of_servers_validates` | `SERVED` and `LISTED` name the four new hostile tools |
+
 ## Plugins, the security round: the format, the folder and the modal (batch 273)
 
 | Change | Test | Fix |

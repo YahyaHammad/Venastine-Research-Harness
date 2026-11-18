@@ -933,6 +933,28 @@ def _python(path: str, text: str, network: bool, add) -> None:
         _said(path, _strings(tree), add)
 
 
+def _server_args(manifest, network: bool, add) -> None:
+    """A server's arguments, read as the code a module from the lock may
+    take them as (batch 274): `python -m <module> 'exec(...)'` carried code
+    in mcp.json that no file of the plugin holds, and the scanner read only
+    files. An argument Python cannot parse is plain text, and the text
+    checks already read it with the rest of mcp.json."""
+    def in_args(severity, rule, path, line, message):
+        add(severity, rule, plugin_format.MCP_JSON, 0,
+            f"{message} (in an argument of a server)")
+
+    for server in manifest.servers if manifest else ():
+        for arg in server.args:
+            try:
+                tree = ast.parse(str(arg))
+            except (SyntaxError, ValueError, RecursionError, MemoryError):
+                continue
+            try:
+                _Code(plugin_format.MCP_JSON, network, in_args).visit(tree)
+            except RecursionError:
+                continue
+
+
 # ---- dependencies ---------------------------------------------------------
 
 def _distance_at_most_one(a: str, b: str) -> bool:
@@ -1192,6 +1214,7 @@ def scan(files: dict, manifest, *, online: bool = False,
                 add(HIGH, "encoding", path, 0, declared)
             _python(path, text, network, add)
     _requirements(manifest, add)
+    _server_args(manifest, network, add)
     report = Report(online=online)
     if online:
         report.unchecked = _online(

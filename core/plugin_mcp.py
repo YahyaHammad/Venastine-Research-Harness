@@ -68,11 +68,25 @@ class ServerError(Exception):
     """A call that did not reach a plugin's server."""
 
 
+#: The harness's relay between the SDK and a plugin's server (PL45).
+RELAY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "plugin_relay.py")
+#: The longest line a server may write, the tool runner's bound for a
+#: reply; and how many lines that are not JSON-RPC stop it.
+MAX_LINE_BYTES = plugin_tools.MAX_REPLY_BYTES
+MAX_DROPPED_LINES = 100
+
+
 class _PluginClient(MCPClient):
     """The harness's MCP client for one plugin server, with the server's
     stderr written to a file of ours instead of the harness's own stderr,
     which a TUI has painted over: the file is where a refusal is read
-    back from."""
+    back from.
+
+    The server runs behind `core/plugin_relay.py` (PL45, the owner's
+    answer in batch 274): the SDK's reader has no bound on a line, and
+    logs every line that is not JSON-RPC into the transcript, so a plugin's
+    server could grow the harness's memory without end or flood the TUI."""
 
     def __init__(self, configs: dict, errlog):
         super().__init__(configs)
@@ -80,7 +94,10 @@ class _PluginClient(MCPClient):
 
     def _transport_for(self, cfg):
         return stdio_client(StdioServerParameters(
-            command=cfg.command, args=[str(a) for a in cfg.args],
+            command=sys.executable,
+            args=["-I", "-S", "-B", RELAY, str(MAX_LINE_BYTES),
+                  str(MAX_DROPPED_LINES), "--", cfg.command,
+                  *[str(a) for a in cfg.args]],
             env=cfg.env or None, cwd=cfg.cwd), errlog=self._errlog)
 
 

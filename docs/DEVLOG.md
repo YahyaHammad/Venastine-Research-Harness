@@ -32045,3 +32045,68 @@ The owner kept helper modules under `tools/`, with PL20's wording amended.
 - **Gates:** ruff is clean. bandit's exit is 0, and its count check is green (62 pairs).
 - **Not run:** WSL (the FIFO test is POSIX's, and skips here), Docker, and any GitHub
   workflow.
+
+## Batch 274 -- Plugins: the security round's MCP findings (2026-11-18)
+
+The third fix batch: the MCP section's five findings (s5-1 to s5-5, all S3).
+
+**The owner's answers (2026-11-18):**
+- **A broken code:** a server's own -32000 is confirmed by a ping before it counts as broken
+  (PL46).
+- **Bounding a server's output:** a relay of the harness's own between the SDK and the server,
+  over a copy of the SDK's stdio transport (PL45).
+
+**What changed:**
+- **PL45, the relay.** The MCP SDK's stdio reader joins a server's output until it meets a
+  newline, with no bound (s5-3), and it logs every line that is not JSON-RPC at ERROR, one TUI
+  transcript entry per line (s5-4). The round's probes measured both: a stream with no newline
+  grew in the harness's memory, on the loop your own servers share, and one `print` loop added
+  5000 entries. `core/plugin_relay.py` now sits in between. It uses the standard library only
+  and is started by path, like the runner. It:
+  - passes JSON-RPC lines through unchanged;
+  - stops the server at a line past 1.1 MB, the tool runner's bound;
+  - drops a line that is not a JSON object or array, naming the first three in the server's
+    log;
+  - stops the server at the hundredth such line.
+
+  The SDK stops a server by its process tree, so the server goes with the relay.
+- **PL46, the ping.** -32000 and -32001 are the SDK's codes for a closed connection and an
+  unanswered request. A server can send either, and the SDK raises the same error for both, so
+  a server's own "quota exceeded" under -32000 was stopped and restarted (s5-2). On either code,
+  `MCPClient._answers` now pings the session for up to 5 s. An answer, a refusal included,
+  leaves the server running; no answer marks it broken. This holds for your own servers too.
+- **An error's length** (s5-1). An MCP error's text went to the model whole, where A79 bounds
+  a result: 300,000 characters reached `registry.dispatch` in the probe. It is now cut at
+  `max_read_chars`, with a note saying how long it was.
+- **What a server may run** (s5-5). A module outside `servers/` needed only a lock to exist, so
+  `python -m timeit '<code>'` ran code that no file of the plugin holds, and the scanner read
+  none of it. A standard-library module is now refused, whether or not the plugin ships one of
+  that name, because the standard library comes first on a server's path. The scanner also
+  reads each of a server's arguments as code, so an exec or a socket in one is a HIGH finding
+  against `mcp.json`.
+
+**Found while building:**
+- The first relay exited through `sys.exit` while its stdin thread was still blocked in a
+  read. Python's finalization then printed "Fatal Python error: could not acquire lock" into
+  the server's log, over the server's own last words, and the existing
+  `test_a_server_that_will_not_start_says_why` caught it. The relay now flushes its output and
+  leaves with `os._exit`.
+- The test server answers `ping` with "no such method", which is still an answer. The first
+  `_answers` read that refusal as no answer and marked the server broken; only the SDK's own
+  two codes or a timeout mean no answer now.
+
+**Verification:**
+- **Full suite:** 10249 passed and 99 skipped (10349 tests, 19 more than 10330). One TUI
+  width test failed in a run that took 18 minutes on a loaded machine; its file passes alone
+  (84 passed). The batch 273 tool-budget tests passed this time.
+- **Breakages:** 11 of 11 reverted fixes each turned a named test red
+  (`scratchpad/mutate274.py`).
+- **The round's own probes,** re-run on the fix:
+  - a 300,000-character error is now about 50,000;
+  - every server-sent code leaves the server answering, unbroken;
+  - the flood probe adds 0 transcript entries (it was 5000), and the relay names what it
+    dropped;
+  - `timeit` is refused, with a decoy `servers/timeit.py` too.
+- **Gates:** ruff is clean. bandit's exit is 0, and its count check is green (62 pairs).
+- **Not run:** Docker, WSL, Podman (the no-newline probe's container half), and any GitHub
+  workflow.

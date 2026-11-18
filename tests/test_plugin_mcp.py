@@ -16,8 +16,9 @@ runtime in the `integration` job.
 from __future__ import annotations
 
 import json
+import logging
 import os
-import subprocess  # nosec B404 - the integration test's `ps`
+import subprocess  # nosec B404 - the integration test's `ps` and the relay's tests
 import sys
 import time
 from pathlib import Path
@@ -64,7 +65,8 @@ def answer(mid, text, error=False):
 
 
 SERVED = ("echo", "sleep", "crash", "big", "fail", "spawn", "read", "write",
-          "inet", "unix", "connect", "loop", "rpcerror", "unlisted")
+          "inet", "unix", "connect", "loop", "rpcerror", "unlisted",
+          "selferror", "hugeerror", "junk", "endless")
 
 
 def call(mid, name, args):
@@ -119,6 +121,24 @@ def call(mid, name, args):
     elif name == "loop":
         # asyncio's self-pipe is a socketpair, which PL25's filter allows.
         answer(mid, str(asyncio.run(asyncio.sleep(0, result=5))))
+    elif name == "selferror":
+        # The SDK's own code for a closed connection, sent by a server that
+        # is still answering (batch 274).
+        send({"jsonrpc": "2.0", "id": mid, "error": {
+            "code": args.get("code", -32000),
+            "message": "quota exceeded for this key"}})
+    elif name == "hugeerror":
+        send({"jsonrpc": "2.0", "id": mid, "error": {
+            "code": -32603, "message": "word " * args["count"]}})
+    elif name == "junk":
+        for i in range(args["lines"]):
+            sys.stdout.write(f"not json-rpc, line {i}" + chr(10))
+        sys.stdout.flush()
+        answer(mid, "after the junk")
+    elif name == "endless":
+        while True:
+            sys.stdout.write("x" * 65536)
+            sys.stdout.flush()
     else:
         send({"jsonrpc": "2.0", "id": mid,
               "error": {"code": -32602, "message": f"no tool {name}"}})
@@ -168,7 +188,7 @@ if __name__ == "__main__":
 #: `missing`, which it does not serve.
 LISTED = [n for n in ("echo", "sleep", "crash", "big", "fail", "spawn", "read",
                       "write", "inet", "unix", "connect", "loop", "rpcerror",
-                      "missing")]
+                      "missing", "selferror", "hugeerror", "junk", "endless")]
 
 
 def listing(names=LISTED) -> list:
@@ -1079,3 +1099,175 @@ def test_a_plugin_mcp_server_runs_in_its_own_container(home, tmp_path,
          "label=venastine.plugin=notes"], capture_output=True, text=True,
         timeout=30)
     assert listed.stdout.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# ---- batch 274: the security round's MCP findings ---------------------------
+# ---------------------------------------------------------------------------
+
+CHILD = r'''
+import json, sys
+mode = sys.argv[1]
+if mode == "echo":
+    line = sys.stdin.readline()
+    sys.stdout.write(json.dumps({"echo": line.strip()}) + "\n")
+elif mode == "long":
+    sys.stdout.write("x" * 3000)
+elif mode == "junk":
+    for i in range(int(sys.argv[2])):
+        sys.stdout.write(f"junk {i}\n")
+    sys.stdout.write(json.dumps({"after": True}) + "\n")
+sys.stdout.flush()
+'''
+
+
+def relayed(tmp_path, *child_args, stdin=b"", max_line=1000, max_dropped=10):
+    child = tmp_path / "child.py"
+    child.write_text(CHILD, encoding="utf-8")
+    return subprocess.run(  # nosec B603 - this interpreter, the harness's relay, a test child
+        [sys.executable, "-I", "-S", "-B", plugin_mcp.RELAY, str(max_line),
+         str(max_dropped), "--", sys.executable, "-I", "-S", str(child),
+         *child_args], input=stdin, capture_output=True, timeout=60)
+
+
+class TestTheRelay:
+    """PL45 (the owner's answer, batch 274). The SDK's stdio reader joins
+    output until a newline with no bound, and logs every line that is not
+    JSON-RPC; a relay of the harness's own stands between them."""
+
+    def test_messages_and_stdin_pass_unchanged(self, tmp_path):
+        done = relayed(tmp_path, "echo", stdin=b"hello\n")
+        assert done.returncode == 0
+        assert json.loads(done.stdout) == {"echo": "hello"}
+
+    def test_a_line_past_the_bound_stops_the_server(self, tmp_path):
+        done = relayed(tmp_path, "long")
+        assert done.returncode == 1 and done.stdout == b""
+        assert b"longer than 1,000 bytes" in done.stderr
+
+    def test_lines_that_are_not_json_rpc_are_dropped_and_counted(self,
+                                                                 tmp_path):
+        done = relayed(tmp_path, "junk", "5")
+        assert done.returncode == 0
+        assert json.loads(done.stdout) == {"after": True}
+        assert done.stderr.count(b"dropped a line that is not JSON-RPC") == 3
+        assert b"dropped 5 lines in all" in done.stderr
+
+    def test_too_many_of_them_stop_the_server(self, tmp_path):
+        done = relayed(tmp_path, "junk", "50")
+        assert done.returncode == 1 and done.stdout == b""
+        assert b"dropped 10 lines that are not JSON-RPC" in done.stderr
+
+
+class TestAServerThatMisbehaves:
+    """The section's findings, through a real plugin server under
+    `process` isolation and the real MCP client."""
+
+    def test_its_own_broken_code_leaves_it_running(self, mcp_env, tmp_path,
+                                                   project):
+        """s5-2. -32000 and -32001 are the SDK's codes for a closed
+        connection and an unanswered request; a server sent one, the
+        client read it as broken, and the server was stopped. A ping now
+        decides (PL46)."""
+        install(tmp_path, mcp_files())
+        pid = echo()["pid"]
+        for code in (-32000, -32001):
+            result = call("selferror", {"code": code})
+            assert "quota exceeded for this key" in result["error"]
+            assert "was stopped" not in result["error"]
+        assert echo()["pid"] == pid
+
+    def test_its_error_is_bounded_as_a_result_is(self, mcp_env, tmp_path,
+                                                 project, monkeypatch):
+        """s5-1. A server's error message reached the model whole."""
+        monkeypatch.setattr(config, "MAX_READ_CHARS", 1000)
+        install(tmp_path, mcp_files())
+        error = call("hugeerror", {"count": 5000})["error"]
+        assert "[MCP error cut: it had" in error and len(error) < 1400
+
+    def test_lines_that_are_not_json_rpc_reach_no_log(self, mcp_env, tmp_path,
+                                                      project, caplog):
+        """s5-4. Each one was logged at ERROR, which the TUI shows."""
+        install(tmp_path, mcp_files())
+        pid = echo()["pid"]
+        with caplog.at_level(logging.WARNING):
+            assert call("junk", {"lines": 50}) == {"content": "after the junk"}
+        assert not [r for r in caplog.records
+                    if "Failed to parse JSONRPC" in r.getMessage()]
+        assert echo()["pid"] == pid
+
+    def test_a_flood_of_them_stops_it(self, mcp_env, tmp_path, project):
+        install(tmp_path, mcp_files())
+        error = call("junk", {"lines": 500})["error"]
+        assert "not JSON-RPC" in error and "was stopped" in error
+        assert plugin_mcp.running("notes") == []
+
+    def test_a_line_that_never_ends_stops_it(self, mcp_env, tmp_path, project):
+        """s5-3. It grew in the harness's memory without end, on the loop
+        your own servers share."""
+        install(tmp_path, mcp_files())
+        started = time.monotonic()
+        error = call("endless")["error"]
+        assert time.monotonic() - started < 30
+        assert "longer than" in error and "was stopped" in error
+        assert plugin_mcp.running("notes") == []
+
+
+class TestABrokenCodeAServerSends:
+    """PL46 for every MCP client, the user's own servers included."""
+
+    def test_a_ping_decides(self, server_script):
+        client = _client(server_script)
+        try:
+            for code in (-32000, -32001):
+                assert "error" in client.call_tool("s", "selferror",
+                                                   {"code": code})
+            assert client.broken == set()
+            assert "error" in client.call_tool("s", "crash", {})
+            assert client.broken == {"s"}
+        finally:
+            client.disconnect_all(timeout=5)
+
+
+class TestWhatAServerMayRun:
+    """s5-5. A module outside servers/ needed only a lock to exist, so
+    `python -m timeit '<code>'` ran code no file of the plugin holds, and
+    the scanner read none of it."""
+
+    LOCK = b"six==1.17.0 --hash=sha256:" + b"a" * 64 + b"\n"
+
+    @pytest.mark.parametrize("module", ["timeit", "json.tool", "http.server",
+                                        "runpy"])
+    def test_a_standard_library_module_is_refused(self, module):
+        files = mcp_files(servers=mcp_json(module=module),
+                          more={"requirements.txt": self.LOCK})
+        with pytest.raises(PluginFormatError, match="standard library"):
+            plugin_format.validate("notes", files)
+
+    def test_shipping_one_of_that_name_does_not_help(self):
+        files = mcp_files(servers=mcp_json(module="timeit"))
+        files["servers/timeit.py"] = SERVER.encode()
+        with pytest.raises(PluginFormatError, match="standard library"):
+            plugin_format.validate("notes", files)
+
+    @pytest.mark.parametrize("arg, rule", [
+        ("exec(__import__('base64').b64decode('cHJpbnQoMSk='))", "decode-exec"),
+        ("exec(input())", "exec"),
+        ("import socket", "network"),
+    ])
+    def test_code_in_an_argument_is_read(self, arg, rule):
+        from core import plugin_scan
+
+        files = mcp_files(servers=mcp_json(args=("--mode", arg)))
+        manifest = plugin_format.validate("notes", files)
+        report = plugin_scan.scan(files, manifest)
+        found = [f for f in report.high
+                 if f.rule == rule and f.path == "mcp.json"]
+        assert found and "in an argument of a server" in found[0].message
+
+    def test_plain_arguments_are_no_finding(self):
+        from core import plugin_scan
+
+        files = mcp_files()
+        report = plugin_scan.scan(files, plugin_format.validate("notes", files))
+        assert not [f for f in report.findings if f.path == "mcp.json"]
