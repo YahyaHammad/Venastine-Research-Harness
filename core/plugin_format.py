@@ -22,10 +22,13 @@ the first, a loader keeps the last), every field typed, and every unknown
 key refused rather than ignored.
 """
 
+import codecs
+import io
 import json
 import math
 import re
 import shlex
+import tokenize
 import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Optional
@@ -1111,6 +1114,24 @@ def load_yaml(text: str):
     return yaml.load(text, Loader=_StrictLoader)  # nosec B506 - _StrictLoader is a SafeLoader subclass
 
 
+def yaml_strings(text: str) -> list:
+    """(line, string) for every scalar in `text`, keys included, as the
+    strict loader reads it: escapes decoded and folded lines joined, which
+    is the text the model and the modal are given (plugin_scan reads it,
+    batch 272). Composes only; builds nothing. yaml.YAMLError otherwise."""
+    out, stack = [], [yaml.compose(text, Loader=_StrictLoader)]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, yaml.ScalarNode):
+            out.append((node.start_mark.line + 1, node.value))
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend(node.value)
+        elif isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                stack.extend((key, value))
+    return sorted(out, key=lambda item: item[0])
+
+
 def parse_manifest(text: str, name: Optional[str]) -> Manifest:
     """`plugin.yaml`'s text, for the plugin whose folder is `name` +
     SUFFIX. A Git repository root has no folder name to match, so passes
@@ -1342,6 +1363,29 @@ def check_files(sizes: dict) -> list:
     return problems
 
 
+def python_encoding_problem(data: bytes) -> Optional[str]:
+    """Why Python would not read these bytes as the UTF-8 everything else
+    here reads them as, or None. An ASCII file that declares `coding:
+    utf-7` decodes cleanly as UTF-8, and that is what the scanner and the
+    modal read; Python honours the declaration and runs different code
+    (owner, batch 272: refused, never followed). The declaration is found
+    by Python's own rule, `tokenize.detect_encoding`."""
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(data).readline)
+    except SyntaxError as exc:
+        return (f"Python cannot read its encoding declaration "
+                f"({' '.join(str(exc).split())[:120]})")
+    try:
+        name = codecs.lookup(encoding).name
+    except LookupError:
+        name = encoding
+    if name in ("utf-8", "utf-8-sig"):
+        return None
+    return (f"declares the encoding {encoding!r}; a plugin's Python is "
+            f"UTF-8 and declares nothing else, so that what is read before "
+            f"you say yes is what runs")
+
+
 def validate(name: str, files: dict) -> Manifest:
     """The manifest of the plugin called `name`, whose files are `files`
     ({path: bytes}), after every check this module owns. Raises
@@ -1360,6 +1404,10 @@ def validate(name: str, files: dict) -> Manifest:
         except UnicodeDecodeError:
             problems.append(f"{path!r}: not UTF-8 text")
             continue
+        if path.endswith(".py"):
+            declared = python_encoding_problem(files[path])
+            if declared:
+                problems.append(f"{path!r}: {declared}")
         if path == MANIFEST:
             try:
                 manifest = parse_manifest(text.lstrip(BOM), name)

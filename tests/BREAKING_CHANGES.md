@@ -15,6 +15,19 @@ other name.
 
 ---
 
+## Plugins, the security round: the scanner (batch 272)
+
+| Change | Test | Fix |
+|---|---|---|
+| Accept a plugin `.py` that declares an encoding other than UTF-8, or scan one as UTF-8 text | `test_python_reads_different_code_from_the_scanner`, `test_the_format_refuses_any_encoding_but_utf8`, `test_an_install_refuses_it_before_any_modal`, `test_the_scanner_says_so_on_its_own` | PL43: `plugin_format.python_encoding_problem`, by `tokenize.detect_encoding` |
+| Cut a modal's or a review comment's findings by position, so later rules or files drop off | `test_the_tools_exec_is_listed_however_many_skills_lead_it`, `test_every_high_rule_in_every_file_gets_a_line`, `test_the_list_grows_no_further_than_its_ceiling`, `test_the_modal_lists_it`, `test_the_review_comment_lists_it` | PL44: `plugin_scan.listed`, used by both |
+| Fold findings into "and N more like ..." without saying what differs | `test_a_count_row_names_what_it_folds` | `_Collector.close` names lines and the different details; `Finding.count` marks the row |
+| Resolve only imports when naming what code calls | `TestCodeThatSpellsWhatItReaches` | `_const` folds constant strings; `_qualified` follows importers, getattr, namespaces and simple assignments |
+| Match plugin.yaml and mcp.json as raw lines only, or a phrase line by line | `TestTheTextTheModelReads` | `plugin_format.yaml_strings`; `_WRAP` joins wrapped lines |
+| Judge a lock's age or wheels by every file of a release | `TestTheFilesTheLockPins` | the pinned files, by sha256; a hash PyPI does not list is `unknown-hash` |
+| Let a PyPI or OSV answer in the wrong shape raise, or read an unreadable upload time as old | `TestAnAnswerInTheWrongShape` | `_release_files`, `_Shape`: listed as unchecked |
+| Answer a test's PyPI lookup without the file's `digests` | every lock test | the fake answers in PyPI's shape; conftest's `plugin_scan_lookups` lists a wheel for each pinned hash |
+
 ## Plugins, the review fixes (batch 255)
 
 | Change | Test | Fix |

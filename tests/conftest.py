@@ -704,20 +704,36 @@ def plugin_scan_lookups(monkeypatch):
     request leaves the suite. The answer is a clean one -- an old release
     with a wheel, no known vulnerability -- so a modal reads as it would for
     a healthy lock. A test of the lookups passes its own `fetcher`.
+
+    Since batch 272 the scanner judges the files a lock pins by hash, so the
+    clean answer lists a wheel for every hash a lock parsed in this test
+    pins -- PyPI's own shape, with `digests` -- read from
+    `parse_requirements` as it returns.
     """
-    asked = []
+    import json
+
+    from core import plugin_format
+
+    asked, pinned = [], set()
+    parse = plugin_format.parse_requirements
+
+    def recording(text):
+        requirements = parse(text)
+        for requirement in requirements:
+            pinned.update(requirement.hashes)
+        return requirements
 
     def answer(url, body=None, **_kwargs):
-        import json
-
         asked.append(url)
         if body is not None:
             queries = json.loads(body).get("queries") or []
             return 200, json.dumps({"results": [{} for _ in queries]}).encode()
         return 200, json.dumps({"info": {"yanked": False}, "urls": [{
-            "packagetype": "bdist_wheel",
-            "upload_time_iso_8601": "2020-01-01T00:00:00Z"}]}).encode()
+            "packagetype": "bdist_wheel", "digests": {"sha256": sha},
+            "upload_time_iso_8601": "2020-01-01T00:00:00Z"}
+            for sha in sorted(pinned)]}).encode()
 
+    monkeypatch.setattr(plugin_format, "parse_requirements", recording)
     monkeypatch.setattr("core.plugin_scan.fetch", answer)
     return asked
 

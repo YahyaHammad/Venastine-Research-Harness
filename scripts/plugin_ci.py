@@ -869,6 +869,8 @@ def _bounded(lines: list, most: int = MAX_LISTED) -> list:
 
 def comment(result: Review, head: str) -> str:
     """The one comment's Markdown."""
+    from core import plugin_scan
+
     ch = result.changes
     out = ["### Plugin review", ""]
     if result.too_many:
@@ -901,9 +903,14 @@ def comment(result: Review, head: str) -> str:
         if report is not None:
             if report.findings:
                 out += ["", f"The scanner found {report.summary()}:"]
-                out += _fenced(_bounded(
-                    [f"{f.severity.upper():4}  {f.shown()}"
-                     for f in report.findings]))
+                # Every HIGH rule in every file before the cut, code files
+                # first: the label clears what this lists (owner, batch 272).
+                shown, left, left_high = plugin_scan.listed(
+                    report.findings, MAX_LISTED)
+                lines = [f"{f.severity.upper():4}  {f.shown()}" for f in shown]
+                if left:
+                    lines.append(plugin_scan.left_out(left, left_high))
+                out += _fenced(lines)
             else:
                 out += ["", "The scanner found nothing to point out."]
             if report.unchecked:

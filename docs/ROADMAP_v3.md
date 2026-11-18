@@ -43,7 +43,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§59. Pick it instead of typing it** — **(BUILT in batch 238)** (removing a memory means reading a uuid out of the transcript and typing it back, one at a time; switching agent means typing an exact name)
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
-- **§94. Plugins: skills, agents and settings from a reviewed marketplace** - **(NOT BUILT beyond slice 5: the format, the store, `/plugin` and its trust modal BUILT in batch 249, tools in a container per plugin, with locked dependencies, BUILT in batch 250, MCP servers written in Python BUILT in batch 251, and the marketplace's CI and the scanner BUILT in batch 252, and Git URLs BUILT in batch 253, and two reviews' findings fixed in batch 255; a first plugin to come)** (the owner asked for plugins that add tools, skills, agents, MCP servers and settings without touching a core file, pulled from this repository's nested `plugins/` folder behind a trust modal, tested only when they change, and kept out of any pull request that touches anything else. A `.plugin` folder is a plugin; its manifest is read by the strictest parser in the tree; everything it adds is prefixed with its name; installs come from one resolved commit with every file checked against git's hash, live outside the install, and stop loading if a file changes; PL1-PL42)
+- **§94. Plugins: skills, agents and settings from a reviewed marketplace** - **(NOT BUILT beyond slice 5: the format, the store, `/plugin` and its trust modal BUILT in batch 249, tools in a container per plugin, with locked dependencies, BUILT in batch 250, MCP servers written in Python BUILT in batch 251, and the marketplace's CI and the scanner BUILT in batch 252, and Git URLs BUILT in batch 253, and two reviews' findings fixed in batch 255, and the security round's scanner findings in batch 272; a first plugin to come)** (the owner asked for plugins that add tools, skills, agents, MCP servers and settings without touching a core file, pulled from this repository's nested `plugins/` folder behind a trust modal, tested only when they change, and kept out of any pull request that touches anything else. A `.plugin` folder is a plugin; its manifest is read by the strictest parser in the tree; everything it adds is prefixed with its name; installs come from one resolved commit with every file checked against git's hash, live outside the install, and stop loading if a file changes; PL1-PL44)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
 - **§91. A release for every merge, and npm without a token** - **(BUILT in batch 237)** (the owner asked for the patch to bump itself after each merge, with a way round it for a minor or major release, and for npm's trusted publishing in place of the token npm retired. `release.yml` now commits, tags and releases the next version when a pull request merges into `main`, pushing with a deploy key because a `GITHUB_TOKEN` push starts no CI; `release:minor`, `release:major` and `release:skip` change that per pull request; and `publish.yml` publishes through OIDC once a repository variable arms it; A86-A90)
@@ -3298,7 +3298,7 @@ recommendation on seven; the eighth began with a question of theirs.
   harness owns instead, and its own tests are optional, run under the same walls and never read
   as evidence of safety (PL35).
 
-### Decisions (PL1-PL42)
+### Decisions (PL1-PL44)
 
 | id | decision |
 |---|---|
@@ -3344,6 +3344,8 @@ recommendation on seven; the eighth began with a question of theirs.
 | **PL40** | **`plugins/` is out of the harness's own lint, bandit, CodeQL and docs gates.** ruff's `extend-exclude`, bandit's and its count check's pathspec, CodeQL's `paths-ignore` (npm ships none of it) and the docs gates' walk, at the root only, so the guide's example in `docs/` stays in. A plugin's code is the scanner's to read and `plugins.yml`'s to run |
 | **PL41** | **An external Git install reads one plugin at the remote's default branch** (owner, batch 253). The root uses the manifest's name. `--path` selects a repository-relative `<name>.plugin` subfolder whose name must match the manifest. Git uses HTTPS or SSH with the user's configured authentication. The harness rejects inline credentials and reads ordinary blobs from a temporary bare shallow clone without a checkout. It applies the format limits to the selected tree and uses the external scan and unreviewed trust prompt (PL36). The registry records the URL, path and exact commit |
 | **PL42** | **Every session shares the store, so its changes hold the operating system's lock** (owner, batch 255, over a sweep that went by age). `plugin_store._locked()` is `fcntl.flock` or `msvcrt.locking` on `.lock`, CG4's lock: every read-modify-write of `registry.json` and `projects.json`, every commit, uninstall and sweep holds it, and a change that waits 30 s for another process raises `StoreBusy`. A read waits and then reads anyway, since a session must start and each write replaces a whole file. A staging folder is OWNED: its process locks `.staging-<hex>.lock` before the folder exists and lets go once it is renamed into place or removed, so a sweep removes only what no live process holds. A dead process releases its locks, so its leftovers go at the next sweep. **The registry is part of the commit**: its write is the last step, a failure puts the old folders back, and they are deleted only once the registry names the new ones |
+| **PL43** | **A plugin's Python is UTF-8 and declares nothing else** (owner, batch 272, over scanning each file in the encoding it declares). The format refuses a `.py` whose declaration, found by Python's own `tokenize.detect_encoding`, names any other encoding, or one Python cannot read. The scanner and the modal read a `.py` as UTF-8 text, and `ast.parse` of text ignores PEP 263, while Python decodes the bytes by the declaration: an ASCII file declaring `utf-7` read as a comment where it ran `import socket`. The scanner names the declaration HIGH too, for a scan run on its own |
+| **PL44** | **A list of findings shows every HIGH rule in every file before any repeats** (owner, batch 272: "each rule shown once, raise the cap too if necessary"). `plugin_scan.listed` serves the modal and the review comment alike: one line per HIGH rule per file, each rule's first file leading and code files first, then the rest in order, in at least 40 lines and at most 200. A cut ends with how many it left out and how many of those are HIGH, and a count row ("and N more like ...") names its lines and what its findings say that the rows above do not |
 
 ### Built and measured (slice 1, batch 249, 2026-11-08)
 
@@ -3492,6 +3494,27 @@ false. Security was not in either review's scope; the next round is scoped for i
 | A plugin from Git was told to reinstall with the marketplace's id | yes | `plugin_tools.reinstall_command` names its own source |
 | `read_project_doc` reads a `.plugin` folder opened as the project itself | yes | intended, the owner's call (PL37) |
 
+### Security round fixes (batches 272-275, 2026-11-18)
+
+The security round read `43a1e1a` in nine sections, each with its own reviewer, and gave every
+finding to a second agent that tried to reproduce it from its text alone. Usage limits stopped
+five sections. The four that finished (the format, MCP servers, CI, the scanner), two leads
+from the fetch section, and an outside review of `4083b6f` came to 27 open findings once
+deduplicated, each re-run or read against `43a1e1a`. No S1 was found; the five sections not
+reviewed are listed below, not counted as clean. Two of the outside review's five were wrong:
+a failed `changes` job fails its run, which `deploy_gate.py` refuses, and the Landlock
+attribute layout is the kernel's own.
+
+| finding | severity | fix |
+|---|---|---|
+| A `.py` declaring `# coding: utf-7` read as a comment to the scanner and ran as code | S2 | PL43, batch 272 |
+| Forty findings in skills pushed a `tools/` exec off the modal and the comment, sorted by path and cut at 40 | S3 | PL44, batch 272 |
+| A count row folded a different marker, phrase or variable into "and N more like ..." | S3 | the row names its lines and its different details, batch 272 |
+| A builtin, the importer or a credential path reached through strings put together (`operator.attrgetter`, `vars(builtins)[...]`, `g = getattr`, `types.FunctionType`, `os.path.join`, `+`) gave no finding or a note | S3 | constants folded, importers, getattr, namespaces and simple assignments followed, batch 272 |
+| plugin.yaml and mcp.json matched as raw lines, so an escape or a wrap hid a phrase the model reads whole | S3 | their parsed strings are read too, and a wrapped sentence is one sentence, batch 272 |
+| The fresh-release rule aged the oldest file of a release, and the wheel rule asked about any file | S3 | the files the lock pins, by hash; a pinned hash PyPI does not list is HIGH, batch 272 |
+| A PyPI or OSV answer in the wrong shape raised out of the scan, so an install crashed before its modal | S4 | listed as unchecked, as an unreadable upload time is, batch 272 |
+
 ### Gap register
 
 - **No live marketplace install.** `plugins/` holds no plugin yet; the fetch is tested against a
@@ -3537,6 +3560,13 @@ false. Security was not in either review's scope; the next round is scoped for i
   `plugin-scan`.
 - **The link-refusal test skips on a machine that cannot make a link,** which includes this
   Windows box; CI's Linux runs it.
+- **The scanner follows a name through constants, imports and one-line assignments, not through
+  functions, containers or data flow** (batch 272). `handlers[name](x)` is no finding, and a
+  builtin passed through a function argument is not followed. It is advisory by design (PL33):
+  the container is the boundary, and it is read for what it shows a reviewer.
+- **The security round's five unreviewed sections** (batch 272): the store, install and modal;
+  code execution and isolation; the prompt and loader; batch 255's locks and test integrity; and
+  the fetch, beyond its two leads. Their prompts are written; none of them ran to the end.
 - **`plugins/` is in the GitHub installer's copy of the repository** (the whole zip), where nothing
   reads it. npm's file list leaves it out.
 - ~~**Once plugins hold `.py` files** (possible since slice 2), the docs gate's production-module

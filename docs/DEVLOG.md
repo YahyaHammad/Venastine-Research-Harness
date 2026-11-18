@@ -31882,3 +31882,96 @@ covered security; the next round is scoped for it. ROADMAP_v3 §94's "Review fix
   - a live marketplace;
   - a real Windows-containers daemon. The probe's reading of `OSType: windows` was tested
     against Docker's text output, not a switched Docker Desktop.
+
+## Batch 272 -- Plugins: the security round's scanner findings (2026-11-18)
+
+**What happened before it.** A security round read draft PR #287 at `43a1e1a` in nine sections,
+one reviewer each, and a second agent tried to reproduce every finding from its text alone. Usage
+limits cut the round twice, and four sections finished: the format, MCP servers, CI and the
+scanner. Two leads came from the fetch section, and an outside review of `4083b6f` added five
+more. Deduplicated and re-run against `43a1e1a`, that came to 27 open findings, with one S2 and
+no S1. Two of the outside review's five were wrong. This batch fixes the scanner's seven.
+
+**The owner's answers (2026-11-18):**
+- **An encoding declaration:** refused, not followed (PL43).
+- **What a list of findings shows:** "each rule shown once, raise the cap too if necessary" (PL44).
+- **Helper modules under `tools/`:** allowed, with PL20's wording amended (batch 273).
+- **A server's own -32000 error:** confirmed by a ping before the server counts as broken
+  (batch 274).
+
+**What changed:**
+- **PL43, the S2.** An ASCII `.py` declaring `# coding: utf-7` decoded cleanly as UTF-8, which
+  is how the scanner and the modal read it. `ast.parse` of text ignores PEP 263, while Python
+  decodes the bytes by the declaration. The probe's file read as a comment and ran
+  `import socket` under `network: false`, and the modal said "nothing to point out".
+  `plugin_format.python_encoding_problem` now finds the declaration by Python's own rule,
+  `tokenize.detect_encoding`, and the format refuses anything but UTF-8. The scanner names it
+  HIGH as well, for a scan run on its own.
+- **PL44: what a list shows.** The modal and the review comment cut the findings at 40, sorted
+  by path, so forty findings in skills pushed a `tools/` exec off the end, and
+  `plugin:scan-reviewed` then cleared it unseen. `plugin_scan.listed` now serves both:
+  - every HIGH rule in every file gets one line, each rule's first file leading and code files
+    first;
+  - the rest follow in order;
+  - the list is at least 40 lines and grows to 200 when the rule lines need it;
+  - a cut says how many findings it left out, and how many of those are HIGH.
+- **Count rows.** "and N more like the X finding above" now names its lines, and up to three
+  details the rows above do not show: the code point, the path, the variable or the phrase.
+  `Finding.count` marks the row.
+- **Code that spells what it reaches.** None of these gave a finding, or gave only a note:
+  - `operator.attrgetter('exec')`;
+  - `importlib.import_module('builtins').exec`;
+  - `vars(builtins)['exec']`, `globals()['__builtins__']['exec']`, or `g = getattr` and then
+    `g(builtins, ...)`;
+  - `types.FunctionType` or `CodeType`, and `__globals__` or `__subclasses__`;
+  - `'~/.s' + 'sh'`, `Path.home() / '.ssh'` and `os.path.join(home, '.ssh', ...)`;
+  - `os.environ['OPENAI_' + 'API_KEY']`;
+  - `__import__('so' + 'cket')`.
+
+  `_const` folds strings that constants build, and `_qualified` now follows importers, getattr,
+  namespace subscripts and one-line assignments. A key named at run time is a note.
+- **The text the model reads.** plugin.yaml and mcp.json are read as their parsed strings as
+  well as line by line, through `plugin_format.yaml_strings` and `json`. To the model, a
+  "providers" and "json" joined by an escaped dot (backslash, u002e) is `providers.json`, and a
+  folded line is one line. A sentence wrapped
+  over lines is now read as one sentence; a blank line still ends it, and two YAML fields stay
+  two.
+- **The lock.** The fresh-release rule aged a release's oldest file, and the wheel rule asked
+  about any file. Both now judge the files the lock pins, by sha256:
+  - a wheel uploaded yesterday beside an old sdist is fresh;
+  - a pinned sdist beside an unpinned wheel is sdist-only;
+  - a pinned hash PyPI does not list is HIGH `unknown-hash`.
+- **Answers in the wrong shape.** A PyPI or OSV answer that was JSON in another shape raised
+  `AttributeError` out of the scan, so `/plugin install` crashed before its modal. It is now
+  listed as unchecked, as an unreadable upload time is: an age the scanner cannot read is not
+  a pass.
+- **The test fakes.** They now answer in PyPI's own shape, with `digests`. Conftest's
+  `plugin_scan_lookups` lists a wheel for every hash a lock parsed in the test pins.
+
+**Found while building:**
+- The round's exec probe still had three forms past the first fix, all through a local name
+  (`b = __builtins__`, `b = globals()['__builtins__']`, `g = getattr`). They are why one-line
+  assignments are now followed.
+- The first mutation run left three reverts alive, and each was a real gap:
+  - The modal and comment tests were not listed for the cut-by-position revert. Once findings
+    sort code first, a position cut also shows a `tools/` exec, so the tests now use helper
+    modules that sort before it.
+  - The `os.path.join` cases were also caught by plain constants like `id_rsa`, which hid that
+    `Path.home().joinpath('.ssh', ...)` was not read at all.
+  - `_Shape` subclasses `ValueError`, so reverting its `except` fell through to "was not JSON"
+    and the test, which asked only for a prefix, passed.
+
+**Verification:**
+- **Full suite:** 10176 passed and 98 skipped on Windows, none failed (10274 tests, 72 more
+  than 10202), in a fresh venv built from the commit's pins, with `AGENT_WORKSPACE` unset.
+- **Breakages:** 30 of 30 reverted fixes each turned a named test red
+  (`scratchpad/mutate272.py`).
+- **The round's own probes,** re-run on the fix:
+  - the cookie probe's plugin is refused by the format;
+  - the listing probe shows the exec first, in the modal and the comment;
+  - every exec, credential and environment case is HIGH;
+  - all eight escape and wrap cases are found;
+  - the six lock cases give the right findings, and every malformed answer is unchecked.
+- **Gates:** ruff is clean. bandit's exit is 0 with the rewritten baseline, and its count check
+  is green (62 pairs).
+- **Not run:** WSL, Docker, any GitHub workflow, and a live PyPI.

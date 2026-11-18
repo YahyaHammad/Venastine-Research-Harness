@@ -396,10 +396,15 @@ def scan_lines(report, manifest, source: dict) -> list:
                      "point out."]
     else:
         lines = ["", f"What the scanner found ({report.summary()}):"]
-        lines += _bounded(
-            [f"  {'HIGH' if f.severity == plugin_scan.HIGH else 'note'}  "
-             f"{_one_line(f.where)}  {_one_line(f.message)}"
-             for f in report.findings], MAX_LISTED_FINDINGS, "findings")
+        # Every HIGH rule in every file gets its line before the cut, code
+        # files first (owner, batch 272).
+        shown, left, left_high = plugin_scan.listed(
+            report.findings, MAX_LISTED_FINDINGS)
+        lines += [f"  {'HIGH' if f.severity == plugin_scan.HIGH else 'note'}  "
+                  f"{_one_line(f.where)}  {_one_line(f.message)}"
+                  for f in shown]
+        if left:
+            lines.append(f"    {plugin_scan.left_out(left, left_high)}")
     if report.high:
         lines.append("A HIGH FINDING IS WHERE A REVIEWER WOULD STOP. Read "
                      "each one, and the file it names, before you say yes."
