@@ -32110,3 +32110,57 @@ The third fix batch: the MCP section's five findings (s5-1 to s5-5, all S3).
 - **Gates:** ruff is clean. bandit's exit is 0, and its count check is green (62 pairs).
 - **Not run:** Docker, WSL, Podman (the no-newline probe's container half), and any GitHub
   workflow.
+
+## Batch 275 -- Plugins: the security round's CI findings (2026-11-18)
+
+The fourth and last fix batch of the round: the CI section's six findings (s7-1 to s7-6). It
+changes `.github/workflows/plugin-review.yml`, which the gh token cannot push, so the owner
+pushes this branch.
+
+**What changed:**
+- **A category folder** (s7-6, S3). The review validated a plugin's own folder name and
+  never the category folders above it. A folder name carried a line break and an @mention into
+  the bot's comment, outside any fence; the probe's comment had an unfenced "**Approved by the
+  maintainers.** @victim-user" line, and no install could have read that plugin. Every folder
+  of the id now goes through `plugin_format.parse_id`, so a bad one is a hard problem. The
+  comment's heading is one code span with no line break, backtick or hidden character, so no
+  heading, Markdown or mention starts inside it.
+- **The head a label was added on** (s7-3, S3). The labelled run read the head live, after
+  checkout, setup and install, and recorded it. A push landing in between kept
+  `plugin:scan-reviewed` on code nobody had read. A label now counts only for the head its
+  event saw. The script reads that head from the runner's own event file, `GITHUB_EVENT_PATH`,
+  because the workflow is held to name nothing of the head, so a tripwire test still finds no
+  `head.sha` in it. A missing head is no review.
+- **The bot's own release:skip** (s7-2, S3). Added for a plugin-only pull request, it stayed on
+  once the pull request began changing the harness, and that merge skipped its release. The
+  bot's comment now records that the label is the bot's own, and the bot takes it off again
+  when the pull request changes the harness, saying so. A release:skip a person added stays.
+- **The release since the last one** (s7-1, S3). A plugin-only merge's skip was decided on its
+  own file list, so a core merge whose release run made nothing was not released by the next
+  plugin-only merge either. `release_after_merge` now needs every file changed since the
+  newest release tag to be under `plugins/`. With no tag, or no answer from git, it releases.
+- **Where the review runs** (s7-4, S4): `plugin-review.yml` now runs for pull requests into
+  `main` only. Before, it took another branch's maintainers of record and version baseline.
+- **Its dependency** (s7-5, S4). The job holding a token that writes labels and comments
+  installed PyYAML without hashes. It now installs `scripts/plugin-review-requirements.txt`, at
+  requirements.txt's pin with every file's hash, with `--require-hashes --only-binary=:all:
+  --no-deps`.
+
+**Found while building:**
+- The first version of the install line was a plain YAML value holding `:all: `, which YAML
+  reads as a mapping, so GitHub would have refused the whole workflow file. The shape tests
+  caught it when they parsed the file, and the value is now quoted.
+
+**Verification:**
+- **Full suite:** 10268 passed and 99 skipped, none failed (10367 tests, 18 more than
+  10349).
+- **Breakages:** 11 of 11 reverted fixes each turned a named test red, the two workflow lines
+  included (`scratchpad/mutate275.py`).
+- **The round's own probes,** re-run on the fix:
+  - the release probe's plugin-only merge now releases the pending core change (0.3.14);
+  - the stale release:skip is removed, and the merge releases;
+  - the label race does not reproduce;
+  - both bad category folders are hard problems.
+- **Gates:** ruff is clean. bandit's exit is 0, and its count check is green (62 pairs).
+- **Not run:** GitHub Actions itself; the workflow change is checked by its tests, which parse
+  it.

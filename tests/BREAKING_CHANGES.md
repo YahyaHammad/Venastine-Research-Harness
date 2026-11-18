@@ -15,6 +15,16 @@ other name.
 
 ---
 
+## Plugins, the security round: CI and releases (batch 275)
+
+| Change | Test | Fix |
+|---|---|---|
+| Accept `plugin:scan-reviewed` for whatever head is live, or call `plugin_ci.review` without the event's head | `TestTheHeadALabelWasAddedOn` | `review(event_head=)`, read by `cmd_review` from GITHUB_EVENT_PATH; the test helper passes the fake's head |
+| Leave the bot's own release:skip on a pull request that now changes the harness | `TestTheBotsOwnReleaseSkip` | the comment's state records `skip`; `Review.skip_added`, `skip_note` |
+| Validate a plugin's folder name and not its category folders, or put a folder in the comment raw | `TestACategoryFolder` | `plugin_format.parse_id`; `plugin_ci._span` |
+| Decide a plugin-only release skip on the merge's own files | `TestTheReleaseLooksSinceTheLastOne`, `test_the_plan_reads_the_file_list` | `release_after_merge.changed_since_release`; the test fakes git with `fake_git` |
+| Run plugin-review.yml for any branch, or install its PyYAML unhashed | `TestWhereTheReviewRuns` | `branches: [main]`; `scripts/plugin-review-requirements.txt` |
+
 ## Plugins, the security round: MCP servers (batch 274)
 
 | Change | Test | Fix |

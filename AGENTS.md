@@ -71,7 +71,7 @@ python main.py --init --project-config             # §24 I17: .venastine/settin
 # §23 slice 2: the model asks with `ask_user` and keeps a checklist with
 #   `todo_write`; the TUI panel's placement is the `tui.todo_position` setting
 
-pytest                                            # 10349 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
+pytest                                            # 10367 tests, offline. 1:37 on 16 cores at batch 207 (9:06 serial at batch 114)
 pytest tests/test_orchestrator.py                 # one file
 pytest tests/test_orchestrator.py::test_name      # one test
 pytest -k "grounding" -x                          # by keyword, stop on first failure
@@ -1850,7 +1850,9 @@ A plugin is a `<name>.plugin` folder of skills, agents, tools, MCP servers and s
   job, not by path** (PL32-PL35). `plugin-review.yml` is `pull_request_target`, with a token
   that writes labels and comments, which is safe only because it checks out the base and
   fetches plugin files as data for `core/plugin_scan.py`, which parses with `ast` and imports
-  nothing it reads. Do not add a checkout of the head, an import of a plugin's code, or
+  nothing it reads. A `plugin:scan-reviewed` label counts only for the head its event saw,
+  which the script reads from the runner's own event file (batch 275), since the workflow
+  names nothing of the head. Do not add a checkout of the head, an import of a plugin's code, or
   `plugin_source` (it pulls in `config` and pydantic, which that workflow does not install). A
   core workflow skips a plugin-only change through its `changes` job: a `paths-ignore` would
   make `deploy_gate.py` refuse it, and a filtered workflow never reports. A plugin's own tests

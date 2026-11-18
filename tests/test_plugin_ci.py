@@ -321,6 +321,8 @@ def hub_for(head: dict, base: dict = None, *, changed=None, **kwargs):
 
 def review(hub, **kwargs):
     kwargs.setdefault("online", False)
+    # The head the event saw: the live one, unless a test says otherwise.
+    kwargs.setdefault("event_head", "HEAD")
     return ci.review(hub, 7, **kwargs)
 
 
@@ -575,7 +577,9 @@ class TestTheComment:
         result, _ = review(hub, action="labeled", label=ci.SCAN_REVIEWED,
                            sender="owner")
         state = ci._state(ci.comment(result, "HEAD"))
-        assert state == {"reviewed": "HEAD", "requested": ["alice"]}
+        # `skip`: the release:skip it carries is the bot's own (batch 275).
+        assert state == {"reviewed": "HEAD", "requested": ["alice"],
+                         "skip": True}
 
     def test_it_is_bounded(self):
         result, _ = review(hub_for(probe()))
@@ -883,6 +887,20 @@ class TestTheHarnessChecks:
 from tests.test_release_after_merge import BETA, TAGS, release  # noqa: E402
 
 
+def fake_git(*since_release):
+    """git as `release_after_merge` asks it: one release tag, none on the
+    tip, and `since_release` changed since that tag."""
+    def answer(root, *args):
+        if args[:2] == ("tag", "--list"):
+            return "v0.3.13"
+        if args[:2] == ("tag", "--points-at"):
+            return ""
+        if args[:2] == ("diff", "--name-only"):
+            return chr(10).join(since_release)
+        raise AssertionError(args)
+    return answer
+
+
 class TestAPluginOnlyMergeReleasesNothing:
     @pytest.mark.parametrize("paths, changed, expected", [
         (["plugins/a.plugin/x"], 1, True),
@@ -915,7 +933,8 @@ class TestAPluginOnlyMergeReleasesNothing:
         monkeypatch.setenv("PR_CHANGED_FILES", "1")
         monkeypatch.setenv("PR_LABELS", "[]")
         monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
-        monkeypatch.setattr(release, "_git", lambda root, *a: "")
+        monkeypatch.setattr(release, "_git", fake_git(
+            "plugins/a.plugin/plugin.yaml"))
         monkeypatch.setattr(release.versions, "read_versions",
                             lambda root: (BETA, BETA))
         assert release.main(["plan"]) == 0
@@ -1240,3 +1259,188 @@ class TestTheReviewImportsLittle:
             capture_output=True, text=True, timeout=60)
         assert done.returncode == 0, done.stderr
         assert done.stdout.strip() == "[]"
+
+
+# ---------------------------------------------------------------------------
+# ---- batch 275: the security round's CI findings ----------------------------
+# ---------------------------------------------------------------------------
+
+class TestTheHeadALabelWasAddedOn:
+    """s7-3. The labelled run read the head live and recorded it, so a push
+    landing between the label and the run kept the label on code nobody
+    reviewed. It counts now only for the head the event saw."""
+
+    def test_a_label_added_on_an_older_head_is_removed(self):
+        hub = hub_for(probe(code=RISKY), labels={ci.SCAN_REVIEWED},
+                      permissions={"owner": "admin"})
+        result, _ = review(hub, action="labeled", label=ci.SCAN_REVIEWED,
+                           sender="owner", event_head="OLD")
+        assert not result.label_ok and not result.scan_ok
+        assert result.reviewed_sha == ""
+        assert ("remove", ci.SCAN_REVIEWED) in hub.calls
+        assert "it was added on `OLD`" in result.label_note
+
+    def test_no_event_head_is_no_review(self):
+        hub = hub_for(probe(code=RISKY), labels={ci.SCAN_REVIEWED},
+                      permissions={"owner": "admin"})
+        result, _ = review(hub, action="labeled", label=ci.SCAN_REVIEWED,
+                           sender="owner", event_head="")
+        assert not result.label_ok and "an unknown head" in result.label_note
+
+    def test_the_command_reads_it_from_the_runners_event_file(
+            self, monkeypatch, tmp_path):
+        event = tmp_path / "event.json"
+        event.write_text(json.dumps({"pull_request": {"head": {"sha": "HEAD"}}}))
+        monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        monkeypatch.setenv("ACTION", "labeled")
+        monkeypatch.setenv("LABEL", ci.SCAN_REVIEWED)
+        monkeypatch.setenv("SENDER", "owner")
+        hub = hub_for(probe(code=RISKY), labels={ci.SCAN_REVIEWED},
+                      permissions={"owner": "admin"})
+        assert TestTheCommand().run(monkeypatch, tmp_path, hub)["scan"] == "pass"
+        event.write_text(json.dumps({"pull_request": {"head": {"sha": "OLD"}}}))
+        hub.labels.add(ci.SCAN_REVIEWED)
+        assert TestTheCommand().run(monkeypatch, tmp_path, hub)["scan"] == "fail"
+
+    def test_the_workflow_still_names_nothing_of_the_head(self):
+        text = (WORKFLOWS / "plugin-review.yml").read_text("utf-8")
+        assert "head.sha" not in text and "GITHUB_EVENT_PATH" not in text
+
+
+class TestTheBotsOwnReleaseSkip:
+    """s7-2. release:skip, added for a plugin-only pull request, stayed on
+    after it started changing the harness, and that merge skipped its
+    release."""
+
+    def state(self, **fields) -> dict:
+        return {"id": 9, "user": {"login": ci.BOT},
+                "body": f"{ci.MARKER} {json.dumps(fields)} -->"}
+
+    def test_it_is_taken_off_once_the_pull_request_changes_the_harness(self):
+        hub = hub_for(probe(), changed=[f"{FOLDER}/plugin.yaml", "core/loop.py"],
+                      labels={ci.RELEASE_SKIP},
+                      comments=[self.state(reviewed="", skip=True)])
+        result, _ = review(hub, action="synchronize")
+        assert ("remove", ci.RELEASE_SKIP) in hub.calls
+        assert "now changes the harness" in result.skip_note
+        assert "now changes the harness" in ci.comment(result, "HEAD")
+
+    def test_and_once_it_leaves_plugins_altogether(self, monkeypatch, tmp_path):
+        hub = hub_for({}, changed=["core/loop.py"], labels={ci.RELEASE_SKIP},
+                      comments=[self.state(reviewed="", skip=True)])
+        TestTheCommand().run(monkeypatch, tmp_path, hub)
+        assert ("remove", ci.RELEASE_SKIP) in hub.calls
+        assert any("now changes the harness" in body for kind, *rest in hub.calls
+                   if kind == "edit" for body in rest[-1:])
+
+    def test_one_a_person_added_stays(self):
+        hub = hub_for(probe(), changed=[f"{FOLDER}/plugin.yaml", "core/loop.py"],
+                      labels={ci.RELEASE_SKIP},
+                      comments=[self.state(reviewed="")])
+        result, _ = review(hub, action="synchronize")
+        assert ("remove", ci.RELEASE_SKIP) not in hub.calls
+        assert result.skip_note == ""
+
+
+class TestACategoryFolder:
+    """s7-6. Only the plugin's own folder name was validated, so a category
+    folder carried a line break and an @mention into the comment, outside
+    any fence, and no install could read the plugin."""
+
+    def folder_files(self, folder: str) -> dict:
+        return {f"{folder}/{path[len(FOLDER) + 1:]}": data
+                for path, data in probe().items()}
+
+    @pytest.mark.parametrize("category", [
+        "Bad_Cat", "a\n\n**Approved by the maintainers.** @victim-user\n\nb",
+        "x`@victim-user`y", "/".join(f"c{i}" for i in range(9)),
+    ])
+    def test_it_is_a_problem_and_never_markdown(self, category):
+        folder = f"plugins/{category}/probe.plugin"
+        hub = hub_for(self.folder_files(folder))
+        result, _ = review(hub)
+        assert any("no plugin id" in p for p in result.hard_problems)
+        assert not result.scan_ok
+        body = ci.comment(result, "HEAD")
+        heading = [line for line in body.splitlines()
+                   if line.startswith("#### ")]
+        assert len(heading) == 1 and heading[0].count("`") == 2
+        outside = "".join(body.split("```")[0::2])
+        assert "**Approved" not in "".join(
+            line for line in outside.splitlines() if not line.startswith("#### "))
+        assert "@victim-user" not in "".join(
+            line for line in outside.splitlines() if not line.startswith("#### "))
+
+    def test_a_valid_category_is_read_as_before(self):
+        result, _ = review(hub_for(probe()))
+        assert result.plugins[0].report is not None
+        assert not result.hard_problems
+
+
+class TestWhereTheReviewRuns:
+    """s7-4 and s7-5: pull requests into main only, and its one dependency
+    hashed and installed from wheels alone."""
+
+    doc = None
+
+    @pytest.fixture(autouse=True)
+    def _doc(self):
+        self.doc = _workflow("plugin-review.yml")
+
+    def test_only_mains_pull_requests(self):
+        assert _on(self.doc)["pull_request_target"]["branches"] == ["main"]
+
+    def test_pyyaml_is_installed_hashed_and_as_a_wheel(self):
+        runs = [str(step.get("run", "")) for job in self.doc["jobs"].values()
+                for step in job.get("steps", ())]
+        install = [r for r in runs if "pip install" in r]
+        assert install == ["python -m pip install --require-hashes "
+                           "--only-binary=:all: --no-deps -r "
+                           "scripts/plugin-review-requirements.txt"]
+
+    def test_the_lock_is_requirements_txts_pin_with_its_hashes(self):
+        lock = (ROOT / "scripts" / "plugin-review-requirements.txt").read_text(
+            "utf-8")
+        pins = [line for line in lock.splitlines()
+                if line and not line.startswith((" ", "#"))]
+        assert pins == ["pyyaml==6.0.3 \\"]
+        assert lock.count("--hash=sha256:") >= 1
+        core = (ROOT / "requirements.txt").read_text("utf-8").lower()
+        assert "pyyaml==6.0.3" in core
+
+
+class TestTheReleaseLooksSinceTheLastOne:
+    """s7-1. A plugin-only merge's skip was decided on its own file list,
+    so a core merge whose release run made nothing was not released by the
+    next plugin-only one either."""
+
+    def plan(self, monkeypatch, tmp_path, capsys, *since):
+        files = tmp_path / "files.txt"
+        files.write_text("plugins/a.plugin/plugin.yaml\n")
+        monkeypatch.setenv("PR_FILES", str(files))
+        monkeypatch.setenv("PR_CHANGED_FILES", "1")
+        monkeypatch.setenv("PR_LABELS", "[]")
+        monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+        monkeypatch.setattr(release, "_git", fake_git(*since))
+        monkeypatch.setattr(release.versions, "read_versions",
+                            lambda root: (BETA, BETA))
+        assert release.main(["plan"]) == 0
+        return capsys.readouterr().out
+
+    def test_a_core_change_since_the_last_release_is_released(
+            self, monkeypatch, tmp_path, capsys):
+        out = self.plan(monkeypatch, tmp_path, capsys, "core/loop.py",
+                        "plugins/a.plugin/plugin.yaml")
+        assert out.startswith("release:")
+
+    def test_only_plugins_since_it_is_still_a_skip(self, monkeypatch, tmp_path,
+                                                   capsys):
+        out = self.plan(monkeypatch, tmp_path, capsys,
+                        "plugins/a.plugin/plugin.yaml")
+        assert out.startswith("skip: every file")
+
+    def test_no_tag_or_no_answer_is_a_release(self, tmp_path):
+        assert release.changed_since_release(tmp_path, []) == []
+        assert release.plugin_only([]) is False
+        # A folder that is no repository: git fails, and the list is empty.
+        assert release.changed_since_release(tmp_path, ["v0.3.13"]) == []

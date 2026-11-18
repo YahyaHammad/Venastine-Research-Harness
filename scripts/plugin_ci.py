@@ -605,6 +605,10 @@ class Review:
     problems: list = field(default_factory=list)   # across plugins
     label_ok: bool = False
     label_note: str = ""
+    #: Whether release:skip on the pull request is the bot's own, which it
+    #: takes off again once the pull request changes the harness.
+    skip_added: bool = False
+    skip_note: str = ""
     reviewed_sha: str = ""
     requested: tuple = ()
     mentioned: tuple = ()
@@ -739,10 +743,40 @@ def _state(comment_body: str) -> dict:
     return state if isinstance(state, dict) else {}
 
 
+def _state_of(result) -> dict:
+    """What the bot's comment records for its next run."""
+    state = {"reviewed": result.reviewed_sha,
+             "requested": list(result.requested)}
+    if result.skip_added:
+        state["skip"] = True
+    return state
+
+
+def _event_head() -> str:
+    """The head the event saw, from the runner's own event file
+    (GITHUB_EVENT_PATH): for a label, the head its adder read. Read here
+    rather than interpolated into the workflow, which names nothing of the
+    head (PL34). '' when there is none, which no head equals."""
+    try:
+        with open(os.environ.get("GITHUB_EVENT_PATH", ""),
+                  encoding="utf-8") as handle:
+            event = json.load(handle)
+        head = ((event.get("pull_request") or {}).get("head") or {}).get("sha")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return head if isinstance(head, str) else ""
+
+
 def review(hub, number: int, *, action: str = "", label: str = "",
-           sender: str = "", online: bool = True, fetcher=None) -> tuple:
+           sender: str = "", online: bool = True, fetcher=None,
+           event_head: str = "") -> tuple:
     """(Review, the bot's existing comment or None). Changes labels and
-    review requests as it goes; the caller writes the comment."""
+    review requests as it goes; the caller writes the comment.
+
+    `event_head` is the head the event saw: for a label, the head the
+    person adding it read. A label counts only for that head, so a push
+    landing between the label and this run does not inherit it (batch
+    275)."""
     from core import plugin_format, plugin_scan
 
     pr = hub.pull(number)
@@ -769,6 +803,15 @@ def review(hub, number: int, *, action: str = "", label: str = "",
                                if plugin_folder(p)})
         for folder in result.changes.folders:
             plugin = Plugin(folder)
+            try:
+                # Every folder of the id, not the plugin's name alone: a
+                # category folder carried a line break and an @mention into
+                # the comment (batch 275), and no install could read it.
+                plugin_format.parse_id(plugin_id(folder))
+            except ValueError as exc:
+                plugin.problems.append(f"the folder is no plugin id: {exc}")
+                result.plugins.append(plugin)
+                continue
             plugin.base_version, plugin.maintainers = _manifest_fields(
                 hub, base_tree, folder)
             if folder not in head_folders:
@@ -810,14 +853,25 @@ def review(hub, number: int, *, action: str = "", label: str = "",
     if action == "unlabeled" and label == SCAN_REVIEWED:
         reviewed = ""
     if action == "labeled" and label == SCAN_REVIEWED:
-        if hub.permission(sender) in WRITERS:
-            reviewed = head
-        else:
+        if hub.permission(sender) not in WRITERS:
             hub.remove_label(number, SCAN_REVIEWED)
             labels.discard(SCAN_REVIEWED)
             reviewed = ""
             result.label_note = (f"{SCAN_REVIEWED} was removed: {sender} "
                                  f"added it without write access")
+        elif event_head != head:
+            # The head read live here is not the one the label was added
+            # on: a push landed in between (batch 275).
+            hub.remove_label(number, SCAN_REVIEWED)
+            labels.discard(SCAN_REVIEWED)
+            reviewed = ""
+            seen = f"`{event_head[:12]}`" if event_head else "an unknown head"
+            result.label_note = (f"{SCAN_REVIEWED} was removed: it was added "
+                                 f"on {seen}, and the pull request is now at "
+                                 f"`{head[:12]}`, so its review covered other "
+                                 f"code")
+        else:
+            reviewed = head
     if SCAN_REVIEWED in labels:
         if reviewed == head:
             result.label_ok = True
@@ -835,9 +889,23 @@ def review(hub, number: int, *, action: str = "", label: str = "",
         hub.add_labels(number, [MIXED])
     elif not result.changes.mixed and MIXED in labels:
         hub.remove_label(number, MIXED)
+    skip_added = bool(state.get("skip"))
     if (result.changes.plugin_only and existing is None
             and not any(lb.startswith("release:") for lb in labels)):
         hub.add_labels(number, [RELEASE_SKIP])
+        skip_added = True
+    elif (skip_added and not result.changes.plugin_only
+          and RELEASE_SKIP in labels):
+        # The bot's own label, on a pull request that now changes the
+        # harness: it would have skipped that release (batch 275). One a
+        # person added is theirs, and stays.
+        hub.remove_label(number, RELEASE_SKIP)
+        labels.discard(RELEASE_SKIP)
+        skip_added = False
+        result.skip_note = (f"{RELEASE_SKIP} was removed: this pull request "
+                            f"now changes the harness, so its merge is "
+                            f"released")
+    result.skip_added = skip_added
 
     # -- the maintainers of record ------------------------------------------
     of_record = sorted({m for p in result.plugins for m in p.maintainers
@@ -853,6 +921,17 @@ def review(hub, number: int, *, action: str = "", label: str = "",
             writers = []
     result.requested = tuple(sorted(asked | set(writers)))
     return result, existing
+
+
+def _span(text: str, most: int = 200) -> str:
+    """A repository path as one inline code span: no line break, backtick
+    or character that draws nothing, so no heading, Markdown or mention
+    starts inside it (batch 275)."""
+    from core import plugin_format
+
+    safe = "".join("?" if ch == "`" or plugin_format.hidden_char(ch) else ch
+                   for ch in text)
+    return "`" + (safe if len(safe) <= most else safe[:most - 3] + "...") + "`"
 
 
 def _fenced(lines: list) -> list:
@@ -888,7 +967,7 @@ def comment(result: Review, head: str) -> str:
         out += _fenced(_bounded(ch.plugin))
         out.append("")
     for plugin in result.plugins:
-        out.append(f"#### `{plugin.folder}`")
+        out.append(f"#### {_span(plugin.folder)}")
         if plugin.removed:
             out += ["Removed.", ""]
             continue
@@ -932,10 +1011,12 @@ def comment(result: Review, head: str) -> str:
                     f"`{SCAN_REVIEWED}`; a new commit removes it again.", ""]
     if result.label_note:
         out += [result.label_note + ".", ""]
+    if result.skip_note:
+        out += [result.skip_note + ".", ""]
     if result.mentioned:
         out += ["Maintainers: " + ", ".join(f"@{m}" for m in result.mentioned),
                 ""]
-    state = {"reviewed": result.reviewed_sha, "requested": list(result.requested)}
+    state = _state_of(result)
     out.append(f"{MARKER} {json.dumps(state)} -->")
     body = "\n".join(out)
     if len(body) > MAX_COMMENT_CHARS:
@@ -952,7 +1033,8 @@ def cmd_review(args) -> int:
         result, existing = review(
             hub, number, action=os.environ.get("ACTION", ""),
             label=os.environ.get("LABEL", ""),
-            sender=os.environ.get("SENDER", ""), online=not args.offline)
+            sender=os.environ.get("SENDER", ""), online=not args.offline,
+            event_head=_event_head())
     except HubError as exc:
         print(f"review failed: {exc}", file=sys.stderr)
         _outputs({"boundary": "fail", "scan": "fail"})
@@ -962,8 +1044,9 @@ def cmd_review(args) -> int:
         if result.changes.plugin:
             body = comment(result, result.head)
         else:
+            note = f"{result.skip_note}.\n\n" if result.skip_note else ""
             body = (f"### Plugin review\n\nThis pull request no longer changes "
-                    f"`plugins/`.\n\n{MARKER} {{}} -->")
+                    f"`plugins/`.\n\n{note}{MARKER} {{}} -->")
         try:
             if existing is None:
                 hub.create_comment(number, body)

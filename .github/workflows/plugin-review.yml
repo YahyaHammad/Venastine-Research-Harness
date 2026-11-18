@@ -35,6 +35,10 @@ name: plugin-review
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, edited, labeled, unlabeled, ready_for_review]
+    # main's pull requests only (batch 275): the maintainers of record and
+    # the version baseline come from the base branch, and another branch's
+    # base would name its own.
+    branches: [main]
 
 permissions: {}
 
@@ -67,8 +71,11 @@ jobs:
           python-version: "3.13"
 
       # requirements.txt's pin; the format check reads plugin.yaml with it.
+      # Hashed and wheels only (batch 275): this job holds a token that
+      # writes labels and comments, and an unhashed pin takes whatever the
+      # index serves, a source archive's build code included.
       - name: Install the review's one dependency
-        run: python -m pip install "pyyaml==6.0.3"
+        run: 'python -m pip install --require-hashes --only-binary=:all: --no-deps -r scripts/plugin-review-requirements.txt'
 
       - name: Review
         id: review

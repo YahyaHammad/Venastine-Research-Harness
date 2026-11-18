@@ -111,6 +111,22 @@ def plugin_only(paths, changed_files: int = 0) -> bool:
     return all(p.startswith(MARKETPLACE) for p in paths)
 
 
+def changed_since_release(root: Path, tags) -> list:
+    """Every path changed since the newest release tag. [] when there is
+    no tag or git cannot say, which `plugin_only` reads as not plugin-only,
+    so the merge is released. A plugin-only merge decided on its own file
+    list skipped a core release an earlier run had failed to make (batch
+    275): the files since the last release are what a release would hold."""
+    newest = max(_released(tags), key=_triple, default=None)
+    if newest is None:
+        return []
+    try:
+        return _git(root, "diff", "--name-only", f"v{newest}", "HEAD"
+                    ).splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        return []
+
+
 def bumped(base: str, part: str) -> str:
     major, minor, patch = _triple(base)
     if part == "major":
@@ -225,11 +241,13 @@ def main(argv=None, root: Path = ROOT) -> int:
             paths = (Path(files_path).read_text(encoding="utf-8").splitlines()
                      if files_path else [])
             changed = int(os.environ.get("PR_CHANGED_FILES") or 0)
+            tags = _git(root, "tag", "--list").splitlines()
             plan = decide([str(label) for label in labels],
-                          versions.read_versions(root)[0],
-                          _git(root, "tag", "--list").splitlines(),
+                          versions.read_versions(root)[0], tags,
                           _git(root, "tag", "--points-at", "HEAD").splitlines(),
-                          plugins_only=plugin_only(paths, changed))
+                          plugins_only=(plugin_only(paths, changed) and
+                                        plugin_only(changed_since_release(
+                                            root, tags))))
             _write_outputs(plan)
             print(f"{plan.action}: {plan.reason}"
                   + (f" -> {plan.version}" if plan.version else ""))
