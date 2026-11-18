@@ -46,6 +46,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§96. The container's `/workspace`, read by the file tools** - **(BUILT in batch 263)** (the shell runs in a container that mounts the workspace at `/workspace`, so the paths the model saw there were spelled from it, while `read`, `write`, `edit` and `view_image` run on the host, where that path is not the workspace: each such call asked to leave the workspace and then failed. `resolve_path` now maps the container's spelling onto the workspace while a tool that starts commands is enabled, and every other outside path still asks; CW1-CW3)
 - **§97. Usage figures: the rate's clock, thoughts, k/M/B and `/usage`** - **(BUILT in batch 264)** (the completion line divided the output count by the whole turn, tools and the wait on background sessions included, and kept only the last wake turn's count; Google's output left out the thoughts; `billed` read in thousands past a million; and no cache count was read. The rate now divides by generating time while `took` stays the turn's time, thoughts count as output, the usage line writes k, M and B, and `/usage` shows four provider-reported rows for this thread in both shells, with input the whole prompt on every branch; UF1-UF5)
 - **§98. A failed research run, resumed where it stopped** - **(BUILT in batch 269)** (a run that failed or was abandoned could only be started again from Pass 0: the owner's failed after 4h53m in Pass 3a on an answer that was a complete array followed by a stray closing fence. Each stage now ends with a resume point, a pass's thread is recorded as it opens, and `/research --resume` or `--resume` skips every completed stage and continues the failed pass in its own thread -- its stored answer checked again with no model call, or the request it died on resent -- with the corpus rebuilt from the stored tool results, and the parser takes a fence at either end; RS1-RS9)
+- **§99. A pass being corrected is seen while it runs** - **(BUILT in batch 270)** (a JSON pass's corrective retry, and a prose pass's no-text one, reached the model through `continue_conversation`, which drains its own loop: the owner's resumed Pass 6b spent 25 minutes and 14 model calls correcting one answer with its tool count frozen and its row gone from the panel, and looked hung. A retry now goes through the pass's own entry point, so its tool calls, its row and its character total show as the attempt's do, its reason is saved and shown the moment the parse fails, and its fetched pages reach the corpus; SR1-SR6)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -3067,6 +3068,98 @@ leaked PID.
   `AGENTS.md` names by name.
 ---
 
+## §99. A pass being corrected is seen while it runs
+
+**Added and built in batch 270, from the owner's report** (2026-11-17). Running 0.3.19 in WSL,
+the run §98 was built for was resumed after gate D0 and reached the second round of Pass 6b.
+There it seemed to stall: the pass's tool count stayed at 44, its character total at 48k, and
+its row was gone from the agent panel. `/research --resume` answered "Still working". The owner
+asked whether it had stalled, and for the root cause if it had.
+
+### What was measured (2026-11-17)
+
+Read-only, on the owner's WSL process, log and database (a backup-API copy, deleted after).
+
+- **It had not stalled.** The process was alive, its worker thread waiting on the network. One
+  HTTPS connection was uploading a request, and the reply then streamed back. The log showed a
+  model call every one to four minutes. The pass's thread gained a row at 18:45:56, and the call
+  that was on its last provider retry at 18:47 went through at 18:49.
+- **Pass 6b was in its corrective JSON retry.** At 18:24 its 45,582-character answer failed to
+  parse at line 342: a placeholder key written without quotes. The same reply ended in prose,
+  with the model saying it would build the JSON with a script. Its corrective retry did that. It
+  made 14 model calls in 25 minutes, wrote four files in its workspace and edited them. None of
+  it reached the screen.
+- **Why nothing reached the screen.** Since §26 a pass's first attempt streams through
+  `_translate`. Its retries went through `continue_conversation`, which drains its own loop, so
+  they yielded no event: §26 stated this as a limit. The retry ran under no span, so the pass's
+  row left the panel. The line saying why the pass was running again was appended to the trace
+  at once, but a shell sees a trace line only at a checkpoint, and the next one came after the
+  pass. A page the retry fetched reached no corpus either: §45's limit, inherited from §26's.
+- **Why each call took minutes.** Each request resends the pass's thread, and with the
+  provider's `echoes_reasoning` set, its reasoning too: 463K characters of content and 630K of
+  reasoning. About 1.09 MB went on the wire, and that is the figure the socket acknowledged. The
+  path to the provider was lossy (round trip about 220 ms, about 15% of the bytes sent again), so
+  the upload alone took about a minute. That is not changed here (TECHNICAL_DEBT 123).
+
+### Decisions (SR1-SR6)
+
+| # | Decision |
+|---|---|
+| **SR1** | **A pass's corrective retry goes through the pass's own entry point** (owner, over a streaming sibling of `continue_conversation`). `stream_deep_research_mode(resume_thread=..., follow_up=...)` sends the corrective into the pass's thread and runs the loop there. The orchestrator's `_corrections` builds that turn and translates it like the first attempt. So a retry has the pass's span (its row is back while it runs), its prompt, backstop compaction, and `tool_call`, `tool_result` and `pass_activity` events as that pass's own. A follow-up is added as a user row exactly as `continue_conversation` added it; §98's unanswered-call repair stays with a resume. A follow-up with no thread is refused. `continue_conversation`, chat's entry point, is unchanged |
+| **SR2** | **Every pipeline pass streams its retries; §20's reviewer does not** (owner). That covers the eight JSON passes' corrective retries, and Pass 1's, each ensemble candidate's and Final synthesis's no-text retries. The reviewer keeps `retry_until_json`, which drains, because its first attempt drains too, and streaming only its retry would show half a run |
+| **SR3** | **The line saying why a pass is running again is saved and shown the moment its parse fails** (owner). The retry loop calls `announce` after appending the line and before sending the corrective. The orchestrator passes `_Progress.checkpoint` as `announce`, through `via()`, so the line goes through the one place a trace line becomes durable and becomes an event, and it is persisted before it is shown. The watermark shows it once. As at every checkpoint, a write that fails there ends the run |
+| **SR4** | **A page a retry fetches reaches the corpus** (owner). The retry's tool results pass through `_translate`, the corpus's one sink, so a quote from such a page is checked against its text. Before, it fell back to `similarity_method: "llm"` with `quote_verified` None |
+| **SR5** | **A pass's character total keeps counting across its attempts.** One `_Streamed` per pass, shared by its first attempt, a resumed attempt and its retries. A total that started again for a retry would fall mid-pass, from 48k to 2k: the backwards jump `_translate` already refuses for a retraction |
+| **SR6** | **One retry loop, two routes into it.** `stream_until_json` and `stream_until_text` are generators that take the corrective turn as an argument. `retry_until_json` is `stream_until_json` drained, with `continue_conversation` as its turn, for the reviewer. The attempt arithmetic, the corrective wording and the trace line keep one copy. `retry_until_text` had no caller left and is gone |
+
+SR1, SR2, SR3 and SR4 are the owner's choices. SR5 and SR6 are what they need: SR5 because
+the panel's total is meant never to go backwards, and SR6 because the reviewer must keep its
+route without a second copy of the loop.
+
+### What §99 deliberately does not change
+
+- **What a retry sends.** The same corrective wording goes into the same thread, with the same
+  attempt count, budget, authorization, effort and spend cap. The trace line is the same, byte
+  for byte.
+- **The event kinds.** A retry's tool calls are `tool_call` events of its pass, and its reason
+  is a `trace_line`. No shell changed: both already rendered those kinds for every pass.
+- **The reviewer's route** (SR2) and **chat's `continue_conversation`**.
+- **The size of a pass's requests.** Resending the reasoning a provider asks for is
+  `echoes_reasoning`'s rule (§44), a per-provider fact that must not be guessed. TECHNICAL_DEBT
+  123 records the cost.
+
+### Built (batch 270)
+
+- **`core/loop.py`**: `follow_up` on `stream_deep_research_mode`.
+- **`core/reasoning/json_retry.py`**: `stream_until_json`, `stream_until_text`, `_drained`,
+  `_continuing`; `retry_until_json` drains the first; `retry_until_text` removed.
+- **`core/reasoning/orchestrator.py`**: `_corrections`, `_Streamed`, `streamed=` on
+  `_translate` and `_resumed_attempt`, `checkpoint=` on both pass functions, `via()` handing it
+  the run's checkpoint.
+- **`core/reasoning/events.py`**: the §26 limit's note, now history.
+
+Tests: `tests/test_streamed_retry.py` drives the real pipeline on the real loop with a scripted
+model. It breaks each of the ten model passes' first reply (prose for a JSON pass, nothing for
+a prose pass), and has the corrective retry fetch a page before answering, the owner's Pass 6b
+in shape. For every pass it asserts that the reason arrives first, already saved, and that the
+retry's fetch follows as that pass's own tool call. Further cases: the pass's span is open for
+the retry and bound to its one thread; a quote from a page only the retry fetched is verified;
+the character total rises across attempts; a follow-up with no thread is refused; both shells
+are handed a real retry's events. Run against main's production files, 16 of its 19 tests fail.
+The other three are guards that held before too.
+
+### Gap register
+
+- **Not run against a live provider.** The owner's run that prompted this was still going on
+  0.3.19 when this was built. A process keeps the code it started with, so its retries stay
+  unseen until a run starts on an update.
+- **A pass's requests stay large** (TECHNICAL_DEBT 123).
+- **A text reply cut off by the provider's output limit is still corrected as malformed JSON**
+  (TECHNICAL_DEBT 122). A retry for that reason is now visible, which makes the cost easy to
+  see but no smaller.
+
+---
+
 ## §98. A failed research run, resumed where it stopped
 
 **Added and built in batch 269, from the owner's report** (2026-11-17). Running 0.3.17 in WSL, a
@@ -3438,9 +3531,10 @@ which a sibling test caught first, was re-run against its own test and killed th
   passes' two §26 limits: a tool call one makes produces no `tool_call` event, and a page one
   fetches reaches no corpus, so a source cited only from such a fetch scores with
   `similarity_method: "llm"`. Pass 1 fetches more than any other pass, so the limit now applies
-  where it costs most.
-- **Batch 267: one corrective attempt can cost two model calls.** Each is a fresh
-  `continue_conversation` run and gets RO2's own ask, so a pass that never answers spends six
+  where it costs most. **Closed in batch 270 (§99):** every pass's retries stream, and their
+  pages reach the corpus.
+- **Batch 267: one corrective attempt can cost two model calls.** Each is a fresh run of
+  the loop (through the pass's entry point since §99) and gets RO2's own ask, so a pass that never answers spends six
   calls at the default `max_json_retries: 2`. Whether the corrective recovers the measured model
   is not measured: the tests drive the real loop under a scripted provider.
 - **A reasoning-only reply cut off by the token limit is asked about the same way.**

@@ -42,14 +42,16 @@ Translated, not forwarded -- and the distinction is the whole amendment. A
 consumer of this generator still receives exactly one event type, so no
 `if event.token_delta:` read exists anywhere outside core/loop.py and the
 streaming tests, which is what P1 and P2 were jointly protecting.
-core/client.py, core/reasoning/json_retry.py and review.py's internals
-remain untouched.
+core/client.py and review.py's internals remain untouched.
 
-KNOWN LIMIT, stated rather than fixed: json_retry.py reaches the model via
-continue_conversation(), which drains its own loop internally, so tool
-calls made during a corrective JSON retry produce no tool_call event. The
-retry itself is still visible -- that module appends a trace line per
-failed parse, which _Progress's watermark carries as a trace_line.
+The limit §26 stated here went in ROADMAP_v3 §99: a corrective retry
+reached the model through continue_conversation(), which drains its own
+loop, so a pass being corrected produced no event for as long as the
+correction took. A pass's retries now go through the pass's own entry
+point and are translated like its first attempt (SR1), and the trace line
+saying why a pass is running again is emitted when its parse fails (SR3).
+No kind was added for either: a retry's tool calls are `tool_call`s of
+the same pass, and the reason is a `trace_line`.
 
 ERROR HANDLING: there is deliberately no error variant, matching
 core/events.py for the same reason. Exceptions raised mid-pipeline

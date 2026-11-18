@@ -209,17 +209,22 @@ def test_inner_storage_failure_propagates_original_exception_and_logs_run_id(moc
         resp = make_model_response(text="not valid json {{{")
         resp.thread_id = uuid4()
         return resp
+    # The attempt and every corrective retry answer the same way: the
+    # retries come through this entry point too since ROADMAP_v3 §99.
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
         side_effect=pass_stream(fake_run_dr_mode))
-    mocker.patch.object(
-        RunAgentLoop, "continue_conversation",
-        side_effect=lambda **kwargs: make_model_response(text="still not json"),
-    )
 
-    # update_pipeline_run always fails -> the failure-path write inside
-    # the orchestrator's except block raises (the secondary error).
+    # The failure-path write inside the orchestrator's except block
+    # raises (the secondary error). ONLY that write: since §99 a failed
+    # parse checkpoints the run before its retry (SR3), and a write that
+    # failed there would end the pass first -- a different test.
     persist_error = RuntimeError("database is locked")
-    mocker.patch.object(orch_mod, "update_pipeline_run", side_effect=persist_error)
+
+    def failing_write(run_id, run, status=None, **kwargs):
+        if status == "failed":
+            raise persist_error
+
+    mocker.patch.object(orch_mod, "update_pipeline_run", side_effect=failing_write)
 
     with caplog.at_level(logging.ERROR, logger="core.reasoning.orchestrator"):
         with pytest.raises(ValueError, match="did not return valid JSON"):

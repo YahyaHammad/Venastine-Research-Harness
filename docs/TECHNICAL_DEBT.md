@@ -6661,6 +6661,25 @@ JSON pass's retry can say "your answer was cut off" rather than "your JSON
 did not parse". It needs each branch measured for what its SDK reports,
 which is why it is not part of §98.
 
+## 123. Every call in a long pass resends the pass's whole thread, reasoning included (open, found batch 270)
+
+**Measured on the owner's run that prompted ROADMAP_v3 §99.** In Pass 6b's second round, one
+model call's request was about 1.09 MB, which is what the socket acknowledged. The pass's
+thread then held 463K characters of content and 630K of reasoning; the provider's entry sets
+`echoes_reasoning`, so §44 sends every turn's reasoning back. The path to that provider lost
+about 15% of the bytes it sent, at a round trip of about 220 ms, so the upload alone took about
+a minute. A long pass makes tens of calls, and each one is larger than the last. The provider
+library also retried calls that got no reply: 36 such retries in the current log file and 129
+in the one before it, both that day's. Each retry sends the whole request again. Severity `S3`, `cost`: wall-clock time
+grows with the square of a pass's length on a slow link, though no answer changes.
+
+**Shape, not done here.** Whether reasoning from turns before the current tool-call chain may
+be left out depends on the provider. §44 makes `echoes_reasoning` a per-provider fact that
+"cannot be discovered and must not be guessed", so the shape needs the provider's own
+documentation or a measured probe: send a request without the older reasoning and see whether
+it is accepted and answered as well. The other lever, compressing request bodies, needs the
+provider to accept a compressed body, which is not measured either.
+
 ## Review-marathon arrivals at open issues with no register entry
 
 Two `KNOWN` findings landed on GitHub issues that are not mirrored here. Both

@@ -2462,6 +2462,7 @@ class RunAgentLoop:
         activity=None,
         resume_thread: Optional[UUID] = None,
         on_thread=None,
+        follow_up: Optional[str] = None,
     ):
         """One research pass, as a generator of LoopEvents, RETURNING the
         ModelResponse (ROADMAP_v2 §26).
@@ -2474,6 +2475,17 @@ class RunAgentLoop:
         thread instead of opening one (RS4): no user row is added, any call
         the thread left unanswered is answered first, and the loop takes the
         step the failed run was about to take. `pass_input` is unused then.
+
+        ROADMAP_v3 §99 adds `follow_up`, a message sent into `resume_thread`
+        before the loop runs: a corrective retry's (SR1). The retry used to
+        reach the model through `continue_conversation`, which drains its
+        own loop, so a pass being corrected yielded nothing for as long as
+        the correction took -- 25 minutes and 14 model calls on the owner's
+        run, with the pass's row gone from the panel. Through here a retry
+        is the pass continuing in every respect the attempt had: this span,
+        this prompt, backstop compaction, and events. The unanswered-call
+        repair is §98's alone: a follow-up is added as a user row exactly as
+        `continue_conversation` added it, so a retry sends what it sent.
 
         Exists because §22's P2 -- "a pass's LoopEvents do not propagate
         up" -- made a pass opaque while it ran. The pipeline could say
@@ -2514,6 +2526,12 @@ class RunAgentLoop:
         the abandonment case §22 records above -- a TUI quitting mid-run
         must not leave the pass on screen.
         """
+        if follow_up is not None and resume_thread is None:
+            # Refused rather than ignored: a follow-up with no thread would
+            # open a fresh pass thread holding a correction to nothing.
+            raise ValueError(
+                "stream_deep_research_mode: follow_up= continues a pass "
+                "thread, so it needs resume_thread=.")
         # Depth derived from the context the pass starts at rather than
         # written as a 1: `_compactor_depth`'s rule, one entry point over.
         depth = (context.subagent_depth if context is not None else 0) + 1
@@ -2540,6 +2558,8 @@ class RunAgentLoop:
                 on_thread(memory.thread_id)
             if resume_thread is None:
                 memory.add_user_message(pass_input)
+            elif follow_up is not None:
+                memory.add_user_message(follow_up)
             else:
                 answer_unanswered_calls(memory)
             # #68. The catalogs are decided from the SAME bundle the tool

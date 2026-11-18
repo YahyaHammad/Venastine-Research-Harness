@@ -631,7 +631,12 @@ def test_granted_calls_still_reach_the_run_through_the_generator(mocker):
 def test_json_retry_lines_reach_a_consumer_without_json_retry_changing(mocker):
     """The watermark's payoff, stated as a behaviour: a JSON-parse retry
     needs no event kind of its own. json_retry.py appends its own trace
-    line and knows nothing about §22; the line still arrives.
+    line and knows nothing about §22; the line still arrives -- here at
+    the next checkpoint, since no `checkpoint` is passed (ROADMAP_v3
+    §99 brings it forward when one is: tests/test_streamed_retry.py).
+
+    One double serves the attempt AND the retry, which comes through
+    the pass's own entry point since §99.
     """
     from tests.conftest import make_model_response, pass_stream
 
@@ -642,8 +647,6 @@ def test_json_retry_lines_reach_a_consumer_without_json_retry_changing(mocker):
     ])
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
                         side_effect=pass_stream(lambda **kw: next(responses)))
-    mocker.patch.object(RunAgentLoop, "continue_conversation",
-                        side_effect=lambda **kw: next(responses))
 
     run = PipelineRun(user_query="q")
     progress = orchestrator._Progress(run)

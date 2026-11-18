@@ -258,8 +258,7 @@ def _verify_quote(quote: str, url: str, corpus):
     """True, False, or None -- and None is a third answer, not a default.
 
     None means THERE WAS NOTHING TO CHECK AGAINST: no corpus, no captured
-    text for this URL (the model cited a search result it never opened, or
-    fetched it during a JSON-retry turn, which is not translated), or no
+    text for this URL (the model cited a search result it never opened), or no
     quote. False means the run retrieved this page and the quoted span is
     not in it, which is the fabricated-citation signal.
 

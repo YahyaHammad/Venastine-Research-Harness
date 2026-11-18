@@ -38,6 +38,7 @@ from core.reasoning import orchestrator
 from tests.conftest import (
     drain,
     make_model_response,
+    pass_and_corrections,
     pass_stream,
     run_pass,
     well_shaped,
@@ -135,7 +136,7 @@ class TestTheJsonPassChecksBeforeRetrying:
         because it was never finished."""
         _pass_returning(mocker, make_model_response(
             text="", stop_reason="token_budget_exceeded"))
-        retried = mocker.patch.object(orchestrator, "retry_until_json")
+        retried = mocker.patch.object(orchestrator, "stream_until_json")
 
         with pytest.raises(ValueError, match="token_budget_exceeded"):
             drain(orchestrator._run_pass_with_json_retry(
@@ -203,18 +204,20 @@ class TestTheSpendCap:
         continue_conversation resolves the same configured cap the pass
         ran on -- and a budget stop returns the last response as it
         stands, which is how an empty pass gets produced in the first
-        place, hence the wrapper rather than a fresh default."""
-        _pass_returning(mocker, make_model_response(
-            text="not json", stop_reason="complete"))
-        seen = {}
+        place, hence the wrapper rather than a fresh default. The retry
+        reaches the pass's own entry point since ROADMAP_v3 §99, whose
+        default is the same sentinel (the test below)."""
+        retries = []
         mocker.patch.object(
-            RunAgentLoop, "continue_conversation",
-            side_effect=lambda **kw: (
-                seen.update(kw), make_model_response(text=well_shaped("Pass 2")))[1])
+            RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_and_corrections(
+                make_model_response(text="not json", stop_reason="complete"),
+                [make_model_response(text=well_shaped("Pass 2"))], retries))
 
         drain(orchestrator._run_pass_with_json_retry("Pass 2", "in", "m", "p", []))
 
-        assert "max_total_tokens" not in seen
+        assert len(retries) == 1
+        assert "max_total_tokens" not in retries[0]["kwargs"]
 
     def test_every_public_entry_defaults_to_the_sentinel(self):
         """Not None: explicit-None means UNCAPPED, and only the sentinel

@@ -4,19 +4,21 @@ test_json_retry.py
 ROADMAP §3: malformed-JSON recovery. Unit tests for
 `_run_pass_with_json_retry` in core/reasoning/orchestrator.py.
 
-Each test patches:
-  - `RunAgentLoop.run_deep_research_mode` (the INITIAL attempt entry point)
-  - `RunAgentLoop.continue_conversation` (the RETRY entry point that
-    re-enters the same thread with a corrective user message)
-  - optionally a trace list passed into `_run_pass_with_json_retry` to
-    assert on the retry log lines.
+Each test patches `RunAgentLoop.stream_deep_research_mode`, the pass's
+entry point, which since ROADMAP_v3 §99 (SR1) serves BOTH the initial
+attempt and every corrective retry: a retry comes with `follow_up=` the
+corrective message and `resume_thread=` the pass's thread
+(`conftest.pass_and_corrections` tells the two apart). Before §99 the
+retry went through `RunAgentLoop.continue_conversation`, which drains its
+own loop; §20's reviewer still does, and the tests at the bottom pin that
+route.
 
 The retry contract:
-  1. Initial attempt calls run_deep_research_mode.
+  1. Initial attempt calls stream_deep_research_mode.
   2. If the response text fails `_parse_json_response`, append a trace
-     line describing the failure, call continue_conversation with a
-     corrective message (the parse error + first 200 chars of failed
-     output + instruction to re-emit ONLY valid JSON), and try again.
+     line describing the failure, send a corrective message (the parse
+     error + first 200 chars of failed output + instruction to re-emit
+     ONLY valid JSON) into the same thread, and try again.
   3. Repeat up to config.MAX_JSON_RETRIES corrective attempts
      (attempts = MAX_JSON_RETRIES + 1 in total).
   4. If the final attempt still fails, raise ValueError.
@@ -24,14 +26,14 @@ The retry contract:
 The seven tests below:
 
   1. Clean response -> no retry, returns text as-is.
-  2. Malformed then valid -> exactly 1 continue_conversation, returns text.
+  2. Malformed then valid -> exactly 1 corrective retry, returns text.
   3. All attempts fail -> ValueError after MAX_JSON_RETRIES+1 attempts.
-  4. Thread continuity -> continue_conversation uses the same thread_id
-     the initial run_deep_research_mode returned.
-  5. Failed output appears in history -> continue_conversation's
-     ConversationMemory loads the failed assistant turn from storage
-     (via storage.get_session_history's per-role reconstruction) and
-     shows it in messages[1].
+  4. Thread continuity -> the retry continues the thread the initial
+     attempt returned.
+  5. Failed output appears in history -> the retry's ConversationMemory
+     loads the failed assistant turn from storage (via
+     storage.get_session_history's per-role reconstruction) and shows it
+     in messages[1].
   6. Trace format -> retry line is in the expected shape, and repeats
      once per failed attempt.
   7. Corrective message content -> contains the parse-error phrase,
@@ -50,7 +52,7 @@ from tests.conftest import (
     drain,
     make_model_response,
     make_stream_from_response,
-    pass_stream,
+    pass_and_corrections,
     well_shaped,
 )
 
@@ -58,23 +60,25 @@ from tests.conftest import (
 # ---- Shared helpers -------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def _stub_run_dr_mode_returning(mocker, response, thread_id):
-    """Patches run_deep_research_mode so every call returns the given
-    ModelResponse (with thread_id set on it). Used for the initial
-    attempt in tests that don't need to vary first-call behavior."""
-    response.thread_id = thread_id
-
-    def side_effect(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
-        return response
+def _stub_pass(mocker, first, retries=(), thread_id=None):
+    """Patches the pass's entry point: its first attempt returns `first`
+    (in `thread_id`, a fresh one by default) and each corrective retry
+    the next of `retries`, in order. Returns the retries' log -- the
+    thread each was sent into and its message -- for the test to assert
+    on what was actually sent."""
+    first.thread_id = thread_id or uuid4()
+    log = []
     mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
-                        side_effect=pass_stream(side_effect))
+                        side_effect=pass_and_corrections(
+                            first, list(retries), log))
+    return log
 
 
 def _stub_continue_returning_sequence(mocker, responses):
-    """Patches continue_conversation to return one response from the
-    list per call (in order). Each response's thread_id is set to the
-    thread_id the caller passes in -- the test hooks the list to assert
-    on what was actually called."""
+    """§20's reviewer's route: patches continue_conversation to return one
+    response from the list per call (in order). Each response's thread_id
+    is set to the thread_id the caller passes in -- the test hooks the list
+    to assert on what was actually called."""
     queue = list(responses)
     call_log = []
 
@@ -95,17 +99,13 @@ def _stub_continue_returning_sequence(mocker, responses):
 
 def test_clean_response_triggers_no_retry(mocker):
     """A pass that returns valid JSON on the first attempt should
-    succeed without ever calling continue_conversation. The helper
-    returns the raw text through `_parse_json_response` (which strips
-    code fences) without touching the retry path."""
+    succeed without ever sending a corrective. The helper returns the raw
+    text through `_parse_json_response` (which strips code fences) without
+    touching the retry path."""
     from core.reasoning.orchestrator import _run_pass_with_json_retry
 
-    fake_thread_id = uuid4()
     valid_json = json.dumps({"key": "value"})
-    initial_response = make_model_response(text=valid_json)
-    _stub_run_dr_mode_returning(mocker, initial_response, fake_thread_id)
-
-    continue_calls = _stub_continue_returning_sequence(mocker, [])
+    continue_calls = _stub_pass(mocker, make_model_response(text=valid_json))
 
     trace = []
     result = drain(_run_pass_with_json_retry(
@@ -127,23 +127,14 @@ def test_clean_response_triggers_no_retry(mocker):
 
 def test_malformed_then_valid_recovers_in_one_retry(mocker):
     """If the initial response is malformed JSON but the first retry
-    returns valid JSON, _run_pass_with_json_retry should make exactly
-    ONE continue_conversation call and return the retry's valid text."""
+    returns valid JSON, _run_pass_with_json_retry should send exactly
+    ONE corrective and return the retry's valid text."""
     from core.reasoning.orchestrator import _run_pass_with_json_retry
 
-    fake_thread_id = uuid4()
-    bad_response = make_model_response(text="not valid json {{{")
-    bad_response.thread_id = fake_thread_id
-
-    def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
-        return bad_response
-
-    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
-                        side_effect=pass_stream(fake_run_dr_mode))
-
     valid_text = well_shaped("Pass 2")
-    retry_response = make_model_response(text=valid_text)
-    continue_calls = _stub_continue_returning_sequence(mocker, [retry_response])
+    continue_calls = _stub_pass(
+        mocker, make_model_response(text="not valid json {{{"),
+        [make_model_response(text=valid_text)])
 
     trace = []
     result = drain(_run_pass_with_json_retry(
@@ -152,7 +143,7 @@ def test_malformed_then_valid_recovers_in_one_retry(mocker):
 
     assert result == valid_text
     assert len(continue_calls) == 1, (
-        f"Expected exactly 1 continue_conversation call, got {len(continue_calls)}"
+        f"Expected exactly 1 corrective retry, got {len(continue_calls)}"
     )
     # One trace line for the single failed attempt.
     assert len(trace) == 1
@@ -170,23 +161,15 @@ def test_all_attempts_fail_raises_value_error(mocker):
     (1 initial + MAX_JSON_RETRIES retries)."""
     from core.reasoning.orchestrator import _run_pass_with_json_retry
 
-    fake_thread_id = uuid4()
-    bad_response = make_model_response(text="not valid json {{{")
-    bad_response.thread_id = fake_thread_id
-
-    def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
-        return bad_response
-
-    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
-                        side_effect=pass_stream(fake_run_dr_mode))
-
     # All retries also return malformed JSON. There should be
     # MAX_JSON_RETRIES worth of retry responses queued.
     retry_responses = [
         make_model_response(text="still not json {")
         for _ in range(config.MAX_JSON_RETRIES)
     ]
-    continue_calls = _stub_continue_returning_sequence(mocker, retry_responses)
+    continue_calls = _stub_pass(
+        mocker, make_model_response(text="not valid json {{{"),
+        retry_responses)
 
     trace = []
     with pytest.raises(ValueError, match="did not return valid JSON"):
@@ -196,7 +179,7 @@ def test_all_attempts_fail_raises_value_error(mocker):
 
     assert len(continue_calls) == config.MAX_JSON_RETRIES, (
         f"Expected exactly MAX_JSON_RETRIES={config.MAX_JSON_RETRIES} "
-        f"continue_conversation calls, got {len(continue_calls)}"
+        f"corrective retries, got {len(continue_calls)}"
     )
     # Trace should have one line per failed retry attempt (MAX_JSON_RETRIES lines).
     assert len(trace) == config.MAX_JSON_RETRIES
@@ -209,26 +192,17 @@ def test_all_attempts_fail_raises_value_error(mocker):
 # ===========================================================================
 
 def test_retry_uses_same_thread_id_as_initial_attempt(mocker):
-    """continue_conversation must re-enter the thread the initial
-    run_deep_research_mode call created. The thread_id comes back on
-    ModelResponse.thread_id (set by run_deep_research_mode's
-    `response.thread_id = memory.thread_id` line). The retried
-    continue_conversation's `thread_id` kwarg must equal it."""
+    """The retry must re-enter the thread the initial attempt created.
+    The thread_id comes back on ModelResponse.thread_id (set by the entry
+    point's `response.thread_id = memory.thread_id` line). The retry's
+    `resume_thread` must equal it."""
     from core.reasoning.orchestrator import _run_pass_with_json_retry
 
     initial_thread_id = uuid4()
-    bad_response = make_model_response(text="not valid json {{{")
-    bad_response.thread_id = initial_thread_id
-
-    def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
-        return bad_response
-
-    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
-                        side_effect=pass_stream(fake_run_dr_mode))
-
-    valid_text = well_shaped("Pass 3a")
-    retry_response = make_model_response(text=valid_text)
-    continue_calls = _stub_continue_returning_sequence(mocker, [retry_response])
+    continue_calls = _stub_pass(
+        mocker, make_model_response(text="not valid json {{{"),
+        [make_model_response(text=well_shaped("Pass 3a"))],
+        thread_id=initial_thread_id)
 
     drain(_run_pass_with_json_retry(
         "Pass 3a", "input", "claude-test", "ANTHROPIC", [],
@@ -236,7 +210,7 @@ def test_retry_uses_same_thread_id_as_initial_attempt(mocker):
 
     assert len(continue_calls) == 1
     assert continue_calls[0]["thread_id"] == initial_thread_id, (
-        f"continue_conversation must re-enter the same thread_id the initial "
+        f"the retry must re-enter the same thread_id the initial "
         f"attempt used. Expected {initial_thread_id}, got {continue_calls[0]['thread_id']}."
     )
 
@@ -248,8 +222,10 @@ def test_retry_uses_same_thread_id_as_initial_attempt(mocker):
 def test_resumed_history_contains_failed_assistant_turn(mocker):
     """THE CRUX TEST of the §3 + §1 fixes together.
 
-    When continue_conversation re-enters the thread, the thread's prior
-    history MUST contain the model's failed assistant turn -- that's
+    When the corrective retry re-enters the thread (through the pass's
+    own entry point since ROADMAP_v3 §99; `continue_conversation` before
+    it), the thread's prior history MUST contain the model's failed
+    assistant turn -- that's
     the whole point of the `_run()` always-persist fix in core/loop.py
     moving `add_assistant_message` up before any branching.
 
@@ -265,8 +241,8 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
     Implementation note: rather than set up real ConversationMemory + a
     full FakeStorage, we verify the SAME behavior by catching the
     ConversationMemory object that `run_deep_research_mode` creates and
-    passing that thread_id into a real `continue_conversation` call so
-    both halves of the bug fix fire.
+    passing that thread_id into a real retry so both halves of the bug
+    fix fire.
     """
     from core.reasoning.orchestrator import _run_pass_with_json_retry
     from tests.conftest import FakeStorage
@@ -286,7 +262,7 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
 
     # We need to drive _run through real ConversationMemory so the bug fix
     # actually executes. The first call should produce malformed JSON; the
-    # second (on continue_conversation) should produce valid JSON. Mock
+    # second (the corrective retry) should produce valid JSON. Mock
     # call_model with a side_effect that returns one after the other, but
     # ONLY when called from THIS thread (we set a side_effect that ignores
     # what messages actually look like -- _run() doesn't inspect messages
@@ -307,7 +283,7 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
             # First call from run_deep_research_mode: return malformed JSON.
             yield from make_stream_from_response(make_model_response(text=malformed_text))()
         else:
-            # Second call from continue_conversation -> _run: return valid JSON.
+            # Second call, the retry's -> _run: return valid JSON.
             yield from make_stream_from_response(make_model_response(text=valid_text))()
 
     mocker.patch("core.loop.call_model_stream", side_effect=fake_call_model_stream)
@@ -321,7 +297,8 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
     #   1. call real run_deep_research_mode -> _run with the malformed text.
     #      _run()'s always-persist fix -> add_assistant_message(malformed) ->
     #      FakeStorage now has it stored.
-    #   2. on parse failure, call real continue_conversation(thread_id, ...) ->
+    #   2. on parse failure, re-enter the pass's real entry point with
+    #      resume_thread=thread_id and the corrective as follow_up ->
     #      ConversationMemory(thread_id=...) is created -> get_session_history
     #      reconstructs the neutral shape directly (per msg.role).
     #   3. _run with the resumed history -> call_model -> returns valid JSON.
@@ -332,7 +309,7 @@ def test_resumed_history_contains_failed_assistant_turn(mocker):
 
     assert result == valid_text
 
-    # THE CRUX ASSERTION: the second call_model invocation (continue_conversation's
+    # THE CRUX ASSERTION: the second call_model invocation (the retry's
     # _run) MUST have received a messages list containing the FAILED assistant
     # turn with text == malformed_text. This proves:
     #   - _run()'s always-persist fix actually persisted the malformed response.
@@ -394,23 +371,14 @@ def test_trace_line_format_one_per_failed_attempt(mocker):
     with corrective message.` where Y = MAX_JSON_RETRIES + 1."""
     from core.reasoning.orchestrator import _run_pass_with_json_retry
 
-    fake_thread_id = uuid4()
-    bad_response = make_model_response(text="not valid json {{{")
-    bad_response.thread_id = fake_thread_id
-
-    def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
-        return bad_response
-
-    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
-                        side_effect=pass_stream(fake_run_dr_mode))
-
     # Two retries (return valid JSON on the second retry, so the test
     # doesn't raise -- it just returns from the helper). The returned
     # call log isn't inspected here (this test asserts on `trace`); the
     # stub is installed purely for its patching side effect.
     retry_1 = make_model_response(text="still bad {")
     retry_2 = make_model_response(text=well_shaped("Pass 3b"))
-    _stub_continue_returning_sequence(mocker, [retry_1, retry_2])
+    _stub_pass(mocker, make_model_response(text="not valid json {{{"),
+               [retry_1, retry_2])
 
     trace = []
     result = drain(_run_pass_with_json_retry(
@@ -448,8 +416,7 @@ def test_trace_line_format_one_per_failed_attempt(mocker):
 # ===========================================================================
 
 def test_corrective_message_contains_parse_error_excerpt_and_instruction(mocker):
-    """The corrective message passed to continue_conversation must
-    include:
+    """The corrective message sent into the pass's thread must include:
       (a) the parser's error message (so the model can see WHAT failed),
       (b) the first 200 chars of the failed output (so the model can
           locate the specific problem), and
@@ -458,22 +425,12 @@ def test_corrective_message_contains_parse_error_excerpt_and_instruction(mocker)
     actually able to correct the model's output."""
     from core.reasoning.orchestrator import _run_pass_with_json_retry
 
-    fake_thread_id = uuid4()
     # Craft a malformed output that's distinctive enough to verify the
     # 200-char excerpt is actually extracted from the failed response.
     malformed = "THIS IS THE FAILED OUTPUT PATTERN 12345" + "x" * 100 + "not valid json {"
-    initial_response = make_model_response(text=malformed)
-    initial_response.thread_id = fake_thread_id
-
-    def fake_run_dr_mode(*, pass_input, model, pass_id, provider_name="ANTHROPIC", **kwargs):
-        return initial_response
-
-    mocker.patch.object(RunAgentLoop, "stream_deep_research_mode",
-                        side_effect=pass_stream(fake_run_dr_mode))
-
-    valid_text = well_shaped("Pass 4")
-    retry_response = make_model_response(text=valid_text)
-    continue_calls = _stub_continue_returning_sequence(mocker, [retry_response])
+    continue_calls = _stub_pass(
+        mocker, make_model_response(text=malformed),
+        [make_model_response(text=well_shaped("Pass 4"))])
 
     drain(_run_pass_with_json_retry(
         "Pass 4", "input", "claude-test", "ANTHROPIC", [],
@@ -577,9 +534,8 @@ class TestAWrongShapeReEntersTheSameRetry:
         from core.reasoning.orchestrator import _run_pass_with_json_retry
 
         wrapped = make_model_response(text=json.dumps({"claims": []}))
-        _stub_run_dr_mode_returning(mocker, wrapped, uuid4())
         good = make_model_response(text=well_shaped("Pass 2"))
-        calls = _stub_continue_returning_sequence(mocker, [good])
+        calls = _stub_pass(mocker, wrapped, [good])
 
         trace = []
         result = drain(_run_pass_with_json_retry(
@@ -599,9 +555,8 @@ class TestAWrongShapeReEntersTheSameRetry:
         from core.reasoning.orchestrator import _run_pass_with_json_retry
 
         wrapped = make_model_response(text=json.dumps({"claims": []}))
-        _stub_run_dr_mode_returning(mocker, wrapped, uuid4())
-        calls = _stub_continue_returning_sequence(
-            mocker, [make_model_response(text=well_shaped("Pass 2"))])
+        calls = _stub_pass(
+            mocker, wrapped, [make_model_response(text=well_shaped("Pass 2"))])
 
         drain(_run_pass_with_json_retry(
             "Pass 2", "input", "claude-test", "ANTHROPIC", [],
@@ -621,10 +576,9 @@ class TestAWrongShapeReEntersTheSameRetry:
         payload gets must be exactly what it got before §30."""
         from core.reasoning.orchestrator import _run_pass_with_json_retry
 
-        _stub_run_dr_mode_returning(
-            mocker, make_model_response(text="not json {{{"), uuid4())
-        calls = _stub_continue_returning_sequence(
-            mocker, [make_model_response(text=well_shaped("Pass 2"))])
+        calls = _stub_pass(
+            mocker, make_model_response(text="not json {{{"),
+            [make_model_response(text=well_shaped("Pass 2"))])
 
         drain(_run_pass_with_json_retry(
             "Pass 2", "input", "claude-test", "ANTHROPIC", [],
@@ -640,10 +594,9 @@ class TestAWrongShapeReEntersTheSameRetry:
         both unreadable."""
         from core.reasoning.orchestrator import _run_pass_with_json_retry
 
-        _stub_run_dr_mode_returning(
-            mocker, make_model_response(text=json.dumps({"claims": []})), uuid4())
-        _stub_continue_returning_sequence(
-            mocker, [make_model_response(text=well_shaped("Pass 2"))])
+        _stub_pass(
+            mocker, make_model_response(text=json.dumps({"claims": []})),
+            [make_model_response(text=well_shaped("Pass 2"))])
 
         trace = []
         drain(_run_pass_with_json_retry(
@@ -662,10 +615,9 @@ class TestAWrongShapeReEntersTheSameRetry:
         from core.reasoning.payload_validation import PayloadShapeError
 
         bad = json.dumps([{"text": "t", "type": "factual"}])
-        _stub_run_dr_mode_returning(mocker, make_model_response(text=bad), uuid4())
-        _stub_continue_returning_sequence(
-            mocker, [make_model_response(text=bad)
-                     for _ in range(config.MAX_JSON_RETRIES)])
+        _stub_pass(mocker, make_model_response(text=bad),
+                   [make_model_response(text=bad)
+                    for _ in range(config.MAX_JSON_RETRIES)])
 
         with pytest.raises(PayloadShapeError, match=r"Pass 2: entry 0 .*'id'"):
             drain(_run_pass_with_json_retry(
@@ -679,10 +631,9 @@ class TestAWrongShapeReEntersTheSameRetry:
         from core.reasoning.orchestrator import _run_pass_with_json_retry
 
         bad = json.dumps({"claims": []})
-        _stub_run_dr_mode_returning(mocker, make_model_response(text=bad), uuid4())
-        _stub_continue_returning_sequence(
-            mocker, [make_model_response(text=bad)
-                     for _ in range(config.MAX_JSON_RETRIES)])
+        _stub_pass(mocker, make_model_response(text=bad),
+                   [make_model_response(text=bad)
+                    for _ in range(config.MAX_JSON_RETRIES)])
 
         with pytest.raises(ValueError):
             drain(_run_pass_with_json_retry(

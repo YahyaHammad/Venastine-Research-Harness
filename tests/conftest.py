@@ -79,6 +79,42 @@ def _with_events(response, events):
     return response
 
 
+def pass_and_corrections(first, corrections=None, log=None):
+    """side_effect for RunAgentLoop.stream_deep_research_mode that answers
+    a pass's FIRST attempt from `first` and each CORRECTIVE retry from
+    `corrections` (ROADMAP_v3 §99, SR1).
+
+    A corrective retry used to reach the model through
+    `continue_conversation`. Since §99 it comes through this same entry
+    point, with `follow_up=` the corrective and `resume_thread=` the pass's
+    thread, so a double still patched on `continue_conversation` stops
+    intercepting silently -- `pass_stream`'s trap, one seam over.
+
+    `first` is what `pass_stream` takes: a response, or a callable of the
+    call's kwargs. `corrections` is a list answered in order (an empty
+    reply once it runs out), a callable, or None to answer retries as
+    `first` does. Each retry's reply is given the thread it was sent into,
+    as the real entry point does. `log`, when given, gets one dict per
+    retry: `thread_id`, `message` and the call's `kwargs`."""
+    queue = list(corrections) if isinstance(corrections, (list, tuple)) else None
+
+    def _side_effect(*args, **kwargs):
+        if kwargs.get("follow_up") is None:
+            response = first(*args, **kwargs) if callable(first) else first
+            return _no_events(response)
+        if log is not None:
+            log.append({"thread_id": kwargs.get("resume_thread"),
+                        "message": kwargs["follow_up"], "kwargs": kwargs})
+        if queue is not None:
+            response = queue.pop(0) if queue else make_model_response(text="")
+        else:
+            source = first if corrections is None else corrections
+            response = source(*args, **kwargs) if callable(source) else source
+        response.thread_id = kwargs.get("resume_thread")
+        return _no_events(response)
+    return _side_effect
+
+
 def run_pipeline(*args, **kwargs):
     """Run the research pipeline synchronously and return the finished
     PipelineRun.
