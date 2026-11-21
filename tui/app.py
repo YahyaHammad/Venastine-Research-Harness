@@ -87,7 +87,7 @@ from core.provider_errors import describe
 from core.reasoning.authorization import GRANT_PICKER, NOTHING_TO_GRANT
 from core.replay import replay_entries
 from core.session_view import live_entries, stored_entries
-from memories.tui_commands import register_memory_commands
+from memories.tui_commands import attach_launch_refs, register_memory_commands
 from project_init.tui_commands import register_init_commands
 from prompts import system_prompts
 from safety.policy_enforcement import (
@@ -963,8 +963,18 @@ class VenastineApp(App):
     def __init__(self, provider_name: str = DEFAULT_PROVIDER,
                  model: str = None, settings: dict | None = None,
                  cli_pinned: bool = False,
-                 startup_notices: "list[str] | None" = None):
+                 startup_notices: "list[str] | None" = None,
+                 effort: str | None = None, effort_pinned: bool = False,
+                 launch_thread: UUID | None = None,
+                 launch_refs: "list[str] | None" = None):
         super().__init__()
+        # ROADMAP_v3 §101. What this launch's command line asked for beyond
+        # the pair: the conversation to open (LF2) and the threads to
+        # reference (--ref), both acted on at mount, where there is a
+        # transcript to say what became of them. Before §101 the TUI
+        # branch received neither and dropped both without a word.
+        self._launch_thread = launch_thread
+        self._launch_refs = list(launch_refs or ())
         # Batch 121. Lines main() established before this screen existed
         # and that the app cannot recompute -- a file it created, a
         # terminal it could not free. COPIED, because the caller's list is
@@ -1046,9 +1056,19 @@ class VenastineApp(App):
         # predates the top-level key and changing its meaning would
         # surprise existing configs -- then the universal key, then the
         # config floor (now "high").
-        self.effort = (tui_settings.get("effort")
-                       or self._settings.get("effort")
-                       or config.DEFAULT_EFFORT)
+        #
+        # ROADMAP_v3 §101 (LF1): an --effort FLAG outranks all three for
+        # this launch, as RM3 lets a pinned --provider/--model outrank a
+        # remembered /model choice -- a flag is an instruction about now.
+        # `effort` is main.resolve_effort's answer, so "auto" has already
+        # become None there and means off here exactly as in the CLI.
+        self._effort_pinned = effort_pinned
+        if effort_pinned:
+            self.effort = effort
+        else:
+            self.effort = (tui_settings.get("effort")
+                           or self._settings.get("effort")
+                           or config.DEFAULT_EFFORT)
         # Whether a HUMAN named this level. The mount-time validation
         # below exists as early feedback for a deliberate persisted
         # choice (§16: tui.effort used to be trusted as-is and 400 every
@@ -1058,8 +1078,11 @@ class VenastineApp(App):
         # instead would fire the fallback WARNING on every launch for
         # models without a known table, breaking #138's healthy-mount
         # silence for users who never asked about effort at all.
-        self._effort_named = bool(tui_settings.get("effort")
-                                  or self._settings.get("effort"))
+        # A flag that named a level is a human's choice too (LF1); one
+        # that said auto named nothing to validate.
+        self._effort_named = (self.effort is not None if effort_pinned
+                              else bool(tui_settings.get("effort")
+                                        or self._settings.get("effort")))
         # §23 slice 2. Validated at load by config_loader against
         # TODO_POSITIONS, so an unknown value never reaches here.
         self._todo_position = tui_settings.get("todo_position", "side")
@@ -1424,6 +1447,17 @@ class VenastineApp(App):
             self._meter_timer = self.set_interval(
                 ANIMATION_INTERVAL, self._refresh_meter, pause=True)
         self._refresh_meter()
+        # ROADMAP_v3 §101 (LF2). --thread opens that conversation through
+        # the path /resume uses, guards and all; an id that cannot be
+        # opened is switch_to_thread's own transcript error, and the
+        # session goes on with a fresh thread. ABOVE the banner, for two
+        # reasons: the replayed history reads first and this launch's own
+        # lines follow it, and the switch CLEARS the transcript, which is
+        # empty only until the banner. A line logged during the mount is
+        # not on it yet -- TranscriptLogHandler posts a message, handled
+        # after on_mount returns -- so the clear cannot take one.
+        if self._launch_thread is not None:
+            self.switch_to_thread(self._launch_thread)
         self._write_session_banner()
         # #138. Beside the status line it qualifies, before anything the
         # user might type. write_error, matching /model: an unknown
@@ -1474,6 +1508,10 @@ class VenastineApp(App):
             # the app. Gated on _effort_named: see its comment in
             # __init__ for why a default-derived level does not probe.
             self.start_effort_lookup(None, validate_only=True)
+        if self._launch_refs:
+            # §101, --ref: the same writer /ref uses, on a worker, because
+            # each reference is a summarising model call.
+            attach_launch_refs(self, self._launch_refs)
 
     def _startup_theme(self) -> str:
         """The theme to mount on: the last one selected, unless
@@ -2149,8 +2187,12 @@ class VenastineApp(App):
             detail = f"{self.model} accepts {', '.join(message.levels)}"
         else:
             detail = f"{self.model} exposes no reasoning-effort control"
+        # §101: say where the level came from, since a flag is not a
+        # persisted setting and the remedy differs (retype the command
+        # line, or edit settings.json).
+        origin = "--effort" if self._effort_pinned else "Persisted effort"
         self._transcript.write_error(
-            f"Persisted effort {self.effort!r} is not usable: {detail}. "
+            f"{origin} {self.effort!r} is not usable: {detail}. "
             "Falling back to auto.")
         self.effort = None
         self.query_one("#effort-raven", EffortRaven).effort = None
@@ -5538,8 +5580,9 @@ class VenastineApp(App):
     def switch_to_thread(self, thread_id: UUID) -> None:
         """Open `thread_id` in this session: load, reset per-thread state,
         replay. ONE site for the whole move (the picker's chosen() and
-        /resume both land here), because every step below exists to keep
-        the two halves of a switch -- teardown and rebuild -- from being
+        /resume both land here, and since ROADMAP_v3 §101 a --thread
+        launch too), because every step below exists to keep the two
+        halves of a switch -- teardown and rebuild -- from being
         separated by a failure. A second copy of this sequence would have
         to re-learn each comment the hard way."""
         resolved = thread_id if isinstance(thread_id, UUID) else UUID(str(thread_id))
@@ -8798,13 +8841,24 @@ register_init_commands()  # §24: /init
 
 
 def run(provider_name: str, model: str, settings: dict | None = None,
-        cli_pinned: bool = False, startup_notices: "list[str] | None" = None):
+        cli_pinned: bool = False, startup_notices: "list[str] | None" = None,
+        effort: str | None = None, effort_pinned: bool = False,
+        thread_id: UUID | None = None, refs: "list[str] | None" = None):
     """Entry point used by main.py --tui.
 
     `cli_pinned` says whether --provider/--model named this launch's
     pair (§43, RM3). main.resolve_runtime_defaults has already collapsed
     the flags into `provider_name`/`model` by here, so the app cannot
     tell by looking -- and a flag has to outrank a remembered choice.
+
+    ROADMAP_v3 §101: the rest of what a command line can ask a TUI launch
+    for. `effort` is main.resolve_effort's answer, read only when
+    `effort_pinned` says --effort named it (LF1), for cli_pinned's reason;
+    `thread_id` is --thread, opened at mount (LF2); `refs` is --ref,
+    attached at mount through the writer /ref uses. Every other flag is
+    either refused before this is called or exits instead of a shell, and
+    `TestEveryFlagReachesTheTuiOrIsRefused` in tests/test_cli.py holds
+    that census (LF3).
 
     `startup_notices` is batch 121: pre-mount lines main() could not
     print, because this screen erases stdout the moment it renders and
@@ -8819,4 +8873,7 @@ def run(provider_name: str, model: str, settings: dict | None = None,
     config_loader_settings = settings if settings is not None else config_loader.get_settings()
     return VenastineApp(provider_name, model, config_loader_settings,
                         cli_pinned=cli_pinned,
-                        startup_notices=startup_notices).run()
+                        startup_notices=startup_notices,
+                        effort=effort, effort_pinned=effort_pinned,
+                        launch_thread=thread_id,
+                        launch_refs=refs).run()

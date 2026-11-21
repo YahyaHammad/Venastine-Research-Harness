@@ -22,6 +22,8 @@ an ABSOLUTE character budget rather than a strength ratio, and a thread that
 already fits it costs no model call at all.
 """
 
+from uuid import uuid4
+
 import pytest
 
 import config
@@ -737,6 +739,143 @@ class TestTheRefCommand:
 
         assert app._transcript.errors
         assert app.pushed == []
+
+
+class _LaunchApp(_StubApp):
+    """A TUI launch: `memory` creates a thread lazily, as VenastineApp's
+    property does, and the launch names the thread it opened (if any)."""
+
+    def __init__(self, memory=None, launch_thread=None):
+        super().__init__(memory)
+        self._launch_thread = launch_thread
+
+    @property
+    def memory(self):
+        if self._memory is None:
+            from core.memory import ConversationMemory
+            self._memory = ConversationMemory()
+        return self._memory
+
+
+class TestTheTuiRefFlag:
+    """ROADMAP_v3 §101: `--ref` on a TUI launch, which before §101 was read
+    and dropped. The CLI's `attach_cli_refs` in the other shell's words."""
+
+    def test_a_launch_ref_attaches_through_the_shared_writer(
+            self, fake_storage, summarizer, monkeypatch):
+        """No --thread: a thread is started for the references and named,
+        as the CLI prints its id, and the label is the one /ref stores."""
+        from core.loop import with_refs
+        from core.memory import ConversationMemory
+        from memories.tui_commands import attach_launch_refs
+
+        source = ConversationMemory()
+        _thread(source, turns=30, body="y" * 200)
+        monkeypatch.setattr("storage.thread_preview",
+                            lambda tid: "first question about entropy")
+        app = _LaunchApp()
+
+        attach_launch_refs(app, [str(source.thread_id)])
+
+        assert app._memory is not None
+        assert any(f"Started thread {app._memory.thread_id}" in line
+                   for line in app._transcript.system)
+        resumed = ConversationMemory(thread_id=app._memory.thread_id)
+        assert "A distilled summary of the thread." in with_refs("base", resumed)
+        assert resumed.extra["refs"][0]["label"] == "first question about entropy"
+        assert any(line.startswith("--ref: Now referencing")
+                   for line in app._transcript.system)
+        assert app._busy is False
+
+    def test_a_launch_ref_goes_on_the_thread_the_launch_opened(
+            self, fake_storage, summarizer):
+        from core.loop import with_refs
+        from core.memory import ConversationMemory
+        from memories.tui_commands import attach_launch_refs
+
+        opened = ConversationMemory()
+        source = ConversationMemory()
+        _thread(source, turns=30, body="y" * 200)
+        app = _LaunchApp(opened, launch_thread=opened.thread_id)
+
+        attach_launch_refs(app, [str(source.thread_id)])
+
+        assert app._memory is opened
+        assert not any("Started thread" in line for line in app._transcript.system)
+        resumed = ConversationMemory(thread_id=opened.thread_id)
+        assert "A distilled summary of the thread." in with_refs("base", resumed)
+
+    def test_a_named_thread_that_did_not_open_gets_nothing(
+            self, fake_storage, summarizer):
+        """The user named THAT conversation; attaching to a fresh one
+        instead would put the references on a thread they never asked
+        for. No thread is started and no call is spent."""
+        from core.memory import ConversationMemory
+        from memories.tui_commands import attach_launch_refs
+
+        source = ConversationMemory()
+        app = _LaunchApp(launch_thread=uuid4())
+
+        attach_launch_refs(app, [str(source.thread_id)])
+
+        assert app._memory is None
+        assert summarizer == []
+        assert any("could not be opened" in line for line in app._transcript.errors)
+
+    def test_a_malformed_ref_reports_and_starts_no_thread(
+            self, fake_storage, summarizer):
+        """Said out loud, as the CLI says it -- and a launch whose every
+        --ref was mistyped leaves no empty thread behind."""
+        from memories.tui_commands import attach_launch_refs
+
+        app = _LaunchApp()
+
+        attach_launch_refs(app, ["not-a-uuid"])
+
+        assert any("not a thread id" in line for line in app._transcript.errors)
+        assert app._memory is None
+        assert summarizer == []
+
+    def test_referencing_the_opened_thread_is_skipped(
+            self, fake_storage, summarizer):
+        from core.memory import ConversationMemory
+        from memories.tui_commands import attach_launch_refs
+
+        opened = ConversationMemory()
+        _thread(opened, turns=30, body="y" * 200)
+        app = _LaunchApp(opened, launch_thread=opened.thread_id)
+
+        attach_launch_refs(app, [str(opened.thread_id)])
+
+        assert any("that is this thread" in line for line in app._transcript.system)
+        assert summarizer == []
+        assert app._busy is False
+
+    def test_one_failed_reference_does_not_stop_the_next(
+            self, fake_storage, summarizer, mocker):
+        from core.memory import ConversationMemory
+        from memories.tui_commands import attach_launch_refs
+
+        good = ConversationMemory()
+        bad = uuid4()
+        real = compaction.summarize_thread
+
+        def _summarize(thread_id, *args, **kwargs):
+            if thread_id == bad:
+                raise RuntimeError("provider down")
+            return real(thread_id, *args, **kwargs)
+
+        mocker.patch("core.compaction.summarize_thread", side_effect=_summarize)
+        _thread(good, turns=30, body="y" * 200)
+        app = _LaunchApp()
+
+        attach_launch_refs(app, [str(bad), str(good.thread_id)])
+
+        assert any("could not summarise" in line and str(bad) in line
+                   for line in app._transcript.errors)
+        refs = ConversationMemory(thread_id=app._memory.thread_id).extra["refs"]
+        assert [ref["thread_id"] for ref in refs] == [str(good.thread_id)]
+        assert app._busy is False
 
 
 class TestTheCliFlags:

@@ -4936,6 +4936,166 @@ class TestTheMountResolvesEffortFromBothKeys:
                 "an explicitly named level keeps its early feedback"
 
 
+class TestALaunchCarriesItsFlags:
+    """ROADMAP_v3 §101. `run_tui()` received the provider, the model and
+    nothing else, so `--tui --effort low` ran at `high` with `high` in the
+    sidebar, and the `--thread` a /config restart writes was ignored by the
+    TUI it relaunched. The census of every flag is in tests/test_cli.py;
+    these are what the app does with the ones it now receives.
+    """
+
+    def test_an_effort_flag_outranks_both_keys(self):
+        """LF1, RM3's rule for the pair: a flag is an instruction about
+        now. tui.effort still beats the top-level key without one."""
+        app = VenastineApp("ANTHROPIC", "test-model",
+                           {"tui": {"effort": "high"}, "effort": "medium"},
+                           effort="low", effort_pinned=True)
+        assert app.effort == "low"
+        assert app._effort_named is True
+
+    def test_an_effort_flag_of_auto_is_off_and_names_nothing(self):
+        """resolve_effort already turned `auto` into None, the CLI's off
+        switch, so there is no level to probe at mount."""
+        app = VenastineApp("ANTHROPIC", "test-model",
+                           {"tui": {"effort": "high"}},
+                           effort=None, effort_pinned=True)
+        assert app.effort is None
+        assert app._effort_named is False
+
+    def test_an_unpinned_effort_is_not_read(self):
+        """The control. Only the pin makes the value an instruction;
+        without it batch 25's precedence stands."""
+        app = VenastineApp("ANTHROPIC", "test-model",
+                           {"tui": {"effort": "high"}},
+                           effort="low", effort_pinned=False)
+        assert app.effort == "high"
+
+    @pytest.mark.asyncio
+    async def test_the_sidebar_shows_the_flag_level(self, mocker):
+        """The symptom the report described: the raven read `high`."""
+        mocker.patch.object(VenastineApp, "start_effort_lookup")
+        app = VenastineApp("ANTHROPIC", "test-model", {},
+                           effort="low", effort_pinned=True)
+        async with app.run_test() as pilot:
+            await settle(pilot, lambda: app.is_running)
+            assert app.query_one("#effort-raven").effort == "low"
+
+    @pytest.mark.asyncio
+    async def test_an_unusable_flag_level_names_the_flag(self, mocker):
+        """Validated at mount as a human's choice, and the message says
+        where the level came from: retyping the command line is the remedy,
+        not editing a setting that was never persisted."""
+        mocker.patch("tui.app.api_initialization", return_value=object())
+        mocker.patch("tui.app.effort_levels_for_model",
+                     return_value=["low", "high"])
+        app = VenastineApp("ANTHROPIC", "test-model", {},
+                           effort="xhigh", effort_pinned=True)
+        async with app.run_test() as pilot:
+            assert await settle(pilot, lambda: app.effort is None)
+            text = app._transcript.as_text()
+        assert "--effort 'xhigh' is not usable" in text
+        assert "Persisted effort" not in text
+
+    @pytest.mark.asyncio
+    async def test_a_thread_flag_opens_that_thread_at_mount(self, mocker):
+        """LF2, through switch_to_thread -- and above the banner, so the
+        history reads first and this launch's own lines follow it."""
+        thread_id = uuid4()
+        memory = mocker.patch("tui.app.ConversationMemory")
+        mocker.patch("tui.app.replay_entries", return_value=[])
+        app = VenastineApp("ANTHROPIC", "test-model", {},
+                           launch_thread=thread_id)
+        async with app.run_test() as pilot:
+            assert await settle(pilot, lambda: "Type /help" in
+                                (app._transcript.as_text() or ""))
+            text = app._transcript.as_text()
+            opened = app._memory is memory.return_value
+        assert opened, "the launch did not open the thread it was given"
+        memory.assert_called_with(thread_id=thread_id)
+        assert text.index(f"Resumed thread {thread_id}.") < text.index("Type /help")
+
+    @pytest.mark.asyncio
+    async def test_a_warning_logged_during_mount_survives_the_switch(
+            self, mocker):
+        """The switch CLEARS the transcript. It runs at mount only because
+        a line logged there is posted, not written, and arrives after
+        on_mount returns; this holds that, so a handler that wrote
+        synchronously would have the switch erase the warning."""
+        from tui import themes
+
+        real = themes.register_all
+
+        def _register(app):
+            real(app)
+            logging.getLogger("tests.launch").warning("logged during the mount")
+
+        mocker.patch("tui.app.themes.register_all", side_effect=_register)
+        mocker.patch("tui.app.ConversationMemory")
+        mocker.patch("tui.app.replay_entries", return_value=[])
+        app = VenastineApp("ANTHROPIC", "test-model", {},
+                           launch_thread=uuid4())
+        async with app.run_test() as pilot:
+            assert await settle(pilot, lambda: "logged during the mount" in
+                                (app._transcript.as_text() or ""))
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_thread_flag_is_an_error_not_a_crash(
+            self, mocker):
+        """switch_to_thread's own containment, inherited: the session goes
+        on, on a fresh thread."""
+        mocker.patch("tui.app.ConversationMemory",
+                     side_effect=ValueError("No conversation thread found"))
+        app = VenastineApp("ANTHROPIC", "test-model", {},
+                           launch_thread=uuid4())
+        async with app.run_test() as pilot:
+            assert await settle(pilot, lambda: "Could not open thread" in
+                                (app._transcript.as_text() or ""))
+            running, memory = app.is_running, app._memory
+        assert running
+        assert memory is None
+
+    @pytest.mark.asyncio
+    async def test_ref_flags_are_attached_at_mount(self, mocker):
+        attached = []
+        mocker.patch("tui.app.attach_launch_refs",
+                     side_effect=lambda app, specs: attached.append(list(specs)))
+        app = VenastineApp("ANTHROPIC", "test-model", {},
+                           launch_refs=["a", "b"])
+        async with app.run_test() as pilot:
+            assert await settle(pilot, lambda: bool(attached))
+        assert attached == [["a", "b"]]
+
+    @pytest.mark.asyncio
+    async def test_a_launch_without_refs_attaches_nothing(self, mocker):
+        """The control for the one above."""
+        attached = []
+        mocker.patch("tui.app.attach_launch_refs",
+                     side_effect=lambda app, specs: attached.append(specs))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await settle(pilot, lambda: app.is_running)
+            await pump(pilot, 3)
+        assert attached == []
+
+    def test_run_hands_the_app_every_launch_fact(self, mocker):
+        """tui.app.run is the seam main() calls; a keyword it accepted and
+        did not pass on would be the same defect one layer down."""
+        from tui.app import run
+
+        seen = {}
+
+        def _run(app):
+            seen.update(effort=app.effort, pinned=app._effort_pinned,
+                        thread=app._launch_thread, refs=app._launch_refs)
+
+        mocker.patch.object(VenastineApp, "run", _run)
+        thread_id = uuid4()
+        run("ANTHROPIC", "test-model", {}, effort="low", effort_pinned=True,
+            thread_id=thread_id, refs=["x"])
+        assert seen == {"effort": "low", "pinned": True,
+                        "thread": thread_id, "refs": ["x"]}
+
+
 # ---- #116: nothing in tui/ paints a colour the palette did not choose -----
 # ---------------------------------------------------------------------------
 

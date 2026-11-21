@@ -32638,3 +32638,77 @@ here branches on the platform except the CLI reader's terminal flush, which this
 change. Not run against a live provider: every model in the new tests is scripted.
 
 - **Version:** the branch's beta identity, `0.3.20-b.1.background-subagents.r74780fef5406`.
+
+## Batch 277 -- flags a full-screen launch dropped, and the researcher feedback committed (ROADMAP_v3 §101) (2026-11-21)
+
+**Asked.** Take an open roadmap item or a bug-fix batch, from either roadmap, and before committing
+the new, untracked `docs/ROADMAP_v3_researcher_feedback.md`, check it is safe to commit.
+
+**The document was not safe as written.** It named the researcher (a chat handle, their field, their
+institution and research group), quoted about forty of their messages from a private thread word
+for word, described their research topic, their own tool and a run id, used the institution's
+endpoint as the provider name nine times, and named three third-party models. No credentials,
+addresses or emails; the `sk-proj-`/`ghp_` strings are prefixes in a measurement, and
+`attacker.example` is a reserved name. The owner chose to scrub and commit: the researcher is
+unnamed and they/them, the provider is "one OpenAI-compatible provider" and its models "the model",
+the research specifics are generic, the quotes are paraphrased, and the references to the owner's
+feature-proposals and consultation notes, which are not in the repository, say so instead of
+reading like issue numbers. Every technical claim and measurement is unchanged. A patch script made
+each of 62 replacements match exactly once and failed on any leftover name, pronoun or quote word;
+the remaining quoted phrases were then listed and read, and one fragment of the researcher's words
+in §115 was found and paraphrased by hand. The unscrubbed original went to the git-excluded
+`provider-reports/`. It is the 66th file `read_project_doc` reaches, and AGENTS.md says so.
+
+**Picked §101 of it**, which the document recommended first. Checked on main `ee15a52`: `run_tui()`
+was called with the provider, the model, the settings, `cli_pinned` and the startup notices, and
+nothing else, so `--effort` and `--thread` were read, validated and dropped on the TUI path. Checking
+every flag found the third: `--ref`, attached only on the CLI chat path.
+
+**Settled with the owner.** Three questions:
+- `--effort` outranks `tui.effort` and `effort` for the launch (recommended), as RM3's pinned pair
+  outranks a remembered `/model` choice.
+- `--ref` is carried rather than refused (recommended).
+- Recorded as ROADMAP_v3 §101 with the proposal's number, LF1-LF3 as proposed plus LF4 for `--ref`.
+
+**Measured, and it changed the design.** The first version opened the `--thread` at mount through a
+`switch_to_thread(at_launch=True)` that skipped the transcript reset, to keep log lines routed
+during the mount. Reading `TranscriptLogHandler.emit` showed it POSTS a message, handled after
+`on_mount` returns, so at the switch the transcript is empty and the reset clears nothing. The
+keyword was removed and the launch uses the `/resume` path unchanged; a test holds that a warning
+logged during the mount survives the switch.
+
+**Built.** LF1-LF4 (ROADMAP_v3 §101).
+- `main.py`: `run_tui` gets `effort` (resolve_effort's answer, so `auto` is off by one rule),
+  `effort_pinned`, `thread_id` and `refs`; `relaunch_argv` drops `--ref`, which is thread state the
+  reopened thread already holds.
+- `tui/app.py`: `run` and `VenastineApp` take them; a pinned effort wins and is validated at mount
+  as a named one, its error saying `--effort` rather than "Persisted effort"; the thread opens above
+  the banner; the references are handed to:
+- `memories/tui_commands.py`: `attach_launch_refs`, one worker over all of them through
+  `core.loop.attach_ref`, a thread started only once one parsed, nothing attached when a named
+  `--thread` did not open.
+
+**Left as it was, and recorded in §101.** `--software-project` and `--research-project` stay silent
+without `--init` (§24 I17's choice). The data commands still run instead of a shell with `--tui`, so
+`--tui` is the flag they leave unused; refusing that combination is not decided here.
+
+**Tests.** The census, `TestEveryFlagReachesTheTuiOrIsRefused` in `test_cli.py`, reads
+`build_parser()` and gives each of the 23 things it accepts (22 option strings and the positional query) one of five answers, then drives the real
+`main()` for each refusal, each data command and each flag that reaches the TUI.
+`TestALaunchCarriesItsFlags` in `test_tui.py` mounts the app; `TestTheTuiRefFlag` in
+`test_thread_refs.py`; `test_references_are_not_attached_twice` in `test_config_edit.py`. With
+`main.py` as it was, the five reaching-the-TUI tests fail and the census and refusals pass, as
+guards for the next flag. Seven mutations, one per decision's load-bearing line, all killed.
+
+Full suite green on Windows with AGENT_WORKSPACE unset (10023 collected, 8 integration deselected).
+One earlier full run, at 15 minutes on a loaded machine, failed
+`test_storage_e2e.py::test_eight_concurrent_writers_all_land`; its file then passed three times
+in a row, and this batch touches no storage code.
+
+ruff is clean. bandit 1.9.4 reports 47 live findings and none new against the baseline, and
+`bandit-count-check.py` finds none of the 62 (file, test) pairs grown. gitleaks 8.30.1 on an export of the tracked files finds nothing, and `git grep` finds none of
+the names the scrub removed. No
+requirements or workflow file changed, so pip-audit was not re-run. Not driven in a real terminal:
+the TUI tests run on Textual's headless pilot.
+
+- **Version:** the branch's beta identity, `0.3.21-b.1.tui-launch-flags.r8a2d097873a1`.

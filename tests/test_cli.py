@@ -2089,6 +2089,190 @@ class TestTheModeValidations:
 
 
 # ===========================================================================
+# ---- ROADMAP_v3 §101: what a --tui launch does with every flag ------------
+# ===========================================================================
+
+#: Every option string `main.build_parser()` accepts, and what a `--tui`
+#: launch does with it. ONE of four answers each, and LF3 is the reason the
+#: table exists at all: before §101, `--effort`, `--thread` and `--ref` were
+#: read, validated and dropped on this path without a word, while main.py
+#: already refused `--tui` with a query because "silently dropped" is not
+#: honest. A new flag fails `test_every_flag_has_exactly_one_answer` until
+#: it is placed here -- which is the moment to decide what the TUI does
+#: with it.
+#:
+#: REACHES THE TUI -- handed to tui.app.run, as the keyword named.
+_TUI_TAKES = {
+    "--provider": "cli_pinned",
+    "--model": "cli_pinned",
+    "--effort": "effort",
+    "--thread": "thread_id",
+    "--ref": "refs",
+}
+#: USED BEFORE THE BRANCH -- read by the startup both shells share.
+_USED_BEFORE = {
+    "--tui": "the branch itself",
+    "--trust-project": "load_project_config's trust answer",
+}
+#: REFUSED -- parser.error before anything connects. Each with an argv
+#: that reaches the refusal.
+_REFUSED = {
+    "query": ["hello"],
+    "--mode": ["--mode", "research"],
+    "--grant": ["--grant"],
+    "--grant-tools": ["--grant-tools", "shell"],
+    "--attended": ["--attended"],
+    "--review": ["--review"],
+    "--no-review": ["--no-review"],
+    # Bare: it lists stored runs. A value would have to survive the
+    # parser's own type check first, and a refusal THERE would pass this
+    # table for a reason that is not main()'s.
+    "--resume": ["--resume"],
+}
+#: RUNS INSTEAD OF A SHELL -- a data command that exits before either
+#: shell starts, --tui or not. `--project-config` is a refusal of its own
+#: (it belongs to --init), on this list because it, too, starts no shell.
+_RUNS_INSTEAD = {
+    "--memories": ["--memories"],
+    "--forget": ["--forget", "x"],
+    "--summary": ["--summary"],
+    "--secrets": ["--secrets", "status"],
+    "--init": ["--init"],
+    "--project-config": ["--project-config"],
+}
+#: MODIFIES --init -- read inside run_init_command only, so without --init
+#: it is ignored in EVERY shell, deliberately: §24 I17 refused
+#: `--project-config` on its own and kept these two silent, "a behaviour
+#: change with users" (test_project_config_without_init_is_refused_not_ignored).
+_INIT_ONLY = {"--software-project", "--research-project"}
+
+
+@pytest.fixture
+def tui_launch(startup, monkeypatch):
+    """`startup`, plus the TUI branch's own two calls stubbed: the app
+    (whatever it was handed is recorded) and the terminal handover, which
+    reaches the real console."""
+    import main
+    import tui.app
+
+    handed = []
+
+    def _run(*args, **kwargs):
+        startup.append("run_tui")
+        handed.append(kwargs)
+
+    monkeypatch.setattr(tui.app, "run", _run)
+    monkeypatch.setattr(main, "_release_terminal", lambda: True)
+    monkeypatch.setattr(main, "run_secrets_command",
+                        lambda *a, **k: startup.append("secrets") or 0)
+    return handed
+
+
+class TestEveryFlagReachesTheTuiOrIsRefused:
+    """ROADMAP_v3 §101 (LF1-LF3)."""
+
+    def test_every_flag_has_exactly_one_answer(self):
+        """The census. Read from the parser itself, so a flag added to
+        build_parser and to nothing here fails by name."""
+        import main
+
+        accepted = set()
+        for action in main.build_parser()._actions:
+            if action.dest == "help":
+                continue
+            accepted.update(action.option_strings or [action.dest])
+        tables = (set(_TUI_TAKES), set(_USED_BEFORE), set(_REFUSED),
+                  set(_RUNS_INSTEAD), _INIT_ONLY)
+        placed = [name for table in tables for name in table]
+        assert len(placed) == len(set(placed)), \
+            "a flag has two answers; it can have only one"
+        assert accepted - set(placed) == set(), (
+            f"no answer for {sorted(accepted - set(placed))} under --tui: "
+            f"make tui.app.run take it, or refuse it with --tui in main()")
+        assert set(placed) - accepted == set(), \
+            f"answers for flags the parser no longer has: {sorted(set(placed) - accepted)}"
+
+    @pytest.mark.parametrize("flag", sorted(_REFUSED))
+    def test_a_refused_flag_is_refused_before_anything_connects(
+            self, flag, startup, tui_launch):
+        import main
+
+        with pytest.raises(SystemExit) as exit_info:
+            main.main(["--tui", *_REFUSED[flag]])
+        assert exit_info.value.code == 2
+        assert "setup_mcp" not in startup and "run_tui" not in startup
+
+    @pytest.mark.parametrize("flag", sorted(_RUNS_INSTEAD))
+    def test_a_data_command_runs_and_no_shell_starts(self, flag, startup,
+                                                     tui_launch):
+        import main
+
+        main.main(["--tui", *_RUNS_INSTEAD[flag]])
+        assert "run_tui" not in startup and "run_chat" not in startup
+
+    def test_effort_reaches_the_tui_pinned(self, startup, tui_launch):
+        """LF1. Before §101 the sidebar read the shipped `high` whatever
+        --effort said."""
+        import main
+
+        main.main(["--tui", "--effort", "low"])
+        assert tui_launch[-1]["effort"] == "low"
+        assert tui_launch[-1]["effort_pinned"] is True
+
+    def test_effort_auto_reaches_the_tui_as_off(self, startup, tui_launch):
+        """`auto` is the explicit off switch in both shells, resolved once
+        by resolve_effort -- not a level the TUI would send."""
+        import main
+
+        main.main(["--tui", "--effort", "auto"])
+        assert tui_launch[-1]["effort"] is None
+        assert tui_launch[-1]["effort_pinned"] is True
+
+    def test_no_effort_flag_pins_nothing(self, startup, tui_launch):
+        """The control: without the flag tui.effort keeps winning inside
+        the TUI (batch 25), so nothing may claim a flag named it."""
+        import main
+
+        main.main(["--tui"])
+        assert tui_launch[-1]["effort_pinned"] is False
+
+    def test_thread_reaches_the_tui(self, startup, tui_launch):
+        """LF2. relaunch_argv writes --thread for a /config restart, and the
+        relaunched TUI then ignored the flag its own restart had written."""
+        import main
+
+        thread = uuid4()
+        main.main(["--tui", "--thread", str(thread)])
+        assert tui_launch[-1]["thread_id"] == thread
+
+    def test_refs_reach_the_tui(self, startup, tui_launch):
+        import main
+
+        main.main(["--tui", "--ref", "a", "--ref", "b"])
+        assert tui_launch[-1]["refs"] == ["a", "b"]
+
+    def test_the_pair_still_pins(self, startup, tui_launch):
+        """§43 RM3's flag, unchanged by §101 -- the census lists it as
+        reaching the TUI, so it is held here with the three new ones."""
+        import main
+
+        main.main(["--tui"])
+        assert tui_launch[-1]["cli_pinned"] is False
+        main.main(["--tui", "--model", "m"])
+        assert tui_launch[-1]["cli_pinned"] is True
+
+    def test_trust_project_is_read_before_the_branch(self, startup,
+                                                     tui_launch, monkeypatch):
+        import main
+
+        answers = []
+        monkeypatch.setattr(main, "load_project_config",
+                            lambda path, trust: answers.append(trust) or {})
+        main.main(["--tui", "--trust-project"])
+        assert answers == [True] and "run_tui" in startup
+
+
+# ===========================================================================
 # ---- Audit #102: the fail-safes and call sites nothing pinned -------------
 # ===========================================================================
 
@@ -2428,8 +2612,11 @@ class TestTheLaunchProviderCheck:
         # wiring break with this test still green.
         monkeypatch.setattr(
             tui.app, "run",
+            # ROADMAP_v3 §101's four named too, for the same reason;
+            # TestEveryFlagReachesTheTuiOrIsRefused asserts their values.
             lambda provider, model, settings, cli_pinned=False,
-            startup_notices=None:
+            startup_notices=None, effort=None, effort_pinned=False,
+            thread_id=None, refs=None:
                 seen.update(provider=provider, cli_pinned=cli_pinned,
                             notices=list(startup_notices or ())))
 

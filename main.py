@@ -3303,13 +3303,20 @@ def relaunch_argv(request, argv=None) -> list:
         exactly as it did at this one, and writing a flag the user never
         typed would outrank it.
 
+    And one DROPPED (ROADMAP_v3 §101): `--ref`. A reference is thread
+    state, attached at the first launch to the thread that launch opened,
+    so the thread the restart reopens already holds it; carried, it would
+    summarise every source again -- a model call apiece the user did not
+    ask for -- and, after a `/new`, attach the first launch's references to
+    a conversation that never had them.
+
     Pure, and separate from the exec for that reason: what a relaunch
     should consist of is worth asserting without replacing the test
     process to find out.
     """
     argv = list(sys.argv if argv is None else argv)
     rest = argv[1:]
-    for flag in ("--thread", "--provider", "--model"):
+    for flag in ("--thread", "--provider", "--model", "--ref"):
         rest = _drop_flag(rest, flag)
     if request.thread_id:
         rest += ["--thread", request.thread_id]
@@ -3704,10 +3711,21 @@ def main(argv=None) -> int:
                     "[warning] something else is still reading this "
                     "terminal, so keyboard input may be lost. Restart "
                     "the harness in a fresh terminal.")
+            # ROADMAP_v3 §101. --effort, --thread and --ref reach the TUI
+            # too: before it this call carried the pair and nothing else,
+            # so all three were read, validated and dropped without a
+            # word. `effort_pinned` is cli_pinned's shape, for its reason.
+            # tests/test_cli.py's TestEveryFlagReachesTheTuiOrIsRefused is
+            # the census that every flag is consumed here, refused above,
+            # or exits before a shell (LF3).
             restart = run_tui(provider, model, settings,
                               cli_pinned=args.provider is not None
                               or args.model is not None,
-                              startup_notices=startup_notices)
+                              startup_notices=startup_notices,
+                              effort=effort,
+                              effort_pinned=args.effort is not None,
+                              thread_id=args.thread,
+                              refs=args.ref)
         elif args.mode == "research":
             # AFTER setup_mcp: the tools a grant can cover are named at
             # connection time, so asking any earlier would offer a list

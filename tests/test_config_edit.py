@@ -1072,6 +1072,18 @@ class TestTheRelaunch:
         assert "--thread" not in main.relaunch_argv(
             self._request(), ["main.py", "--tui"])
 
+    def test_references_are_not_attached_twice(self):
+        """ROADMAP_v3 §101. --ref reaches the TUI now, and a reference is
+        thread STATE: the thread the restart reopens already holds what the
+        first launch attached. Carried, every source would be summarised
+        again -- a model call apiece nobody asked for -- and after a /new
+        attached to a conversation that never had them. Both spellings,
+        every occurrence, for _drop_flag's reason."""
+        rest = main.relaunch_argv(
+            self._request(thread_id="t"),
+            ["main.py", "--tui", "--ref", "a", "--ref=b", "--effort", "low"])[2:]
+        assert rest == ["--tui", "--effort", "low", "--thread", "t"]
+
     def test_windows_waits_rather_than_orphaning_the_terminal(self,
                                                               mocker):
         """Windows has no exec: the C runtime emulates it by starting a

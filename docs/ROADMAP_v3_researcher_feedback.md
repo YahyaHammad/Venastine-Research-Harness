@@ -4,8 +4,9 @@
 researcher gave in a chat thread on 2026-11-18 and 2026-11-19 after running the harness against one
 OpenAI-compatible provider, plus the replies in the same thread. The researcher, the provider and its
 models are not named, and the researcher's words are paraphrased rather than quoted: the thread was a
-private conversation and this repository is public. Keep it that way in any edit. Nothing
-here is built and **no decision below is locked**: every Design Decisions table is a proposal for the
+private conversation and this repository is public. Keep it that way in any edit. Except §101,
+which was accepted and built in batch 277 and now lives in `ROADMAP_v3.md`, nothing here is built
+and **no decision below is locked**: every Design Decisions table is a proposal for the
 owner to accept, change or refuse, in the convention the three roadmaps already use. A section the owner
 accepts keeps its number; one refused is recorded as refused rather than renumbered, so `§N` keeps one
 meaning.
@@ -34,7 +35,7 @@ append-only, and a deviation is an owner decision in `DEVLOG.md`.
 
 **Fix first — four defects the researcher hit, each verified in the code**
 
-- **§101. Flags a full-screen launch dropped: `--effort` and `--thread` under `--tui`** - **(NOT BUILT: proposed 2026-11-20)** (`run_tui()` receives the provider, the model and nothing else, so `--tui --effort low` runs at the remembered or shipped `high` and the sidebar says `high`; the same is true of `--thread`, which `relaunch_argv` itself writes after a `/config` restart and the relaunched TUI then ignores. The project refuses `--tui` with a query because "silently dropped" is not honest; these two are the same defect, unrefused)
+- **§101. Flags a full-screen launch dropped: `--effort` and `--thread` under `--tui`** - **(BUILT in batch 277: now `ROADMAP_v3.md` §101, LF1-LF4)** (`run_tui()` receives the provider, the model and nothing else, so `--tui --effort low` runs at the remembered or shipped `high` and the sidebar says `high`; the same is true of `--thread`, which `relaunch_argv` itself writes after a `/config` restart and the relaunched TUI then ignores. The project refuses `--tui` with a query because "silently dropped" is not honest; these two are the same defect, unrefused)
 - **§102. A model call that never answers is reported before half an hour has passed** - **(NOT BUILT: proposed 2026-11-20)** (the OpenAI-compatible and Anthropic clients keep the SDK's own two retries under the harness's two, at the SDK's 600 s read timeout. Measured: one harness attempt is three requests, so a stalled endpoint costs up to nine requests and about ninety minutes, the first WARNING arrives after about thirty, and every abandoned request is a 499 in the provider's log -- the 499 the researcher saw in the provider's log and never in the harness)
 - **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(NOT BUILT: proposed 2026-11-20)** (measured: a reader scrolled to row 5 of 40 is at the bottom again after five streamed rows, because `RichLog.auto_scroll` follows every write. Text selection is not a ceiling of the pinned textual: 8.2.8 calls `get_selection` on a `RichLog` subclass, and a twelve-line prototype returned the dragged text. `/help` still says "not supported by this Textual version", written when the pin was 1.0.0)
 - **§104. A JSON pass cut off by the output ceiling is split, not corrected** - **(NOT BUILT: proposed 2026-11-20)** (a reply that ended on `finish_reason: length` is marked `complete` when it has text, so a Pass 3a answer cut at the 16,000-token ceiling -- which bounds thinking and text together on some providers -- is sent the "did not parse" corrective and asked for the same answer again, at the same size, three times. The researcher's failure was an unterminated string at character 36,142 of a one-call answer for 63 claims)
@@ -72,54 +73,10 @@ need no gate. See **Sequencing** at the end.
 
 ## §101. Flags a full-screen launch dropped: `--effort` and `--thread` under `--tui`
 
-**Proposed 2026-11-20, from the researcher's launcher.** Their launcher wrote
-`python main.py --tui --provider <PROVIDER> --model <model> --effort low`. The provider and model took;
-the effort did not, and the sidebar read `high` whatever they chose. In the thread this was answered with
-"if you use --tui you can't use any other flags", and then, when they pointed out the provider and model
-worked, classified as a real bug. It is.
-
-**Read, not driven.** `main.py:3707` calls `run_tui(provider, model, settings, cli_pinned=...,
-startup_notices=...)`. `effort = resolve_effort(args, settings)` is computed at `main.py:3505` and
-passed to `run_research` and the CLI, never to the TUI. `tui/app.py:1049` sets
-`self.effort = tui_settings.get("effort") or self._settings.get("effort") or config.DEFAULT_EFFORT`, and
-`DEFAULT_EFFORT` ships as `high`. So `--effort` under `--tui` is read, validated, and discarded.
-
-**The same is true of `--thread`, and the harness writes it.** `args.thread` is read only on the CLI
-chat path (`main.py:3732`). `relaunch_argv()` -- the `/config` restart -- replaces `--thread` with "the
-conversation that was open, so the restart reopens where it was"; for a `--tui` launch the relaunched
-process receives that flag and ignores it. `tests/test_config_edit.py` asserts the argv is built and
-nothing asserts the TUI consumes it.
-
-**Why this is a defect by the project's own rule.** `main.py` already refuses `--tui` with a positional
-query: *"this combination silently dropped it. Refusing is honest."* `--grant/--attended/--review` are
-refused in chat for the same reason. `--effort` and `--thread` are the two remaining flags a full-screen
-launch silently drops.
-
-**Proposal.** Carry both, rather than refuse them, because both mean something in the TUI:
-
-- `run_tui(..., effort=..., thread_id=...)`. An `--effort` given on the command line outranks
-  `tui.effort` and the top-level `effort`, exactly as §43 (RM3) lets a pinned `--provider/--model`
-  outrank a remembered `/model` choice; `_effort_named` becomes true when the flag named it, so
-  mount-time validation treats it as a human's choice.
-- `--thread` opens that thread at mount through `switch_to_thread`, the path `/resume` uses, guards
-  and all. An unknown id is a transcript error and an empty thread, not a crash.
-- A test that every flag `main.py` accepts is either consumed by the TUI branch or refused there, so
-  the next flag cannot fall into the gap. The census is the point; the two fixes are its first entries.
-
-**Drawbacks.** A flag outranking the remembered effort changes what an existing launch script does if
-it has carried `--effort` with `--tui` all along; today that flag is inert, so any such script is
-already not getting what it asks for. None found beyond that.
-
-**Alignment.** §43 RM3's precedence, the existing "refusing is honest" rule, and batch 84's restart
-promise, which this makes true.
-
-### Design Decisions Record — §101 (proposed)
-
-| id | decision |
-|---|---|
-| **LF1** | **`--effort` reaches the TUI and outranks `tui.effort` and `effort` for that launch**, as RM3's pinned pair does; `/effort` still changes it within the session |
-| **LF2** | **`--thread` reaches the TUI and opens that thread at mount through `switch_to_thread`**; `relaunch_argv`'s restart therefore reopens the conversation it names |
-| **LF3** | **Every accepted flag is consumed by the `--tui` branch or refused before anything connects**, held by a census test |
+**Accepted and built in batch 277 (2026-11-21), and recorded as `ROADMAP_v3.md` §101 (LF1-LF4).**
+The owner chose the flag over `tui.effort` (LF1) and carrying `--ref`, which the census found
+dropped as well, over refusing it (LF4). The record holds the decisions and their ids; this
+proposal's text is in the history of the commit that added this document.
 
 ---
 
@@ -971,7 +928,7 @@ is reasoning from them.
 
 | said in the thread | what the code does | where |
 |---|---|---|
-| "If you use --tui you can't use any other flags" | `--provider` and `--model` work; `--effort` and `--thread` are silently dropped (a bug) | §101 |
+| "If you use --tui you can't use any other flags" | `--provider` and `--model` work; `--effort` and `--thread` were silently dropped, a bug fixed in batch 277 | §101 |
 | UNVERIFIED "means it could not find anything that supports the claim even with low confidence" | D2 publishes every claim that exhausts its rounds as UNVERIFIED, whatever it scored; their reading was right | §105 |
 | No exponential backoff | model calls back off exponentially with jitter; OpenAlex lookups retry immediately | §107 |
 | "The script that communicates with APIs already supports client-side rate limiting" | no network tool paces requests | §107 |
