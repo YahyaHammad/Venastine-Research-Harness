@@ -306,6 +306,88 @@ def _attach_in_worker(app, thread_id, threads) -> None:
     app.run_worker(_work, thread=True, exit_on_error=False, name="ref")
 
 
+def attach_launch_refs(app, specs) -> None:
+    """`--ref <thread>` on a TUI launch, attached at mount (ROADMAP_v3 §101).
+
+    The CLI's `attach_cli_refs` in this shell's words: every reference is
+    reported, none refuses the session, and the writer is `core.loop.attach_ref`,
+    the one /ref uses, so the two shells cannot disagree about the cap or the
+    stored shape. The label is the thread's first-message preview, as
+    `attach_summary` attaches for the CLI (#171).
+
+    A reference needs a thread to attach TO. With no --thread one is started
+    here and named, as the CLI prints its id; only once at least one reference
+    parsed, so a launch whose every --ref was mistyped leaves no empty thread.
+    With a --thread that could not be opened nothing is attached: the user
+    named THAT conversation, and attaching to a fresh one instead would put
+    the references on a thread they did not ask for.
+
+    ONE worker for all of them, in order, rather than `_attach_in_worker` per
+    reference: `_busy` is a single flag, and the first worker's `finally`
+    would clear it while a second was still summarising.
+    """
+    import storage
+    from core import compaction
+    from core.loop import attach_ref
+
+    named = getattr(app, "_launch_thread", None)
+    if named is not None and (app._memory is None
+                              or app._memory.thread_id != named):
+        app._transcript.write_error(
+            f"--ref: nothing attached, because thread {named} could not be "
+            "opened. Open a thread and use /ref instead.")
+        return
+    sources = []
+    for spec in specs:
+        try:
+            sources.append(UUID(str(spec).strip()))
+        except ValueError:
+            app._transcript.write_error(f"--ref: not a thread id: {spec!r}")
+    if not sources:
+        return
+    started = app._memory is None
+    memory = app.memory
+    if started:
+        app._transcript.write_system(
+            f"Started thread {memory.thread_id} for the references.")
+    app._busy = True
+
+    def _work() -> None:
+        try:
+            for source in sources:
+                if source == memory.thread_id:
+                    app.call_from_thread(
+                        app._transcript.write_system,
+                        "--ref: that is this thread; skipped.")
+                    continue
+                app.call_from_thread(app._transcript.write_system,
+                                     f"Summarising thread {source}…")
+                try:
+                    notice = compaction.summarize_thread(
+                        source, app.model, app.provider_name,
+                        activity=getattr(app, "_activity", None), depth=0)
+                except Exception as e:  # noqa: BLE001 -- one failed
+                    # reference must not stop the rest, or the session.
+                    app.call_from_thread(
+                        app._transcript.write_error,
+                        f"--ref: could not summarise {source}: {e}")
+                    continue
+                if notice is None:
+                    app.call_from_thread(
+                        app._transcript.write_error,
+                        f"--ref: nothing to summarise in {source}.")
+                    continue
+                ok, message = attach_ref(memory, source, notice["text"],
+                                         storage.thread_preview(source))
+                write = (app._transcript.write_system if ok
+                         else app._transcript.write_error)
+                app.call_from_thread(write, f"--ref: {message}")
+        finally:
+            app.call_from_thread(setattr, app, "_busy", False)
+
+    app.run_worker(_work, thread=True, exit_on_error=False, name="launch-refs")
+
+
 def register_memory_commands() -> None:
     """Idempotent -- registering by name overwrites, matching §16's
     register_builtin_commands(), §18's and §19's.

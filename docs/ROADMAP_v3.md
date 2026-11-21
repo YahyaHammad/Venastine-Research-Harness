@@ -48,6 +48,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§98. A failed research run, resumed where it stopped** - **(BUILT in batch 269)** (a run that failed or was abandoned could only be started again from Pass 0: the owner's failed after 4h53m in Pass 3a on an answer that was a complete array followed by a stray closing fence. Each stage now ends with a resume point, a pass's thread is recorded as it opens, and `/research --resume` or `--resume` skips every completed stage and continues the failed pass in its own thread -- its stored answer checked again with no model call, or the request it died on resent -- with the corpus rebuilt from the stored tool results, and the parser takes a fence at either end; RS1-RS9)
 - **§99. A pass being corrected is seen while it runs** - **(BUILT in batch 270)** (a JSON pass's corrective retry, and a prose pass's no-text one, reached the model through `continue_conversation`, which drains its own loop: the owner's resumed Pass 6b spent 25 minutes and 14 model calls correcting one answer with its tool count frozen and its row gone from the panel, and looked hung. A retry now goes through the pass's own entry point, so its tool calls, its row and its character total show as the attempt's do, its reason is saved and shown the moment the parse fails, and its fetched pages reach the corpus; SR1-SR6)
 - **§100. A subagent that runs while its parent works** - **(BUILT in batch 271)** (a spawn blocked its parent until the child answered, and NA9's parallelism existed only within one reply, so the main agent could not delegate and keep working; SS10 had deferred background subagents since §49. `spawn_subagent` takes `background: true`, which returns at once and runs the child as a session of kind `subagent` (ids `a1`, `a2`, ...) that shares the session cap, the post-turn wait, kill and quit, and wakes the parent with its answer; it asks for approval as a blocking child does, escape leaves it running, the CLI's reader gives a question the terminal, and `shell_sessions`, `shell_output` and `shell_kill` ship on; BG1-BG10)
+- **§101. Flags a full-screen launch dropped: `--effort`, `--thread` and `--ref` under `--tui`** - **(BUILT in batch 277; LF5 in batch 278)** (`run_tui()` received the provider and model and nothing else, so `--tui --effort low` ran at the shipped `high` with `high` in the sidebar, the `--thread` a `/config` restart writes was ignored by the TUI it relaunched, and `--ref` attached nothing. All three reach the TUI now: the flag's effort outranks `tui.effort`, the thread opens at mount through `switch_to_thread`, the references attach through `/ref`'s writer and a restart does not attach them twice; and a census read from the parser gives every flag one answer under `--tui`. Batch 278 refuses `--tui` with a data command such as `--memories`, which ran while `--tui` went unused, and names the slash command; LF1-LF5)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -3067,6 +3068,99 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §101. Flags a full-screen launch dropped: `--effort`, `--thread` and `--ref` under `--tui`
+
+**Proposed 2026-11-20 in `ROADMAP_v3_researcher_feedback.md`, accepted by the owner and built in
+batch 277 (2026-11-21).** A researcher's launcher ran `--tui --provider <PROVIDER> --model <model>
+--effort low`; the provider and model took, and the sidebar read `high` whatever effort they chose.
+The proposal's §101 is this section; the feedback document now points here. **LF5 was added in
+batch 278 (2026-11-21, owner)**: the gap batch 277 left, a data command that ran while `--tui` went
+unused, is refused.
+
+### What the code did (main `ee15a52`, 0.3.21)
+
+- **`run_tui()` received the pair and nothing else.** `main.py` called it with the provider, the
+  model, the settings, `cli_pinned` and the startup notices. `resolve_effort` had already read and
+  validated `--effort`, and the result went to `run_research` and the CLI only, so the TUI's own
+  precedence -- `tui.effort`, then `effort`, then `config.DEFAULT_EFFORT` (`high`) -- answered.
+- **`--thread` was read on the CLI path only**, and `relaunch_argv` writes it for a `/config`
+  restart so that "the restart reopens where it was": the relaunched TUI received the flag its own
+  restart had written and ignored it. `tests/test_config_edit.py` asserted the argv; nothing
+  asserted the TUI consumed it.
+- **`--ref` was the third, found while checking the other two.** `attach_cli_refs` runs on the CLI
+  chat path only, so `--tui --ref <thread>` attached nothing and said nothing.
+- **The project's own rule called this a defect.** `main.py` already refused `--tui` with a
+  positional query: "this combination silently dropped it. Refusing is honest." `--grant`,
+  `--attended` and `--review` are refused in chat for the same reason.
+
+### Decisions (LF1-LF5)
+
+| # | Decision |
+|---|---|
+| **LF1** | **`--effort` reaches the TUI and outranks `tui.effort` and `effort` for that launch** (owner), as RM3 lets a pinned `--provider`/`--model` outrank a remembered `/model` choice. It is handed over as `resolve_effort`'s answer with `effort_pinned`, `cli_pinned`'s shape, so `auto` is off in both shells by one rule. A flag that named a level is a human's choice: it is validated at mount like a persisted one, and an unusable one is reported as `--effort`, not as a persisted setting. `/effort` still changes it within the session |
+| **LF2** | **`--thread` reaches the TUI and opens that thread at mount through `switch_to_thread`**, the path `/resume` and the picker use, guards and all; so `relaunch_argv`'s restart reopens the conversation it names. It runs above the session banner, so the replayed history reads first and the launch's own lines follow it. An id that cannot be opened is `switch_to_thread`'s own transcript error, and the session goes on with a fresh thread |
+| **LF3** | **Every flag the parser accepts has one answer under `--tui`**, held by a census read from `build_parser()` itself: it reaches `tui.app.run`, is used by the startup both shells share, is refused before anything connects, runs instead of a shell, or modifies `--init`. A flag added to the parser and to none of those fails by name. **Amended in batch 278 (LF5):** no flag runs instead of a shell under `--tui` any more; the data commands are refused, so that answer is now "a data command, refused before anything runs" |
+| **LF5** | **`--tui` with a data command is refused before anything runs** (owner, over running it with a note that `--tui` went unused). `--memories`, `--forget`, `--summary`, `--secrets` and `--init` each have a slash command, and the refusal names it: "--tui does not take --memories; use /memories inside the TUI." `--init`'s kind flags and `--project-config` are spelled as `/init`'s `--software`, `--research` and `--config`, and `--project-config` without `--init` is refused the same way. It is a `parser.error` straight after `parse_args`, ahead of the other `--tui` refusals, because these commands return before those are reached; so it exits as an argument error does, before the log directory, the database, the project's trust prompt or the command itself. Several data flags name the first one `main()` would have run. Without `--tui` every data command runs as before, and the kind flags without `--init` stay silent in every shell (§24 I17) |
+| **LF4** | **`--ref` reaches the TUI and is attached at mount** (owner, over refusing it), through `core.loop.attach_ref`, the writer `/ref` and the CLI use, on one worker for all of them because each is a summarising model call. With no `--thread` a thread is started for them and named, as the CLI prints its id, but only once one parsed; with a `--thread` that could not be opened nothing is attached. **`relaunch_argv` drops `--ref`**: a reference is thread state, already on the thread a restart reopens, and carried it would summarise every source again and, after a `/new`, attach them to a conversation that never had them |
+
+LF1 (the flag wins), LF4 (carry rather than refuse) and LF5 (refuse rather than note) are the
+owner's choices; LF2 and LF3 are the proposal's, accepted as written. LF4 is new: the proposal named
+two flags and the census found the third. LF5 closes what batch 277 recorded below as not decided.
+
+### What §101 deliberately does not change
+
+- **`--software-project` and `--research-project` stay silent without `--init`**, in every shell,
+  as §24 I17 left them when it refused `--project-config` on its own. The census records them as
+  modifiers of `--init`.
+- ~~**The data commands run instead of a shell.** `--memories`, `--forget`, `--summary`, `--secrets`
+  and `--init` exit before either shell starts, `--tui` or not, and so `--tui` itself is the flag
+  they leave unused. The census records it; refusing the combination is not decided here.~~
+  **Decided in batch 278 as LF5:** under `--tui` they are refused. Without it they still run
+  instead of a shell.
+- **The other `--tui` refusals stay where they were**, after the project config is read. They are
+  checked before anything connects, which is what they need; only LF5's had to move, because the
+  commands it refuses return first.
+- **`/effort` persists nothing**, as before: a restart through `/config` re-applies the launch's
+  `--effort`, which `relaunch_argv` carries verbatim, and loses an in-session `/effort` change as it
+  always did.
+
+### Built (batch 277)
+
+- **`main.py`**: `run_tui` gets `effort`, `effort_pinned`, `thread_id` and `refs`; `relaunch_argv`
+  drops `--ref`.
+- **`tui/app.py`**: `run` and `VenastineApp` take them; the effort precedence and the validation's
+  wording (LF1); the mount opens the thread above the banner (LF2) and hands the references on (LF4).
+- **`memories/tui_commands.py`**: `attach_launch_refs`, beside `/ref`.
+
+Tests: `TestEveryFlagReachesTheTuiOrIsRefused` in `tests/test_cli.py` (the census and each
+answer, against the real `main()`), `TestALaunchCarriesItsFlags` in `tests/test_tui.py` (the app at
+mount), `TestTheTuiRefFlag` in `tests/test_thread_refs.py`, and
+`test_references_are_not_attached_twice` in `tests/test_config_edit.py`. With `main.py` as it was,
+the five tests of what reaches the TUI fail and the census and refusal tests pass, as guards for the
+next flag. Seven mutations of the new code, one per decision's load-bearing line, were each killed.
+
+### Built (batch 278, LF5)
+
+- **`main.py`**: `_refuse_a_data_command_under_tui`, called straight after `parse_args`.
+
+Tests: in `TestEveryFlagReachesTheTuiOrIsRefused`, the table of data commands replaces the one that
+ran them, and each is refused with `startup` recording nothing at all, so no log directory, database,
+project config or command was reached. Each still runs without `--tui` (the control), `/init`'s
+options are spelled from the kind flags, several data flags name the one `main()` would have run,
+and a kind flag without `--init` still starts the TUI (the §24 I17 control). Eight mutations were
+each killed: never called, called after `configure_logging`, refusing without `--tui`, `--summary`
+not refused, `--project-config` alone not refused, `--config` dropped, both kinds spelled as two
+options, and `--init` checked before `--secrets`.
+
+### Gap register
+
+- **Driven through Textual's pilot, not a real terminal.** The sidebar's level, the replay above
+  the banner and the reference lines are asserted on the headless app.
+- **A reference is summarised by a model call at mount**, announced as `/ref` announces it, and a
+  message sent before the last one finishes is refused with "Still working", as it is behind `/ref`.
+
 ---
 
 ## §100. A subagent that runs while its parent works

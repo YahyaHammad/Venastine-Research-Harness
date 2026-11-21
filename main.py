@@ -3264,6 +3264,53 @@ def _classify_legacy_threads() -> None:
         connection.close()
 
 
+def _refuse_a_data_command_under_tui(parser, args) -> None:
+    """`--tui` with a command that runs instead of a shell is refused, naming
+    the slash command that does what was asked (ROADMAP_v3 §101, LF5).
+
+    Before batch 278 the data command ran and `--tui` went unused without a
+    word: `--tui --memories` printed the list and exited, which is the
+    silence the positional-query refusal below calls a defect. All five have
+    a slash command, so the refusal can say what to type instead.
+
+    Called straight after parse_args, unlike the other --tui refusals, and
+    for a reason they do not share: these commands return before those are
+    reached, so a check placed beside them would come after the command it
+    refuses had already run. A combination of flags is an argument error,
+    so it exits the way argparse's own do -- before the log directory, the
+    database and the project's trust prompt. Checked in the order main()
+    would run them, so the flag named is the one that would have run.
+    """
+    if not args.tui:
+        return
+    if args.memories:
+        refused, use = "--memories", "use /memories inside the TUI"
+    elif args.forget:
+        refused, use = "--forget", "use /forget inside the TUI"
+    elif args.secrets:
+        refused, use = "--secrets", "use /secrets inside the TUI"
+    elif args.summary is not None:
+        refused, use = "--summary", ("open the thread (--thread, or /resume "
+                                     "inside the TUI) and use /summary")
+    elif args.init or args.project_config:
+        # The kind flags are /init's own options under shorter names. Both
+        # at once is refused by run_init_command, so the spelling offers
+        # the choice rather than a command /init would refuse in turn.
+        if args.software_project and args.research_project:
+            options = ["[--software|--research]"]
+        else:
+            options = [option for given, option in (
+                (args.software_project, "--software"),
+                (args.research_project, "--research")) if given]
+        if args.project_config:
+            options.append("--config")
+        refused = "--init" if args.init else "--project-config"
+        use = f"use {' '.join(['/init', *options])} inside the TUI"
+    else:
+        return
+    parser.error(f"--tui does not take {refused}; {use}.")
+
+
 def _drop_flag(args: list, flag: str) -> list:
     """`args` without `flag` and its value, in either spelling.
 
@@ -3303,13 +3350,20 @@ def relaunch_argv(request, argv=None) -> list:
         exactly as it did at this one, and writing a flag the user never
         typed would outrank it.
 
+    And one DROPPED (ROADMAP_v3 §101): `--ref`. A reference is thread
+    state, attached at the first launch to the thread that launch opened,
+    so the thread the restart reopens already holds it; carried, it would
+    summarise every source again -- a model call apiece the user did not
+    ask for -- and, after a `/new`, attach the first launch's references to
+    a conversation that never had them.
+
     Pure, and separate from the exec for that reason: what a relaunch
     should consist of is worth asserting without replacing the test
     process to find out.
     """
     argv = list(sys.argv if argv is None else argv)
     rest = argv[1:]
-    for flag in ("--thread", "--provider", "--model"):
+    for flag in ("--thread", "--provider", "--model", "--ref"):
         rest = _drop_flag(rest, flag)
     if request.thread_id:
         rest += ["--thread", request.thread_id]
@@ -3382,6 +3436,7 @@ def main(argv=None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    _refuse_a_data_command_under_tui(parser, args)
 
     # Below parse_args for #101's other half: this creates the log
     # DIRECTORY, so --help left one behind too. Nothing above logs
@@ -3704,10 +3759,22 @@ def main(argv=None) -> int:
                     "[warning] something else is still reading this "
                     "terminal, so keyboard input may be lost. Restart "
                     "the harness in a fresh terminal.")
+            # ROADMAP_v3 §101. --effort, --thread and --ref reach the TUI
+            # too: before it this call carried the pair and nothing else,
+            # so all three were read, validated and dropped without a
+            # word. `effort_pinned` is cli_pinned's shape, for its reason.
+            # tests/test_cli.py's TestEveryFlagReachesTheTuiOrIsRefused is
+            # the census that every flag is consumed here, refused above,
+            # or modifies --init (LF3); a data command under --tui is
+            # refused before anything runs (LF5).
             restart = run_tui(provider, model, settings,
                               cli_pinned=args.provider is not None
                               or args.model is not None,
-                              startup_notices=startup_notices)
+                              startup_notices=startup_notices,
+                              effort=effort,
+                              effort_pinned=args.effort is not None,
+                              thread_id=args.thread,
+                              refs=args.ref)
         elif args.mode == "research":
             # AFTER setup_mcp: the tools a grant can cover are named at
             # connection time, so asking any earlier would offer a list
