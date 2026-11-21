@@ -39,7 +39,7 @@ append-only, and a deviation is an owner decision in `DEVLOG.md`.
 - **§102. A model call that never answers is reported before half an hour has passed** - **(NOT BUILT: proposed 2026-11-20)** (the OpenAI-compatible and Anthropic clients keep the SDK's own two retries under the harness's two, at the SDK's 600 s read timeout. Measured: one harness attempt is three requests, so a stalled endpoint costs up to nine requests and about ninety minutes, the first WARNING arrives after about thirty, and every abandoned request is a 499 in the provider's log -- the 499 the researcher saw in the provider's log and never in the harness)
 - **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(NOT BUILT: proposed 2026-11-20)** (measured: a reader scrolled to row 5 of 40 is at the bottom again after five streamed rows, because `RichLog.auto_scroll` follows every write. Text selection is not a ceiling of the pinned textual: 8.2.8 calls `get_selection` on a `RichLog` subclass, and a twelve-line prototype returned the dragged text. `/help` still says "not supported by this Textual version", written when the pin was 1.0.0)
 - **§104. A JSON pass cut off by the output ceiling is split, not corrected** - **(NOT BUILT: proposed 2026-11-20)** (a reply that ended on `finish_reason: length` is marked `complete` when it has text, so a Pass 3a answer cut at the 16,000-token ceiling -- which bounds thinking and text together on some providers -- is sent the "did not parse" corrective and asked for the same answer again, at the same size, three times. The researcher's failure was an unterminated string at character 36,142 of a one-call answer for 63 claims)
-- **§105. A claim that ran out of rounds keeps the tier it earned** - **(NOT BUILT: proposed 2026-11-20)** (D2's fallback overwrites the tier with UNVERIFIED whatever 6b scored, so a partly grounded claim scoring 0.45 (LOW) is published with the label of a claim nothing supports, and its `score_breakdown` -- which B10 says lets a reader recompute the tier -- still says 0.45. The researcher's run went from 37 LOW to 37 UNVERIFIED this way, and they read it correctly as the retries running out; the thread told them otherwise)
+- **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280: now `ROADMAP_v3.md` §105, XR1-XR4)** (D2's fallback overwrites the tier with UNVERIFIED whatever 6b scored, so a partly grounded claim scoring 0.45 (LOW) is published with the label of a claim nothing supports, and its `score_breakdown` -- which B10 says lets a reader recompute the tier -- still says 0.45. The researcher's run went from 37 LOW to 37 UNVERIFIED this way, and they read it correctly as the retries running out; the thread told them otherwise)
 
 **Cost — where the 4.6 M input tokens went**
 
@@ -233,59 +233,12 @@ pass is asked about exactly the claims it answers for.
 
 ## §105. A claim that ran out of rounds keeps the tier it earned
 
-**Proposed 2026-11-20, from the researcher's run.** `Pass 6b: 0 claim(s) now clean, 37 still flagged`,
-then 37 lines of `D2: claim cXXX exhausted retries (2) -> fallback UNVERIFIED`, and the tally moved from
-`low 36, unverified 1` to `medium 50, unverified 37`. They read it as the retries running out. The
-thread answered that UNVERIFIED "means it could not find anything that supports the claim even with low
-confidence". The code says they were right.
-
-**Measured (B9).** `_apply_fallback` sets `confidence_tier = "UNVERIFIED"` unconditionally. A factual
-claim with `partial` grounding and one assumption flag scores 0.45 -- LOW -- through `score_claim`;
-after `_apply_fallback` its tier is UNVERIFIED and its `score_breakdown.raw_score` is still 0.45. So:
-
-- one label means two things: "nothing supports this" (Pass 5's forced-UNVERIFIED rule, and anything
-  under 0.3) and "partly supported, and two rounds did not raise it";
-- the breakdown and the tier disagree, which breaks the property ROADMAP_v2 §30 (B10) and §66 both
-  defend: "the breakdown alone lets a reader recompute the score";
-- the published text of an exhausted claim is its *revision* (`revision_text or text`), the version
-  6b just failed to clear.
-
-**Why it matters to this reader in particular.** The researcher found that many of the low-confidence
-claims are exactly where the real problems with the research live. To a researcher, the flagged claims
-are the most informative part of the run, and the tier and annotation are currently the least specific
-thing about them.
-
-**Proposal.**
-
-- D2 keeps the tier 6b scored and marks the claim `loop_exhausted: true` with the round count.
-  UNVERIFIED stays exactly what Pass 5 says it is.
-- **Every flagged claim says what limited it**, in code, from the breakdown it already carries: no
-  grounding, partial grounding, source quality, critic severity, assumption flags, contested by the
-  ensemble. The annotation names the largest deduction: `[LOW -- 2 rounds; limited by: assumption flag
-  "rests on one preprint"]`.
-- The exhausted claim's original text and its last revision are both kept, and the report shows the
-  original with the revision beside it, rather than publishing the revision as if it had passed.
-- **A "Where the evidence is thin" section** in `report.md`, rendered in code from the flagged claims
-  and their reasons, grouped by reason, so the reader's eye goes where the research problems are.
-
-**Drawbacks.** A LOW claim reads as less alarming than an UNVERIFIED one, so this is a change in what a
-reader is warned about; the honest answer is that it says what was found. Anything that reads the tier
-counts (the panel, `/claims`, the confidence chart, any downstream script) changes its numbers.
-The owner's feature-proposals notes (item 29, not in this repository) have a "retry honesty" metric
-that needs `loop_exhausted` to exist anyway.
-
-**Alignment.** §90 retired a deduction because it "could send a claim into the loop that no revision
-could get out of" and publish it UNVERIFIED; this is the same outcome reached by the cap instead of the
-penalty. B10's recomputability. Pure code, zero model calls.
-
-### Design Decisions Record — §105 (proposed)
-
-| id | decision |
-|---|---|
-| **XR1** | **D2 keeps the scored tier and records `loop_exhausted`**; UNVERIFIED means what Pass 5 means and nothing else |
-| **XR2** | **A flagged claim names what limited it**, derived in code from `score_breakdown` |
-| **XR3** | **An exhausted claim publishes its original text with the failed revision beside it** |
-| **XR4** | **`report.md` carries a code-rendered "Where the evidence is thin" section** from the flagged claims, grouped by reason |
+**Accepted and built in batch 280 (2026-11-21), and recorded as `ROADMAP_v3.md` §105
+(XR1-XR4).** The owner chose the largest deduction alone as a flagged claim's reason (XR2), and
+the section in every shell's report (XR4). XR3 is amended: Pass 6b scores the revised text, so
+the revision is published, under the tier that belongs to it, with what the claim was first
+stated as beside it. The record holds the decisions and their ids; this proposal's text is in
+the history of the commit that added this document.
 
 ---
 

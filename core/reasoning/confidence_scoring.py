@@ -400,6 +400,106 @@ def is_contested(claim: Claim) -> bool:
     return claim.score_breakdown.get("contested") is True
 
 
+# ROADMAP_v3 §105 (XR2). What a flagged claim's score lost, and to what.
+#
+# The tiers D1 sends to revision, and the tiers the report's "where the
+# evidence is thin" section lists. Here rather than in orchestrator.py,
+# which imports it, so that thin_evidence.py can read it without
+# importing the pipeline.
+FLAGGED_TIERS = frozenset({"LOW", "UNVERIFIED"})
+
+# What held a claim's score down, as keys. thin_evidence.py puts each one
+# into words, for the annotation and the report section.
+LIMIT_NO_SOURCE = "no_source"
+LIMIT_PARTIAL = "partial_grounding"
+LIMIT_SOURCE_QUALITY = "source_quality"
+LIMIT_CRITIC = "critic"
+LIMIT_ASSUMPTION = "assumption"
+LIMIT_REVIEW = "review"
+LIMIT_SCORE = "score"
+
+# Ties go to the earlier key, and the report lists its groups in this
+# order: what the sources said first, then the reasoning, then what the
+# claim assumes. The last two are not deductions: a tier the review set,
+# and a score that lost nothing to any one part and still fell below a
+# threshold (which only a retuned threshold table can produce).
+LIMIT_ORDER = (LIMIT_NO_SOURCE, LIMIT_PARTIAL, LIMIT_SOURCE_QUALITY,
+               LIMIT_CRITIC, LIMIT_ASSUMPTION, LIMIT_REVIEW, LIMIT_SCORE)
+
+
+def _scored_status(claim: Claim):
+    """The grounding status score_claim scored: one it coerced (B9) was
+    scored as "ungrounded", and the breakdown says so."""
+    if "unrecognised_grounding_status" in (claim.score_breakdown or {}):
+        return "ungrounded"
+    return claim.grounding_status
+
+
+def deductions(claim: Claim, weights: dict | None = None) -> dict:
+    """What each part of the formula took off `claim`'s score, keyed by
+    LIMIT_*. Only parts that took something are present.
+
+    READ OFF THE BREAKDOWN the claim already carries, with the same
+    weights that scored it, so the reason a claim gives is the score's
+    own arithmetic and not a second opinion about it. Each figure is
+    measured from the best that part could give:
+
+      factual      grounding  0.5 x (1 - grounding weight)
+                   quality    0.5 x grounding weight x (1 - multiplier)
+                   critic     0.35 x critic severity
+      non_factual  critic     what severity took below the 0.65 cap
+      both         assumption the assumption penalty
+    """
+    w = default_weights() if weights is None else weights
+    breakdown = claim.score_breakdown or {}
+    lost = {}
+    if breakdown.get("formula") == "factual":
+        factor = w["grounding_weight_factor"]
+        status = _scored_status(claim)
+        weight = breakdown.get("grounding_weight",
+                               w["grounding_weights"].get(status, 0.0))
+        multiplier = breakdown.get("source_quality_multiplier", 1.0)
+        if status != "grounded":
+            key = LIMIT_PARTIAL if status == "partial" else LIMIT_NO_SOURCE
+            lost[key] = factor * (1.0 - weight)
+        lost[LIMIT_SOURCE_QUALITY] = factor * weight * (1.0 - multiplier)
+        lost[LIMIT_CRITIC] = (w["critic_weight_factor"]
+                              * (1.0 - breakdown.get("critic_component", 1.0)))
+    elif breakdown.get("formula") == "non_factual":
+        cap = w["non_factual_score_cap"]
+        lost[LIMIT_CRITIC] = cap - breakdown.get("capped_critic_component", cap)
+    lost[LIMIT_ASSUMPTION] = breakdown.get("assumption_penalty", 0.0)
+    rounded = {key: round(value, 4) for key, value in lost.items()}
+    return {key: value for key, value in rounded.items() if value > 0}
+
+
+def limiting_factor(claim: Claim, weights: dict | None = None) -> tuple:
+    """(key, detail): what held `claim`'s score down most.
+
+    A tier the review set is the review's. A factual claim nothing
+    grounds is forced to UNVERIFIED whatever it scored, so that is its
+    reason. Otherwise the largest deduction, ties going to the earlier
+    entry of LIMIT_ORDER. `detail` is the critic's first finding or the
+    first assumption flag, when one of those is the reason; else None."""
+    breakdown = claim.score_breakdown or {}
+    if "review_override" in breakdown:
+        return LIMIT_REVIEW, None
+    if (breakdown.get("formula") == "factual"
+            and _scored_status(claim) == "ungrounded"):
+        return LIMIT_NO_SOURCE, None
+    lost = deductions(claim, weights)
+    if not lost:
+        return LIMIT_SCORE, None
+    key = max(lost, key=lambda k: (lost[k], -LIMIT_ORDER.index(k)))
+    detail = None
+    if key == LIMIT_CRITIC:
+        found = [*(claim.fallacies or ()), *(claim.contradictions or ())]
+        detail = str(found[0]) if found else None
+    elif key == LIMIT_ASSUMPTION and claim.assumption_flags:
+        detail = str(claim.assumption_flags[0])
+    return key, detail
+
+
 def build_coverage_gap_entries(completeness: dict) -> list[dict]:
     """Gaps from Pass 3c become separate coverage-gap entries, not Claim
     objects -- they were never asserted, so there's nothing to re-tier."""

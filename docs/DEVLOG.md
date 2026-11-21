@@ -32846,3 +32846,91 @@ file changed, so pip-audit was not re-run.
 - A per-run figure (PW5) is still a proposal.
 
 - **Version:** the branch's first beta, `0.3.22-b.1.providers-example-usage-totals.rfb729be56efb`.
+
+## Batch 280 -- a claim that ran out of rounds keeps the tier it earned, and the report says where the evidence is thin (ROADMAP_v3 §105, XR1-XR4) (2026-11-21)
+
+**Asked.** Take an item from one of the two open roadmaps. The owner chose §105 from
+`ROADMAP_v3_researcher_feedback.md`, which that document's own sequencing puts first now that §101 is
+built: a researcher's run moved from `low 36, unverified 1` to `medium 50, unverified 37` as D2 ran
+out of rounds on 37 claims, and the researcher read the change as the retries running out.
+
+**Checked first.** The proposal's measurement held. `_apply_fallback` set UNVERIFIED whatever Pass 6b
+had scored: a factual claim with partial grounding and one assumption flag scores 0.45 (LOW) and left
+D2 as UNVERIFIED with `raw_score` still 0.45, and so did every LOW shape tried (0.46, 0.375, 0.35).
+One label meant two things, and the breakdown no longer recomputed the tier (B10). One thing in the
+proposal was backwards. `revalidate.md` has Pass 6b ground and critique the REVISED text, so the tier
+it scores is the revision's; publishing the original with the revision beside it, as XR3 read, would
+have put the revision's tier on the original's words.
+
+**Settled with the owner.** Three questions, each answered with the recommended option:
+- XR3: publish the revision, under the tier that belongs to it, with the original beside it. This
+  amends the proposal.
+- XR4: the "Where the evidence is thin" section goes in every shell's report, not only `report.md`.
+  The owner approved its layout from a preview.
+- XR2: a flagged claim names its largest deduction alone, not every deduction ranked.
+XR1 is the proposal's, as written.
+
+**Built.**
+- `core/reasoning/base.py`: `Claim.loop_exhausted`. It is JSON-native, so every `vars(c)` site and
+  §98's resume carry it with no migration.
+- `core/reasoning/confidence_scoring.py`: `FLAGGED_TIERS`, moved here from `orchestrator.py`, which
+  imports it, so `thin_evidence.py` can read it without importing the pipeline. Also `deductions`,
+  which reads what each part of the formula took off a claim from its breakdown and the weights that
+  scored it, and `limiting_factor`: the forced-UNVERIFIED rule first, then a review's tier, then the
+  largest deduction, ties going to the sources before the reasoning before the assumptions.
+- `core/reasoning/thin_evidence.py` (new): the reason in words, the annotation, the section, and
+  `with_section`, which leaves the report alone when nothing is flagged and does not add the section
+  twice when a run stored with it is resumed.
+- `core/reasoning/orchestrator.py`:
+  - `_apply_fallback` keeps the tier, sets `loop_exhausted` and writes the annotation.
+  - D2's line says what it kept and why, and D2 emits no `claim_tiered`, since it changes no tier.
+  - The section is added after the §20 review, which can lower a tier and regenerate the report, and
+    before the run is stored. The reviewer still reads the model's text alone.
+- `core/reasoning/review.py`: a flagged tier the review sets is annotated as limited by the review.
+- `core/reasoning/output_writer.py`: `06_revisions.json` records `loop_exhausted`.
+- `core/claims_view.py`: a claim that ran out of rounds says it did not clear, and shows the text it
+  was first stated as. A claim that cleared still shows only the text that cleared, the choice
+  `test_the_final_text_wins_over_the_draft` records. The first draft showed the first statement for
+  every revised claim, and that test caught it.
+
+**Two corrections while building.** The 6c annotation template first gained a branch for a flagged
+claim with no annotation. Nothing reaches it: D1 takes every flagged claim into the loop, and each
+leaves clean or exhausted, which D2 annotates. So it was removed, and the one real case, a tier the
+review lowers after 6c, went to `review.py`. The annotation's phrases also became noun phrases, so
+that "limited by" reads as a sentence.
+
+**Tests.**
+- `tests/test_thin_evidence.py`, 42 tests:
+  - the measured claim stays LOW, and its breakdown still recomputes its tier;
+  - each deduction, read with the weights that scored it;
+  - each reason;
+  - the annotations;
+  - the section in the approved layout, added once on a resume;
+  - `/claims` and `06_revisions.json`.
+- `tests/test_orchestrator.py`: the loop's four exhaustion tests now assert the kept tier,
+  `loop_exhausted`, the D2 line and the report's section end to end.
+- `tests/test_review.py`: the review's annotation, flagged and clean, and
+  `test_the_thin_evidence_section_is_built_after_the_review`, which copies the report at the moment
+  it is stored, because the run is one object and its `call_args` would show the final state.
+
+Twenty-seven mutations, one per line that carries a decision, were each killed by a failed
+assertion. The first pass left four alive:
+- two of the review's annotation tests had not been selected by the harness;
+- the mutant meant to move the section before the review added a second call and kept the real one;
+- an unrecognised grounding status matters only when another deduction outweighs "no source". That
+  was a real gap, and a test now covers it.
+
+**Verified.** Full suite on Windows with AGENT_WORKSPACE unset, run on the commit: 10,035 passed and 88 skipped (10,123), in 7:15. Two earlier full runs, made while the machine was busy (6:18 and 17:58, against about 3 minutes), each failed one timing-sensitive test in code this batch does not touch, a different one each time: `test_eight_concurrent_writers_all_land` ("database is locked"), on the tree before the commit, and `test_startup_scan_is_off_ui_thread_and_pending_input_updates`, on the commit. Each passed three runs of its file or class alone, and both passed in the green run. ruff is clean. bandit 1.9.4 reports 47 live findings and none new against
+the baseline, and none of the 62 (file, test) pairs grew. gitleaks 8.30.1 with CI's config finds
+nothing in an export of the tracked and new files.
+
+**Not changed.** The formula, the weights, the thresholds, D1's routing and D2's cap; Pass 6b still
+does not re-run Pass 4, so an assumption-flagged claim still cannot clear by revision, and it now ends
+at the LOW it scored. Coverage gaps are not in the section. Every count of tiers changes (the panel,
+`/claims`, the chart, `05_confidence.json`), which §105's gap register records with the rest.
+
+**Also.** PR #299 merged at 14:53 UTC, but GitHub had started no workflow for it more than half an
+hour later: no release run, no CI on `main`, no check suite on the merge commit. The status page
+showed no incident. So `main` still carries #299's branch version, and this branch's version is based
+on 0.3.22. If #299's release commit lands on `main` before this merges, `package.json` and
+`pyproject.toml` will conflict on the version line.

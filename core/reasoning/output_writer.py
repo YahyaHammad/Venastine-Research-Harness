@@ -144,7 +144,10 @@ def write_run_artifacts(run: PipelineRun) -> str:
     revised = [c for c in run.claims if c.revision_text is not None]
     if revised:
         write("06_revisions.json", json.dumps(
-            [{"claim_id": c.id, "revised_text": c.revision_text, "retry_count": c.retry_count}
+            # loop_exhausted (ROADMAP_v3 §105, XR1): whether the rounds ran
+            # out before the claim cleared. The tier no longer says so.
+            [{"claim_id": c.id, "revised_text": c.revision_text, "retry_count": c.retry_count,
+              "loop_exhausted": c.loop_exhausted}
              for c in revised],
             indent=2,
         ))

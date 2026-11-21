@@ -5,8 +5,8 @@ Full deep-research pipeline run, with every model call mocked. Verifies:
   - Passes run in expected order (0 -> 1 -> 2 -> [3a, 3b if factual]
     -> 3c -> 5 -> 4 -> D1 -> 6a/6c/D2 loop -> 6b -> merge -> synthesis).
   - _parse_json_response strips code fences correctly.
-  - The 6a/6c/D2 retry loop runs until MAX_RETRIES and lands flagged
-    claims in fallback UNVERIFIED.
+  - The 6a/6c/D2 retry loop runs until MAX_RETRIES and marks a claim
+    still flagged then `loop_exhausted`, at the tier it scored (§105).
   - A clean claim (> the MEDIUM threshold, no flags) passes through to
     annotation without entering the retry loop.
   - run.trace contains the expected log lines in order.
@@ -240,11 +240,11 @@ def _clean_pipeline_payloads():
 
 def _one_claim_stuck_through_retry_payloads():
     """Canned payloads where claim C2 stays flagged through MAX_RETRIES
-    retries, eventually landing in fallback UNVERIFIED. Claims C1 and C3
-    stay clean throughout.
+    retries, scoring LOW each time. Claims C1 and C3 stay clean throughout.
 
     The 6a -> 6c retry loop runs MAX_RETRIES times for C2 before D2
-    falls back to UNVERIFIED.
+    marks it exhausted, still LOW (ROADMAP_v3 §105; it used to fall back
+    to UNVERIFIED).
     """
     max_retries = config.MAX_PIPELINE_RETRIES
 
@@ -348,9 +348,9 @@ def test_pipeline_runs_all_passes_in_expected_order(mocker):
 
 
 def test_pipeline_6a6c_retry_loop_continues_until_max_retries_then_fallback(mocker):
-    """A claim that stays flagged through MAX_RETRIES rounds of 6a/6c
-    lands in fallback UNVERIFIED. The retry loop runs exactly MAX_RETRIES
-    times before D2 declares the claim exhausted."""
+    """A claim that stays flagged through MAX_RETRIES rounds of 6a/6c is
+    marked exhausted at the tier it scored (ROADMAP_v3 §105, XR1). The
+    retry loop runs exactly MAX_RETRIES times before D2 declares it."""
     payloads = _one_claim_stuck_through_retry_payloads()
     call_log = []
     mocker.patch.object(
@@ -368,13 +368,18 @@ def test_pipeline_6a6c_retry_loop_continues_until_max_retries_then_fallback(mock
     c2 = run.claim_by_id("C2")
     assert c2 is not None
 
-    # It tried MAX_RETRIES times then fell back.
+    # It tried MAX_RETRIES times and ran out, still at the LOW it scored:
+    # 0.65 cap - 2 x 0.15 for its two assumption flags.
     assert c2.retry_count == config.MAX_PIPELINE_RETRIES
-    assert c2.confidence_tier == "UNVERIFIED"
-    # _apply_fallback uses revision_text if set, else text. The mock
-    # provided revision text for each round; final_text should be the
-    # LAST attempted revision (orignal text per _apply_fallback line 101).
-    assert c2.final_text == c2.revision_text or c2.final_text == c2.text
+    assert (c2.confidence_tier, c2.loop_exhausted) == ("LOW", True)
+    assert c2.score_breakdown["raw_score"] == 0.35
+    # XR3: the published text is the last revision, the text 6b scored;
+    # `text` still holds what it was first stated as.
+    assert c2.final_text == c2.revision_text == f"Revision {config.MAX_PIPELINE_RETRIES}"
+    assert c2.text == "B seems likely."
+    assert c2.annotation == (
+        f"[LOW] Did not clear after {config.MAX_PIPELINE_RETRIES} rounds of "
+        f'revision; limited by an assumption it rests on ("unsupported claim").')
 
     # The retry loop ran MAX_RETRIES times: 6a + 6c back-to-back.
     six_a_count = call_log.count("Pass 6a")
@@ -385,11 +390,22 @@ def test_pipeline_6a6c_retry_loop_continues_until_max_retries_then_fallback(mock
     )
     assert six_c_count == config.MAX_PIPELINE_RETRIES
 
-    # The D2 fallback log line should mention this claim.
+    # The D2 log line names the claim, the tier it kept and why.
     d2_lines = [line for line in run.trace if line.startswith("D2:")]
-    assert any("C2" in line and "UNVERIFIED" in line for line in d2_lines), (
-        f"Expected a D2 fallback log line for C2, got: {d2_lines}"
-    )
+    assert (f"D2: claim C2 exhausted retries ({config.MAX_PIPELINE_RETRIES}) "
+            f'-> kept LOW, limited by an assumption it rests on '
+            f'("unsupported claim").') in d2_lines, d2_lines
+
+    # XR4: the report ends with the section, listing C2 under its reason.
+    assert run.final_report.startswith(
+        "Hypotheses A and C are well-supported; B remains uncertain.")
+    assert "## Where the evidence is thin" in run.final_report
+    assert run.final_report.endswith(
+        "### Rests on an assumption (1)\n\n"
+        f'- LOW, {config.MAX_PIPELINE_RETRIES} rounds: '
+        f'"Revision {config.MAX_PIPELINE_RETRIES}"\n'
+        '    - first stated as: "B seems likely."\n'
+        '    - assumption: "unsupported claim"\n')
 
 
 def _two_claims_stuck_through_retry_payloads(six_a_rounds: list):
@@ -473,8 +489,10 @@ def test_a_claim_pass_6a_omits_still_exhausts_its_retries(mocker):
         f"C4 was flagged for every round and never named by Pass 6a; it must "
         f"still reach D2's cap. retry_count={c4.retry_count}"
     )
-    assert c4.confidence_tier == "UNVERIFIED"
-    assert "Could not be adequately verified" in c4.annotation
+    # §105 (XR1): it keeps the LOW it scored, and says the rounds ran out.
+    assert c4.confidence_tier == "LOW"
+    assert c4.loop_exhausted is True
+    assert c4.annotation.startswith("[LOW] Did not clear after 2 rounds")
     # Never revised, so the fallback keeps the original text.
     assert c4.revision_text is None
     assert c4.final_text == c4.text
@@ -512,7 +530,7 @@ def test_a_pass_6a_response_naming_nothing_still_exhausts_the_loop(mocker):
 
     c2 = run.claim_by_id("C2")
     assert c2.retry_count == max_retries
-    assert c2.confidence_tier == "UNVERIFIED"
+    assert (c2.confidence_tier, c2.loop_exhausted) == ("LOW", True)
     assert c2.revision_text is None
     assert call_log.count("Pass 6a") == max_retries
 
@@ -1838,8 +1856,13 @@ class TestAContestedClaimIsRouted:
 
         c2 = run.claim_by_id("C2")
         assert c2.retry_count == rounds
+        # UNVERIFIED because 6b grounded it as ungrounded, Pass 5's rule,
+        # which D2 now leaves alone rather than writes (§105, XR1).
         assert c2.confidence_tier == "UNVERIFIED"
-        assert "Could not be adequately verified" in c2.annotation
+        assert c2.loop_exhausted is True
+        assert c2.annotation == (
+            f"[UNVERIFIED] Did not clear after {rounds} rounds of revision; "
+            f"limited by the lack of any source that supports it.")
         assert call_log.count("Pass 6a") == rounds
 
     def test_d1_says_how_many_it_took_for_disagreement(self, mocker):
