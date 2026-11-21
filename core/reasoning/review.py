@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 
 import config
-from core import agent_activity, interaction
+from core import agent_activity, interaction, usage_view
 
 # §23: the decision vocabulary lives in core.interaction, beside the decoder
 # that validates it. Imported under the names this module and its tests
@@ -101,6 +101,10 @@ def _review_input(run) -> str:
     )
 
 
+# ROADMAP_v3 §97 (UF8). The review is the harness's run, not a pass's: its
+# reviewer and each refinement of a finding (`_refine`) are counted under
+# "harness runs" in /usage.
+@usage_view.started(usage_view.HARNESS)
 def run_review(run, model: str, provider_name: str, authorization=None,
                effort: str | None = None, activity=None):
     """Runs the reviewer agent over the finished run. Returns
@@ -447,6 +451,7 @@ def _ask(consent, finding, round_index):
     ))
 
 
+@usage_view.started(usage_view.HARNESS)
 def _refine(finding, notes, run, *, model, provider_name, thread_id,
             authorization, effort: str | None = None, activity=None):
     """Sends one finding back into the reviewer's OWN thread (V5).

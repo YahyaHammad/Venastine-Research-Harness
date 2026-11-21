@@ -316,11 +316,6 @@ class ModelResponse:
     # shown as a count. A cache count needs no entry here: it is put in
     # `usage` only when reported, so its absence already says so.
     usage_unreported: tuple = ()
-    # §97 (UF4). This run's calls as a `core.usage_view.UsageTally`, set by
-    # `run_agent_conversation` and `wake_conversation` -- whose memory is
-    # built for the one run, so its tally is this turn's -- for the CLI's
-    # `/usage`, which keeps no memory between turns. None elsewhere.
-    turn_usage: Optional[object] = None
     # Batch 44 (§44). The turn's reasoning, as the PROVIDER'S OWN BLOCKS
     # rather than as the text §38 streams for display:
     #

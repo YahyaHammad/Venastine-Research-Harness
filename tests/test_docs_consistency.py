@@ -2985,6 +2985,67 @@ def _word_number(word):
     return _SMALL_NUMBERS[word]
 
 
+def _documented_provider_fields():
+    """The field names in README.md's `providers.json` entries table."""
+    with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+        section = f.read().split("#### `providers.json` entries", 1)[1]
+    fields, started = [], False
+    for line in section.splitlines():
+        if line.startswith("|"):
+            started = True
+            hit = re.match(r"\| `([A-Za-z0-9_]+)` \|", line)
+            if hit:
+                fields.append(hit.group(1))
+        elif started:
+            break
+    return fields
+
+
+def test_the_providers_example_carries_every_field_where_it_has_an_effect():
+    """Batch 279, the owner's request and choice. The example is the schema
+    a reader copies an entry from, and it named four of the six fields the
+    loader reads: `echoes_reasoning` on no entry, `accepts_images` on two.
+
+    Every documented field is on every entry, except `echoes_reasoning`,
+    which only the OpenAI-compatible wire reads: on ANTHROPIC and GOOGLE a
+    `false` would suggest their reasoning is not sent back, when it goes
+    back by its own route. Both opt-ins stay off unless measured -- an
+    entry the example turns on is a per-provider fact, never a default.
+    """
+    with open(os.path.join(ROOT, "providers.json.example"),
+              encoding="utf-8") as f:
+        example = json.load(f)
+    documented = _documented_provider_fields()
+    # One name per line: on one line, gitleaks' generic-api-key rule reads
+    # the name after "API_KEY", as its value.
+    loaded = {
+        "API_URL",
+        "API_KEY",
+        "is_v1_compatible",
+        "supports_stream_usage",
+        "echoes_reasoning",
+        "accepts_images",
+    }
+    assert loaded <= set(documented), (
+        f"README.md's providers.json table moved or lost a row: {documented}")
+    for name, entry in example.items():
+        assert set(entry) <= set(documented), (
+            f"{name} carries {sorted(set(entry) - set(documented))}, which "
+            f"README.md's table does not document")
+        wanted = set(documented)
+        if not entry["is_v1_compatible"]:
+            wanted.discard("echoes_reasoning")
+            assert "echoes_reasoning" not in entry, (
+                f"{name} is not OpenAI-compatible, so nothing reads "
+                f"echoes_reasoning there")
+        assert set(entry) == wanted, (
+            f"{name} is missing {sorted(wanted - set(entry))}")
+        assert entry.get("echoes_reasoning", False) is False, name
+        assert isinstance(entry["accepts_images"], bool), name
+    assert sorted(name for name, entry in example.items()
+                  if entry["accepts_images"]) == ["ANTHROPIC", "GOOGLE"]
+
+
 def test_the_documented_provider_roster_matches_the_example():
     """Three prose numbers described one roster three different ways: AGENTS.md
     said nineteen providers, ARCHITECTURE.md and ROADMAP.md said fourteen,

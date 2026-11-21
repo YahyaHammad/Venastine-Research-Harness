@@ -3,79 +3,105 @@
     "API_URL": "https://api.openai.com/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": true
+    "supports_stream_usage": true,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "DEEPSEEK": {
     "API_URL": "https://api.deepseek.com/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "GROK": {
     "API_URL": "https://api.x.ai/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "MISTRAL": {
     "API_URL": "https://api.mistral.ai/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "GROQ": {
     "API_URL": "https://api.groq.com/openai/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "TOGETHERAI": {
     "API_URL": "https://api.together.ai/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "PERPLEXITY": {
     "API_URL": "https://api.perplexity.ai/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "FIREWORKS": {
     "API_URL": "https://api.fireworks.ai/inference/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "QWEN": {
     "API_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "QWEN_TOKEN_PLAN": {
-	"API_URL": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
-	"API_KEY": "",
+    "API_URL": "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+    "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": true
+    "supports_stream_usage": true,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "Z.AI": {
     "API_URL": "https://open.bigmodel.cn/api/paas/v4",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "COHERE": {
     "API_URL": "https://api.cohere.ai/compatibility/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "OPENROUTER": {
     "API_URL": "https://openrouter.ai/api/v1",
     "API_KEY": "",
     "is_v1_compatible": true,
-    "supports_stream_usage": false
+    "supports_stream_usage": false,
+    "echoes_reasoning": false,
+    "accepts_images": false
   },
   "ANTHROPIC": {
     "API_URL": "",

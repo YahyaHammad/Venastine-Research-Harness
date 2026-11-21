@@ -77,7 +77,7 @@ import json
 import logging
 
 import config
-from core import pipeline_models
+from core import pipeline_models, usage_view
 from core.config_loader import effective_confidence, effective_source_scoring
 from core.loop import RunAgentLoop
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
@@ -1443,6 +1443,10 @@ def stream_deep_research_pipeline(
         run.run_id = create_pipeline_run(user_query)
     else:
         reopen_pipeline_run(run.run_id)
+    # ROADMAP_v3 §97 (UF6). One more run in /usage's "research passes"
+    # heading; a resumed run is a run of its own. The passes' calls are
+    # told apart by their thread kind, in the loop, not from here.
+    usage_view.count_run(usage_view.RESEARCH)
 
     # ROADMAP §11: resolve critic provider/model once. When no critic is
     # configured these fall back to the main provider/model — no-op

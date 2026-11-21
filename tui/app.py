@@ -28,6 +28,7 @@ Two hard acceptance criteria live in this file:
        against textual 1.0.0's actual signature, not assumed.
 """
 
+import functools
 import json
 import logging
 import os
@@ -54,7 +55,7 @@ import config_update
 import storage
 from agents import tui_commands as agent_commands
 from agents.tui_commands import register_agent_commands
-from core import compaction, config_loader, session_wake, shell_sessions
+from core import compaction, config_loader, session_wake, shell_sessions, usage_view
 from core import connect as model_connect
 from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
@@ -1088,6 +1089,14 @@ class VenastineApp(App):
         self._todo_position = tui_settings.get("todo_position", "side")
 
         self._memory: ConversationMemory | None = None
+        # ROADMAP_v3 §97 (UF6, UF9). What `/usage` shows: every call this
+        # thread caused since it was opened, by source and model. On the
+        # app, not the memory, because a /research run started before the
+        # first turn is the thread's too, and the memory is not built until
+        # that turn (see `memory`). Replaced in the setter, which is every
+        # way the thread changes; every thread worker counts into the
+        # ledger current when it starts (`run_worker`).
+        self._usage = usage_view.UsageLedger()
         # The transcript, held rather than re-queried. See the `_transcript`
         # property and on_mount; None until mounted, which is the state
         # every test that builds this app without a pilot is in.
@@ -2231,7 +2240,18 @@ class VenastineApp(App):
 
     @memory.setter
     def memory(self, value) -> None:
+        # `getattr` on the app too: a test may build one without __init__.
+        previous = getattr(getattr(self, "_memory", None), "thread_id", None)
         self._memory = value
+        # §97 (UF6). A new or resumed thread counts from zero, as `billed`
+        # does below. A worker still running for the thread before keeps
+        # the ledger it started with, so a background subagent's late
+        # calls land there and never in this one. A memory rebuilt for
+        # the SAME thread -- /grill-me's reload -- is not a new span, so
+        # its ledger stays; /new (None) always starts one.
+        if (value is None or previous is None
+                or getattr(value, "thread_id", None) != previous):
+            self._usage = usage_view.UsageLedger()
         # #4: per-thread state follows the thread (§27's lesson). A new or
         # resumed thread starts session billing at zero; the line hides
         # until that thread's first turn rather than keeping the previous
@@ -2240,6 +2260,26 @@ class VenastineApp(App):
             self._usage_line._reset()
         except Exception:  # noqa: BLE001 -- not mounted; nothing to reset
             pass
+
+    def run_worker(self, work, *args, **kwargs):
+        """Textual's `run_worker`, with a thread worker counted for /usage.
+
+        ROADMAP_v3 §97 (UF9). Every model run this app makes is a thread
+        worker -- a turn and its wakes, /research, /init, /summary, /ref,
+        /compact -- and a thread does not inherit its starter's context,
+        so the ledger is entered HERE, once, rather than at each call site,
+        where the next worker to be added would be the one that forgot.
+        Taken when the worker is created, so it is the ledger of the
+        thread that was on screen when the work began.
+        """
+        if kwargs.get("thread") and callable(work):
+            ledger, inner = getattr(self, "_usage", None), work
+
+            @functools.wraps(inner)
+            def work():
+                with usage_view.counting(ledger):
+                    return inner()
+        return super().run_worker(work, *args, **kwargs)
 
     @property
     def _goal_banner(self) -> GoalBanner:
@@ -6628,18 +6668,15 @@ def _cmd_network(app: VenastineApp, args: str) -> None:
 
 
 def _cmd_usage(app: VenastineApp, args: str) -> None:
-    """ROADMAP_v3 §97 (UF4): this thread's provider-reported counts.
+    """ROADMAP_v3 §97 (UF4, UF6, UF7): what this thread caused to be
+    billed since it was opened, by source and then by model.
 
     The lines are `core.usage_view.report_lines`'s, which the CLI prints
-    too, over the tally `ConversationMemory.record_usage` keeps beside
-    `billed` -- so this and the usage line cover one span. `_memory`, not
-    `memory`: a thread with no turn yet has nothing to count, and the
-    public property would write a thread row to say so.
+    too, over the app's ledger. Its "this thread" section is the span
+    the usage line's `billed` covers. Reads no memory, so asking writes
+    no thread row.
     """
-    from core.usage_view import report_lines
-
-    memory = app._memory
-    for line in report_lines(getattr(memory, "usage", None)):
+    for line in usage_view.report_lines(app._usage):
         app._transcript.write_system(line)
 
 

@@ -37,7 +37,7 @@ import threading
 from typing import Optional
 
 import config
-from core import agent_activity, config_loader, model_windows, session
+from core import agent_activity, config_loader, model_windows, session, usage_view
 from storage import THREAD_KIND_SUBAGENT
 
 logger = logging.getLogger(__name__)
@@ -1646,6 +1646,10 @@ def summarize_thread(thread_id, model: str, provider_name: str,
     }
 
 
+# ROADMAP_v3 §97 (UF8). Every compactor run -- automatic, /compact, and the
+# summaries /summary and /ref make -- is the harness's in /usage, wherever
+# it runs, a subagent's own compaction included.
+@usage_view.started(usage_view.HARNESS)
 def _summarize(loop_cls, manager, agent, base_prompt, segment_text, target,
                original, model, provider_name, max_retries, authorization,
                parent_thread_id=None):

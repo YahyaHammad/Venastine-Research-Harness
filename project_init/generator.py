@@ -32,7 +32,7 @@ from collections.abc import Callable
 from typing import Optional
 
 import config
-from core import config_loader, workspace_trust
+from core import config_loader, usage_view, workspace_trust
 from json_store import read_regular_text
 from project_init import config_files, doc_sets
 from project_init import manifest as manifest_mod
@@ -261,6 +261,8 @@ def _task(manifest_text: str, existing: Optional[str], kind: str) -> str:
     return "\n".join(parts)
 
 
+# ROADMAP_v3 §97 (UF8). /init's generator is the harness's run in /usage.
+@usage_view.started(usage_view.HARNESS)
 def _run_initializer(project_path: str, kind: str, existing: Optional[str],
                      model: str, provider_name: str, activity=None) -> str:
     from agents.manager import manager

@@ -35,13 +35,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 from uuid import UUID
 
-from core import ansi
+from core import ansi, usage_view
 from core.commands import CATALOG, CLI, CommandRegistry, absent_reason, bind
-from core.usage_view import UsageTally, report_lines
+from core.usage_view import UsageLedger, report_lines
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +86,13 @@ class ChatSession:
     # Left for run_chat by /quit and /grill-me.
     quit_requested: bool = False
     one_shot: object = None
-    # ROADMAP_v3 §97 (UF4). `/usage`'s tally: the calls this shell made on
-    # `usage_thread` since it was opened here. The TUI's memory keeps one
-    # across turns; this shell builds a memory per turn, so the turns'
-    # tallies (`ModelResponse.turn_usage`) are added up here instead.
-    usage: object = field(default_factory=UsageTally)
+    # ROADMAP_v3 §97 (UF4, UF6, UF9). `/usage`'s ledger: every call this
+    # shell caused on `usage_thread` since it was opened here -- the
+    # thread's turns and wakes, its subagents, its harness runs -- by
+    # source and model. Entered round each line the chat loop handles
+    # (`counting`), so a background subagent still running after its
+    # turn records into it too.
+    usage: object = field(default_factory=UsageLedger)
     usage_thread: Optional[UUID] = None
 
     def memory(self):
@@ -106,18 +109,26 @@ class ChatSession:
         self.thread_id = memory.thread_id
         return memory
 
-    def count_usage(self, response) -> None:
-        """Add a finished turn's calls to `/usage`'s tally (§97, UF4).
+    @contextmanager
+    def counting(self):
+        """Count what one line of the chat loop causes, for `/usage`
+        (§97, UF9).
 
-        The tally starts again when the turn ran on another thread than
-        the one it was counting -- the first turn after /new, /resume or
-        /threads -- which is the TUI's span: a thread since it was opened.
+        A fresh ledger when the line starts on another thread than the
+        one being counted -- after /new, /resume or /threads -- and a line
+        that starts with no thread adopts the one it ends on, which is the
+        TUI's span: a thread since it was opened. Adopted in a `finally`,
+        so a line that raises still names what it counted.
         """
-        thread = getattr(response, "thread_id", None) or self.thread_id
-        if thread != self.usage_thread:
-            self.usage = UsageTally()
-            self.usage_thread = thread
-        self.usage.merge(getattr(response, "turn_usage", None))
+        if self.thread_id is None or self.thread_id != self.usage_thread:
+            self.usage = UsageLedger()
+            self.usage_thread = self.thread_id
+        try:
+            with usage_view.counting(self.usage):
+                yield self.usage
+        finally:
+            if self.usage_thread is None:
+                self.usage_thread = self.thread_id
 
 
 def _out(text: str = "") -> None:
@@ -760,9 +771,9 @@ def _cmd_network(session: ChatSession, args: str) -> None:
 
 
 def _cmd_usage(session: ChatSession, args: str) -> None:
-    """ROADMAP_v3 §97 (UF4). The TUI's /usage, line for line: both print
-    `core.usage_view.report_lines`. Empty until a turn has run on this
-    thread here, which is the span the TUI's memory covers."""
+    """ROADMAP_v3 §97 (UF4, UF6, UF7). The TUI's /usage, line for line:
+    both print `core.usage_view.report_lines`. Empty until something has
+    run on this thread here, which is the span the TUI's ledger covers."""
     same = (session.thread_id is not None
             and session.usage_thread == session.thread_id)
     for line in report_lines(session.usage if same else None):

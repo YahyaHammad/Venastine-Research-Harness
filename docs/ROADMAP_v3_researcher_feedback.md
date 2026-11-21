@@ -439,6 +439,9 @@ going on.
   Batch 258 fixed exactly this for shell sessions by keeping the five most recent finished rows.
 - `/usage` (§97) reports a chat thread. A research run's passes are separate threads; no figure
   aggregates a run or a pass. The researcher had to read the provider's dashboard.
+  *Since batch 279 (§97 UF6), the passes of a `/research` run started in the TUI are counted
+  in the `/usage` of the thread it was started from, by model, and the heading counts the
+  runs. A figure for one run or one pass, which PW5 proposes, is still not given.*
 
 **Measured (B8), the cost the thread worried about**: that rendering a pass live would redraw on the
 CPU many times a second, where the transcript now inserts a line. The transcript already streams by appending committed rows (`stream_delta`, batch 53's rules),
