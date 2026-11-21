@@ -44,7 +44,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§60. The Unified Harness Protocol** — **(NOT BUILT: requested batch 123, specified in slices, not designed)**
 - **§62. The field that hid an agent instead of refusing it** — **(BUILT in batch 137)** (`spawnable` was an advertisement, so a spawn of a non-spawnable agent was refused by nothing: the catalog said absent and the tool said yes, and silence at the stranger tiers bought invisibility rather than unreachability)
 - **§96. The container's `/workspace`, read by the file tools** - **(BUILT in batch 263)** (the shell runs in a container that mounts the workspace at `/workspace`, so the paths the model saw there were spelled from it, while `read`, `write`, `edit` and `view_image` run on the host, where that path is not the workspace: each such call asked to leave the workspace and then failed. `resolve_path` now maps the container's spelling onto the workspace while a tool that starts commands is enabled, and every other outside path still asks; CW1-CW3)
-- **§97. Usage figures: the rate's clock, thoughts, k/M/B and `/usage`** - **(BUILT in batch 264)** (the completion line divided the output count by the whole turn, tools and the wait on background sessions included, and kept only the last wake turn's count; Google's output left out the thoughts; `billed` read in thousands past a million; and no cache count was read. The rate now divides by generating time while `took` stays the turn's time, thoughts count as output, the usage line writes k, M and B, and `/usage` shows four provider-reported rows for this thread in both shells, with input the whole prompt on every branch; UF1-UF5)
+- **§97. Usage figures: the rate's clock, thoughts, k/M/B and `/usage`** - **(BUILT in batch 264; UF6-UF9 in batch 279)** (the completion line divided the output count by the whole turn, tools and the wait on background sessions included, and kept only the last wake turn's count; Google's output left out the thoughts; `billed` read in thousands past a million; and no cache count was read. The rate now divides by generating time while `took` stays the turn's time, thoughts count as output, the usage line writes k, M and B, and `/usage` shows four provider-reported rows for this thread in both shells, with input the whole prompt on every branch. Batch 279: `/usage` also counts what the thread started -- its subagents at any depth, the research passes of a `/research` run started from it, and the harness's own runs for it -- in a section per source and a block per (provider, model); UF1-UF9)
 - **§98. A failed research run, resumed where it stopped** - **(BUILT in batch 269)** (a run that failed or was abandoned could only be started again from Pass 0: the owner's failed after 4h53m in Pass 3a on an answer that was a complete array followed by a stray closing fence. Each stage now ends with a resume point, a pass's thread is recorded as it opens, and `/research --resume` or `--resume` skips every completed stage and continues the failed pass in its own thread -- its stored answer checked again with no model call, or the request it died on resent -- with the corpus rebuilt from the stored tool results, and the parser takes a fence at either end; RS1-RS9)
 - **§99. A pass being corrected is seen while it runs** - **(BUILT in batch 270)** (a JSON pass's corrective retry, and a prose pass's no-text one, reached the model through `continue_conversation`, which drains its own loop: the owner's resumed Pass 6b spent 25 minutes and 14 model calls correcting one answer with its tool count frozen and its row gone from the panel, and looked hung. A retry now goes through the pass's own entry point, so its tool calls, its row and its character total show as the attempt's do, its reason is saved and shown the moment the parse fails, and its fetched pages reach the corpus; SR1-SR6)
 - **§100. A subagent that runs while its parent works** - **(BUILT in batch 271)** (a spawn blocked its parent until the child answered, and NA9's parallelism existed only within one reply, so the main agent could not delegate and keep working; SS10 had deferred background subagents since §49. `spawn_subagent` takes `background: true`, which returns at once and runs the child as a session of kind `subagent` (ids `a1`, `a2`, ...) that shares the session cap, the post-turn wait, kill and quit, and wakes the parent with its answer; it asks for approval as a blocking child does, escape leaves it running, the CLI's reader gives a question the terminal, and `shell_sessions`, `shell_output` and `shell_kill` ship on; BG1-BG10)
@@ -3480,6 +3480,11 @@ refusal, both shells. `tests/test_storage_e2e.py` runs the listing on real SQLit
 saw the completion line's `tok/s` read far below what the model wrote, `billed` read in
 thousands past a million, and asked where the cache counts were.
 
+**UF6-UF9 were added and built in batch 279** (2026-11-21), from the owner's next request:
+`/usage` should list what the thread's subagents (at any depth) and research passes spent
+as well, separated by model, because `/submodel` or an agent locked to a model puts them on
+another model and models are billed at different rates.
+
 ### What was measured (2026-11-15)
 
 - **The completion rate divided by the whole turn.** `TurnMeter.completion` divided the
@@ -3505,19 +3510,42 @@ thousands past a million, and asked where the cache counts were.
   so its `input_tokens` leaves them out. The harness sends no cache markers, so on that branch
   both counts are zero or absent today.
 
-### Decisions (UF1-UF5)
+### What was measured (2026-11-21)
+
+- **Only the thread's own run reached `/usage`.** Every model call is accounted in
+  `RunAgentLoop._run`, into the memory that run was given. A spawned subagent (blocking or
+  background, at any depth), a research pass, the research review, the compactor (and with
+  it the summaries `/summary` and `/ref` make) and `/init`'s generator each run on a memory
+  of their own, so none of them reached the TUI's memory or the tallies the CLI's turns
+  handed back.
+- **The tally had no model key.** A `/model` switch partway through a thread put two
+  models' counts into the same four rows.
+- **The CLI copied a turn's tally when the turn returned**, so a background child still
+  spending after that would have been lost even had its calls reached the parent's memory.
+- **A ContextVar already crosses the threads involved.** The run's span (§47) and SS17's
+  consumer mark ride one: the parallel tool pool submits through `copy_context()`, and
+  `start_subagent` starts a background child's session thread inside a copy. Textual's
+  thread workers start with an empty context, so nothing set on the UI thread reaches them.
+
+### Decisions (UF1-UF9)
 
 | # | Decision |
 |---|---|
 | **UF1** | **The completion line's rate divides by generating time, and `took` stays the turn's time** (owner: both). `TurnMeter.generating` leaves out tool time, the human wait and the session wait, which `set_waiting` pauses, driven by `SessionWait` messages that `_wait_for_sessions` posts when it starts waiting and when a wake turn begins. One pause window serves a tool and the wait, and `set_blocked` keeps it disjoint from a modal, as batch 118 did for tools. The line's count is SUMMED over the turn's terminal responses, wake turns included, and cleared when a turn starts |
 | **UF2** | **Google's output is its candidates plus its thoughts.** Each field keeps its own last report, as batch 147 made the rule, and the two are added once at the end of the stream. One reported without the other is still a count, so a reply that was all thoughts is not D21's missing count |
 | **UF3** | **One k/M/B formatter for the usage line** (owner: the usage line). `tui.meters.short_count` writes `950`, `118k`, `1.2M`, `12M`, `1.5B`: one decimal below ten of a unit, and a figure that rounds up to a thousand of its unit in the next one. `/window` and `/trigger` still echo the number typed, and the CLI keeps its exact figures |
-| **UF4** | **`/usage`, in both shells, shows four provider-reported rows for this thread since it was opened** (owner: this thread; the names input, cache read, cache write and output). That is the span of the usage line's `billed`: `ConversationMemory.record_usage` sits beside `record_billed`, not persisted. A cache count is in a usage dict only when reported, and `ModelResponse.usage_unreported` names each input or output count that `_stream_usage` coerced to 0, so a row says "not reported", or "reported on N of M calls", instead of printing a zero. The CLI builds a memory per turn, so `run_agent_conversation` and `wake_conversation` hand theirs back as `ModelResponse.turn_usage`, and `ChatSession.count_usage` adds them up |
+| **UF4** | **`/usage`, in both shells, shows four provider-reported rows for this thread since it was opened** (owner: this thread; the names input, cache read, cache write and output). That is the span of the usage line's `billed`: `ConversationMemory.record_usage` sits beside `record_billed`, not persisted. A cache count is in a usage dict only when reported, and `ModelResponse.usage_unreported` names each input or output count that `_stream_usage` coerced to 0, so a row says "not reported", or "reported on N of M calls", instead of printing a zero. The CLI builds a memory per turn, so `run_agent_conversation` and `wake_conversation` hand theirs back as `ModelResponse.turn_usage`, and `ChatSession.count_usage` adds them up. *Amended in batch 279 by UF6 and UF9: the span stands and now covers what the thread started; the memory's tally, `turn_usage` and `count_usage` gave way to the shell's ledger* |
 | **UF5** | **Input is the whole prompt on every branch** (owner: add them in). The Anthropic branch adds its cache reads and writes to `input_tokens`, which leaves them out; the other branches' input counts already include their cache. So `billed`, `ctx` and the compaction trigger mean one thing on every provider, and `/usage` notes that the cache rows are part of input. A cache count alone is not an input count: an input the provider did not send is still D21's to judge |
+| **UF6** | **`/usage` counts what the thread started, over UF4's span** (owner: this thread plus what it started, and the harness's own runs too). The thread's own calls; its subagents at any depth, blocking and background, counted as they run rather than when they finish; the research passes of every `/research` run started while it was on screen; and the harness's own runs for it: compaction, the summaries `/summary` and `/ref` make, the research review and `/init`. Switching thread starts a fresh count, as before, and a memory rebuilt for the same thread (`/grill-me`'s reload) does not. A background child still running for a thread the user left counts toward that thread's |
+| **UF7** | **A section per source, a block per (provider, model)** (owner: by source, then model). The sections print as this thread, subagents, research passes, harness runs, each only when it has calls; the research heading says how many runs. A block is UF4's four rows for one pair, so one model id on two providers is two blocks, and no figure adds two models. A block says its own call count when its section has more than one, and its "reported on N of M calls" counts that block's calls |
+| **UF8** | **A call's source is set where its run starts.** `usage_view.started` decorates `_child_run` (subagents) and `_summarize`, `run_review`, `_refine` and `_run_initializer` (harness). A harness run is the harness's wherever it runs, so a subagent's compaction is compaction; otherwise the first source set stands, so a subagent's own subagents are subagents. A research pass is told apart by its thread kind, read in the loop, so a pass's own spawn is a subagent. A run nothing marks is the thread's own |
+| **UF9** | **One ledger, entered by the shell, recorded once in `_run`.** `usage_view.record` adds each call to the `UsageLedger` held in a ContextVar beside the run's span, so it crosses into the parallel tool pool and a background child's session thread through the `copy_context()` each already takes. The TUI enters it in `VenastineApp.run_worker` for every thread worker, with the ledger current when the worker starts; the ledger lives on the app, so a `/research` run before the first turn is the thread's, and the `memory` setter replaces it. The CLI enters it round each line `run_chat` handles (`ChatSession.counting`), commands and session waits included, and a line that starts with no thread adopts the one it ends on. `ConversationMemory.record_usage`, `ModelResponse.turn_usage` and `ChatSession.count_usage` are gone. Where no shell is counting, nothing is recorded |
 
 UF1's two clocks, UF3's reach, UF4's span and names, and UF5 are the owner's choices. The
 summed count, UF2's per-field rule, UF3's rounding and UF4's "reported on" wording are adopted
 defaults the owner may overturn.
+UF6's span and what it counts, and UF7's layout, are the owner's choices (batch 279).
+UF8's source rules and UF9's mechanism are adopted defaults.
 
 ### What §97 deliberately does not change
 
@@ -3526,6 +3554,8 @@ defaults the owner may overturn.
 - **The CLI's per-turn line.** It prints `billed` and `ctx` with commas, exactly, and has no rate.
 - **Pricing.** Every figure is a raw count, as batch 27 decided. A cache read is cheaper than other
   input on most providers, and `/usage` does not say by how much.
+- **`billed` and the usage line** (batch 279). They still cover the thread's own calls.
+  `/usage`'s "this thread" section is that span; the other sections are beside it.
 
 ### Built (batch 264)
 
@@ -3545,6 +3575,30 @@ defaults the owner may overturn.
 the wire parse path, and the Anthropic SDK's own tracing), `tests/test_spend_and_size.py`,
 `tests/test_tui.py` and `tests/test_session_tui.py`.
 
+### Built (batch 279, UF6-UF9)
+
+- **`core/usage_view.py`**: `UsageLedger`, `counting`, `started`, `record`, `count_run`, and
+  `report_lines` by source and model.
+- **`core/loop.py`**: one `usage_view.record` per call, with the research-pass kind; the
+  `turn_usage` hand-back removed, with its field in `core/client.py` and the tally in
+  `core/memory.py`.
+- **`agents/subagent_tool.py`, `core/compaction.py`, `core/reasoning/review.py`,
+  `project_init/generator.py`**: the `started` decorators; **`core/reasoning/orchestrator.py`**:
+  `count_run` where a run's record is created or reopened.
+- **`tui/app.py`**: the app's ledger, `run_worker`, the setter, `/usage`.
+- **`cli_commands.py`, `main.py`**: `ChatSession.counting` round each line; `_await_sessions`
+  loses `count_usage`.
+
+Tests: `tests/test_usage_view.py` (the ledger, the scope and the report); in
+`tests/test_spend_and_size.py`, `TestTheLoopRecordsEveryCall` (a research pass through the
+real entry point; a CLI turn and its wake), `TestWhatAThreadStartsIsCountedApart` (the
+decorator census, the compactor's retry, the review, a research run counted) and
+`TestUsageInEachShell`; `TestASpawnsUsageIsTheSpawningThreads` in
+`tests/test_agent_activity.py` (a depth-2 spawn through the real loop and dispatch, on a
+pinned model, and `/submodel`'s pair); and `test_its_calls_reach_the_spawning_threads_usage`
+in `tests/test_background_subagents.py`. Seventeen mutations, one per line that carries a
+decision, were each killed by a failed assertion.
+
 ### Gap register
 
 - **Not measured against a live provider.** The cache and thought reads are driven against the
@@ -3553,8 +3607,18 @@ the wire parse path, and the Anthropic SDK's own tracing), `tests/test_spend_and
   and `/usage` says "not reported" for it.
 - **Google's `tool_use_prompt_token_count`** (input from the provider's own tool runs) is not
   added to input. The harness calls no provider-side tools.
-- **A CLI turn that raises** returns no response, so its calls are not in the CLI's `/usage`.
-  The TUI's memory records them.
+- ~~**A CLI turn that raises** returns no response, so its calls are not in the CLI's
+  `/usage`. The TUI's memory records them.~~ Closed in batch 279 (UF9): each call is recorded
+  as it is made, so a turn that raises keeps what it spent.
+- **The shell's decision model** (`shell_approval_mode: classified`, §56) is called over its
+  own HTTP client, not the loop, and is not in `/usage`.
+- **A background child still running for a thread the user left** is counted toward that
+  thread's ledger, which was dropped at the switch, so its calls appear in no `/usage` (UF6).
+- **`billed` still resets on `/grill-me`'s reload**, which builds a new memory for the same
+  thread; the ledger does not (UF6), so after one the usage line reads less than `/usage`'s
+  "this thread" section. Found in batch 279, not changed there.
+- **A figure for one research run or one pass** is not given: `/usage` counts the runs a
+  thread started together. The researcher-feedback proposals ask for one (PW5).
 
 ---
 

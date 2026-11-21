@@ -32752,3 +32752,97 @@ gitleaks 8.30.1 on an export of the tracked files finds nothing. No requirements
 file changed, so pip-audit was not re-run.
 
 - **Version:** the branch's beta counter, `0.3.21-b.2.tui-launch-flags.r8a2d097873a1`.
+
+## Batch 279 -- the providers example carries every field, and `/usage` counts what a thread started, by model (ROADMAP_v3 §97, UF6-UF9) (2026-11-21)
+
+**Asked.** Two small changes before the next roadmap item. First, `providers.json.example` showed
+two of the optional keys although more are supported, `echoes_reasoning` among them: include
+every supported field. Second, the owner believed `/usage` showed the main thread only; if so it
+should also list what every subagent (recursively, any depth) and every research pass spent,
+separated by model where `/submodel` or an agent locked to a model puts them on a different one,
+since models are billed at different rates. Verify against the code first.
+
+**Checked first.** Both were as the owner thought.
+
+- The loader reads six fields per entry: `API_URL`, `API_KEY`, `is_v1_compatible`,
+  `supports_stream_usage`, `echoes_reasoning` and `accepts_images` (`core/client.py`). The example
+  had `echoes_reasoning` on no entry and `accepts_images` on two of fifteen. A missing field
+  means `false` in both cases, the second by a strict `is True`.
+- Every model call is accounted in `RunAgentLoop._run`, into the memory that run was given.
+  A spawned subagent (blocking or background, at any depth), a research pass, the research
+  review, the compactor (and so the summaries `/summary` and `/ref` make) and `/init`'s generator
+  each run on a memory of their own, so none reached `/usage`. The tally had no model key either:
+  a `/model` switch partway through a thread put two models' counts in the same rows. And the
+  CLI copied each turn's tally when the turn returned, so a background child still spending
+  after that would have been lost even had its calls reached the parent.
+
+**Settled with the owner.** Four questions, each answered with the recommended option:
+- `echoes_reasoning` and `accepts_images` go where each has an effect: `accepts_images` on all
+  fifteen entries, `echoes_reasoning` on the thirteen OpenAI-compatible ones only, since nothing
+  reads it on ANTHROPIC or GOOGLE and a `false` there would suggest their reasoning is not sent
+  back.
+- The harness's own runs for the thread count too (compaction, summaries, the research review,
+  `/init`), under their own heading.
+- The span stays UF4's, this thread since it was opened, plus what the thread started: its
+  subagents as they run, and the `/research` runs started while it was on screen.
+- The layout is a section per source and a block per (provider, model).
+Recorded as UF6 and UF7, with UF8's source rules and UF9's mechanism as adopted defaults, and
+UF4 marked amended.
+
+**Built.**
+- `providers.json.example`: the two fields added as text edits that keep the file's order and
+  layout, every existing value unchanged; QWEN_TOKEN_PLAN's two tab-indented lines now use the
+  file's spaces. README.md's field table says which entries carry which field and why.
+- `core/usage_view.py`: `UsageLedger`, a locked tally per (source, provider, model), read through
+  `snapshot` copies; `counting`, which a shell enters; `started`, which marks a run's source and
+  works as a decorator; `record` and `count_run`; and `report_lines` by section and block. The
+  ledger rides a ContextVar, the route the run's span already takes, so it reaches the parallel
+  tool pool and a background child's session thread through the `copy_context()` each already
+  takes.
+- `core/loop.py`: one `usage_view.record` per call, which passes whether the memory is a
+  research pass. The memory's tally, `ModelResponse.turn_usage` and `ChatSession.count_usage`
+  are removed: two records of one call could drift, and the CLI's copy was the one that would
+  have lost a late child.
+- The sources are decorators where each run starts: `_child_run` (subagents) and `_summarize`,
+  `run_review`, `_refine` and `_run_initializer` (harness). The orchestrator counts a run where
+  its record is created or reopened.
+- `tui/app.py`: the ledger lives on the app, so a `/research` run before the first turn is the
+  thread's, and the `memory` setter replaces it when the thread changes but not when
+  `/grill-me` rebuilds the same thread's memory. `run_worker` enters it for every thread
+  worker, because Textual's thread workers start with an empty context, and it is entered once
+  there rather than at a dozen call sites.
+- `cli_commands.py`, `main.py`: `ChatSession.counting` round each line `run_chat` handles, the
+  commands and the session waits included. A line that starts with no thread adopts the one it
+  ends on, in a `finally`. That closes §97's gap that a CLI turn which raised went uncounted.
+- README.md's CLI list said twenty commands and lacked `/submodel` and `/usage`; there are
+  twenty-two. `/usage` had no row in the command table either; it has one now.
+
+**Tests.** `test_usage_view.py` covers the ledger, the scope and the report; a copied context
+carries the ledger to another thread and a bare thread does not, which is why `run_worker`
+enters it. `test_agent_activity.py` drives a depth-2 spawn through the real loop and the real
+dispatch, scripting only the model stream: the parent's two calls are this thread's, and the
+child's two and the grandchild's one are subagents' on the agent's own pinned model; a
+`/submodel` child is a block of its own. `test_background_subagents.py` has a child that spends
+after its spawn has returned and the spawning turn has left its scope, and its call is still
+the spawning thread's. `test_spend_and_size.py` covers:
+- a research pass through its real entry point;
+- a census of the decorated run-starting functions;
+- the compactor's retry and the review;
+- a pipeline run counted as one run;
+- the CLI's line scope and the TUI's workers and setter.
+`test_docs_consistency.py` holds the example to README.md's table. Seventeen mutations, one per
+line that carries a decision, were each killed by a failed assertion and not by an error.
+
+Full suite green on Windows with AGENT_WORKSPACE unset: 9,991 passed and 88 skipped (10,079). The first full run failed three TUI tests that build the app without `__init__` and then set `memory`: the setter read `self._memory` before assigning it. It reads it with `getattr` now, as `run_worker` reads the ledger, and the mutations were run again on that code, seventeen of seventeen killed.
+
+ruff is clean. bandit 1.9.4 reports 47 live findings and none new against the baseline, and `bandit-count-check.py` finds none of the 62 (file, test) pairs grown.
+gitleaks 8.30.1 on an export of the tracked files finds nothing, once the new guard test listed its field names one per line: on one line the generic-api-key rule read the name after `"API_KEY",` as a value. No requirements or workflow
+file changed, so pip-audit was not re-run.
+
+**Not done here.**
+- `billed` still resets on `/grill-me`'s reload. That is pre-existing, found here and recorded
+  in §97's gap register.
+- The decision classifier's own HTTP calls are not counted.
+- A per-run figure (PW5) is still a proposal.
+
+- **Version:** the branch's first beta, `0.3.22-b.1.providers-example-usage-totals.rfb729be56efb`.

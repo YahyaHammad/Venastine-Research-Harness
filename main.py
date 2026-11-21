@@ -498,8 +498,8 @@ _WAIT_POLL_S = 0.2
 
 
 def _await_sessions(thread_id, *, model, provider_name, effort,
-                    authorization, turn=None, active_skills=(),
-                    count_usage=None) -> _WaitEnd:
+                    authorization, turn=None,
+                    active_skills=()) -> _WaitEnd:
     """Between turns, wait on this conversation's live sessions and run a
     wake turn for each batch (SS2, SS5).
 
@@ -561,13 +561,12 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
         "max_steps": turn.max_steps})
 
     def _again():
-        # The same wait re-entered, so it counts into the same thread's
-        # usage (§97 UF4): a wake after the user's line is still this
-        # thread's call.
+        # The same wait re-entered. `run_chat` resumes it inside the line's
+        # `counting()`, so its wakes are this thread's calls (§97 UF9).
         return _await_sessions(
             thread_id, model=model, provider_name=provider_name,
             effort=effort, authorization=authorization, turn=turn,
-            active_skills=active_skills, count_usage=count_usage)
+            active_skills=active_skills)
 
     reader = _stdin_reader()
     # Batch 265. `reading` goes False for good at the end of stdin, and
@@ -686,10 +685,6 @@ def _await_sessions(thread_id, *, model, provider_name, effort,
                 # to the sessions and takes the handler below.
                 signal.signal(signal.SIGINT, previous_sigint)
             live.finish(response)
-            # ROADMAP_v3 §97 (UF4). A wake turn's calls are this
-            # thread's too, as they are on the TUI's memory.
-            if count_usage is not None:
-                count_usage(response)
             if interrupted:
                 # The turn finished and wrote its rows; now the key does
                 # what it said. Returning to the prompt rather than waiting
@@ -833,33 +828,37 @@ def run_chat(
         if not user_input:
             continue
 
-        agent = session.active_agent
-        one_shot = False
-        if user_input.startswith("/"):
-            # `waiting`: the commands the TUI refuses while a turn's
-            # sessions run are refused here too, when this one was sent
-            # during the wait (SS2 as amended, the owner's choice).
-            run_command(session, user_input, waiting=from_wait is not None)
-            if session.quit_requested:
-                # /quit takes Ctrl+D's route, confirmation and all.
-                session.quit_requested = False
-                if _quit_confirmed():
-                    print("Exiting.")
-                    break
-                if from_wait is not None:
-                    waited = from_wait.resume()
-                continue
-            if session.one_shot is None:
-                if from_wait is not None:
-                    waited = from_wait.resume()
-                continue
-            # /grill-me: one turn in this thread under that agent's prompt,
-            # run like a typed message so it prints live and stops the same
-            # way (§18; the TUI's run_one_shot).
-            agent, session.one_shot = session.one_shot, None
-            user_input, one_shot = GRILL_ME_TASK, True
+        # ROADMAP_v3 §97 (UF9). Everything this line causes -- a
+        # command's summary, the turn, its wake turns, a resumed wait --
+        # is counted for /usage against the thread it ran on.
+        with session.counting():
+            agent = session.active_agent
+            one_shot = False
+            if user_input.startswith("/"):
+                # `waiting`: the commands the TUI refuses while a turn's
+                # sessions run are refused here too, when this one was sent
+                # during the wait (SS2 as amended, the owner's choice).
+                run_command(session, user_input, waiting=from_wait is not None)
+                if session.quit_requested:
+                    # /quit takes Ctrl+D's route, confirmation and all.
+                    session.quit_requested = False
+                    if _quit_confirmed():
+                        print("Exiting.")
+                        break
+                    if from_wait is not None:
+                        waited = from_wait.resume()
+                    continue
+                if session.one_shot is None:
+                    if from_wait is not None:
+                        waited = from_wait.resume()
+                    continue
+                # /grill-me: one turn in this thread under that agent's prompt,
+                # run like a typed message so it prints live and stops the same
+                # way (§18; the TUI's run_one_shot).
+                agent, session.one_shot = session.one_shot, None
+                user_input, one_shot = GRILL_ME_TASK, True
 
-        waited = _chat_turn(session, user_input, agent, one_shot=one_shot)
+            waited = _chat_turn(session, user_input, agent, one_shot=one_shot)
 
 
 def _chat_turn(session: ChatSession, user_input: str, agent,
@@ -956,8 +955,6 @@ def _chat_turn(session: ChatSession, user_input: str, agent,
         signal.signal(signal.SIGINT, previous_sigint)
 
     session.thread_id = response.thread_id
-    # ROADMAP_v3 §97 (UF4): this turn's calls, for /usage.
-    session.count_usage(response)
 
     # ROADMAP_v2 §21's "no silent compaction, ever": a notice printed
     # live when it happened, and one that never arrived live is printed
@@ -1010,8 +1007,7 @@ def _chat_turn(session: ChatSession, user_input: str, agent,
         session.thread_id, model=turn.model,
         provider_name=turn.provider_name, effort=session.effort,
         authorization=session.authorization, turn=turn,
-        active_skills=session.active_skills,
-        count_usage=session.count_usage)
+        active_skills=session.active_skills)
 
 
 def build_research_authorization(grant_spec, attended: bool = False):

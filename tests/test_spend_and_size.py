@@ -33,8 +33,17 @@ from uuid import uuid4
 
 import pytest
 
+from core import usage_view
 from core.events import LoopEvent
 from core.loop import RunAgentLoop, run_to_completion
+from core.usage_view import (
+    HARNESS,
+    RESEARCH,
+    SUBAGENTS,
+    THREAD,
+    UsageLedger,
+    report_lines,
+)
 from tests.conftest import (
     FakeMemory,
     make_model_response,
@@ -501,229 +510,372 @@ class TestTheTuiUsageLine:
 
 
 # ---------------------------------------------------------------------------
-# ---- ROADMAP_v3 §97: /usage, over billed's span -----------------------------
+# ---- ROADMAP_v3 §97: /usage, everything a thread caused ----------------------
 # ---------------------------------------------------------------------------
 
-class TestUsageIsRecordedBesideBilled:
-    """§97 UF4. The loop hands every call's usage to the memory that keeps
-    `billed`, so `/usage` and the usage line cover one span."""
+def _sections(ledger):
+    """{source: {(provider, model): tally}} out of a ledger."""
+    sections, _runs = ledger.snapshot()
+    return {source: dict(blocks) for source, blocks in sections.items()}
 
-    def test_every_step_reaches_the_tally(self, mocker):
+
+class TestTheLoopRecordsEveryCall:
+    """§97 UF9. `_run` records each call ONCE, into the ledger the shell
+    is counting, under its (provider, model), with the coerced counts left
+    out -- and the thread's own calls are the span `billed` covers."""
+
+    def test_every_step_reaches_the_ledger(self, mocker):
         first = _resp(1000, 100, tool=True)
         first.usage["cache_read_tokens"] = 800
-        _, memory = _drive(mocker, first, _resp(1100, 50))
-        assert memory.usage.calls == 2
-        assert memory.usage.totals == {"input_tokens": 2100,
-                                       "output_tokens": 150,
-                                       "cache_read_tokens": 800}
-        assert memory.usage.reported["cache_read_tokens"] == 1
+        ledger = UsageLedger()
+        with usage_view.counting(ledger):
+            _, memory = _drive(mocker, first, _resp(1100, 50))
+        assert list(_sections(ledger)) == [THREAD]
+        tally = _sections(ledger)[THREAD][("ANTHROPIC", "m")]
+        assert tally.calls == 2
+        assert tally.totals == {"input_tokens": 2100, "output_tokens": 150,
+                                "cache_read_tokens": 800}
+        assert tally.reported["cache_read_tokens"] == 1
+        # UF4's agreement: the section and the usage line count one span.
+        assert memory.billed_tokens == 2100 + 150
 
-    def test_a_coerced_zero_reaches_the_tally_as_unreported(self, mocker):
+    def test_a_coerced_zero_reaches_the_ledger_as_unreported(self, mocker):
         """`ModelResponse.usage_unreported` rides through the loop: the
         zero is still in `billed`'s sum, and still not a count."""
         silent = _resp(0, 0)
         silent.usage_unreported = ("input_tokens", "output_tokens")
-        _, memory = _drive(mocker, silent)
+        ledger = UsageLedger()
+        with usage_view.counting(ledger):
+            _, memory = _drive(mocker, silent)
+        tally = _sections(ledger)[THREAD][("ANTHROPIC", "m")]
         assert memory.billed_tokens == 0
-        assert memory.usage.calls == 1 and memory.usage.totals == {}
+        assert tally.calls == 1 and tally.totals == {}
 
-    def test_the_real_memory_starts_its_tally_at_zero(self, fake_storage):
-        """record_billed's scope, for record_billed's reason: nothing is
-        persisted, so a resumed thread counts from the moment it opened."""
+    def test_there_is_no_second_tally_to_drift(self):
+        """UF9 replaced the memory's tally and the response's hand-back:
+        two records of one call is the producer/consumer shape this
+        project keeps finding, and the CLI's copy lost a background
+        child's calls made after its turn had been added up."""
+        from core.client import ModelResponse
         from core.memory import ConversationMemory
 
-        memory = ConversationMemory()
-        memory.record_usage({"input_tokens": 5, "output_tokens": 2})
-        resumed = ConversationMemory(thread_id=memory.thread_id)
-        assert memory.usage.calls == 1
-        assert resumed.usage.calls == 0
+        assert not hasattr(ConversationMemory, "record_usage")
+        assert "turn_usage" not in ModelResponse.__dataclass_fields__
 
-    def test_a_cli_turn_hands_its_tally_back(self, mocker, fake_storage):
-        """The CLI builds a memory per turn, so the turn's tally rides the
-        response for `ChatSession` to add up."""
+    def test_a_research_pass_is_research_through_the_real_entry_point(
+            self, mocker, fake_storage):
+        """Its memory is a research_pass thread, and that is how the loop
+        tells it apart (UF8): nothing upstream has to say so."""
+        from tests.conftest import drain
+
         mocker.patch("core.loop.api_initialization", return_value=object())
         mocker.patch("core.loop.call_model_stream",
-                     side_effect=make_stream_sequence(_resp(300, 20)))
-        response = RunAgentLoop.run_agent_conversation(
-            user_goal="hi", model="m", provider_name="ANTHROPIC",
-            max_total_tokens=None)
-        assert response.turn_usage.calls == 1
-        assert response.turn_usage.totals == {"input_tokens": 300,
-                                              "output_tokens": 20}
+                     side_effect=make_stream_sequence(_resp(700, 70)))
+        ledger = UsageLedger()
+        with usage_view.counting(ledger):
+            drain(RunAgentLoop.stream_deep_research_mode(
+                pass_input="q", model="pass-model", pass_id="Pass 1",
+                provider_name="ANTHROPIC", max_total_tokens=None))
+        assert list(_sections(ledger)) == [RESEARCH]
+        assert _sections(ledger)[RESEARCH][("ANTHROPIC", "pass-model")] \
+            .totals == {"input_tokens": 700, "output_tokens": 70}
 
-    def test_a_cli_wake_turn_hands_its_tally_back(self, mocker,
-                                                  fake_storage):
-        """`wake_conversation` builds a memory for the one run too, and
-        the CLI's wait loop counts what it returns."""
+    def test_a_cli_turn_and_its_wake_are_this_thread(self, mocker,
+                                                     fake_storage):
+        """The CLI's two entry points, real: each builds its own memory,
+        and both are counted where the line was entered."""
         from core.memory import ConversationMemory
         from tests.test_harness_rows import TEXT, WAKE
 
         mocker.patch("core.loop.api_initialization", return_value=object())
         mocker.patch("core.loop.call_model_stream",
-                     side_effect=make_stream_sequence(_resp(500, 30)))
-        thread = ConversationMemory().thread_id
-        response = RunAgentLoop.wake_conversation(
-            thread, TEXT, WAKE, model="m", provider_name="ANTHROPIC")
-        assert response.turn_usage.calls == 1
-        assert response.turn_usage.totals == {"input_tokens": 500,
-                                              "output_tokens": 30}
+                     side_effect=make_stream_sequence(_resp(300, 20),
+                                                      _resp(500, 30)))
+        ledger = UsageLedger()
+        with usage_view.counting(ledger):
+            RunAgentLoop.run_agent_conversation(
+                user_goal="hi", model="m", provider_name="ANTHROPIC",
+                max_total_tokens=None)
+            RunAgentLoop.wake_conversation(
+                ConversationMemory().thread_id, TEXT, WAKE, model="m",
+                provider_name="ANTHROPIC")
+        tally = _sections(ledger)[THREAD][("ANTHROPIC", "m")]
+        assert tally.calls == 2
+        assert tally.totals == {"input_tokens": 800, "output_tokens": 50}
+
+
+class TestWhatAThreadStartsIsCountedApart:
+    """§97 UF6 and UF8, for the runs that are not spawns (those are in
+    test_agent_activity.py and test_background_subagents.py)."""
+
+    def test_every_run_the_harness_starts_says_so(self):
+        """THE CENSUS. Each function that starts a harness run, and the one
+        that runs a spawned child, carries its source as a decorator, so
+        nothing at a call site can forget it. Read from the source: a
+        decorator is how the runs are marked, and a call site added later
+        is the one a behavioural test would not know to drive."""
+        import ast
+        import inspect
+
+        from agents import subagent_tool
+        from core import compaction
+        from core.reasoning import review
+        from project_init import generator
+
+        expected = {
+            (compaction, "_summarize"): "HARNESS",
+            (review, "run_review"): "HARNESS",
+            (review, "_refine"): "HARNESS",
+            (generator, "_run_initializer"): "HARNESS",
+            (subagent_tool, "_child_run"): "SUBAGENTS",
+        }
+        for (module, name), source in expected.items():
+            tree = ast.parse(inspect.getsource(module))
+            [node] = [n for n in tree.body
+                      if isinstance(n, ast.FunctionDef) and n.name == name]
+            marks = [ast.unparse(d) for d in node.decorator_list]
+            assert f"usage_view.started(usage_view.{source})" in marks, (
+                f"{module.__name__}.{name} starts a run /usage cannot place: "
+                f"its calls would count as this thread's")
+
+    def test_a_compactor_run_and_its_retry_are_the_harnesss(self):
+        """Through the real `_summarize`, the one function every compaction
+        and every /summary and /ref summary goes through: a summary that
+        overshoots is retried, and both calls are counted."""
+        from types import SimpleNamespace
+
+        from core import compaction
+
+        replies = iter(["x" * 5000, "short enough"])
+
+        class _Loop:
+            @staticmethod
+            def run_agent_conversation(**kwargs):
+                return _reply(kwargs)
+
+            @staticmethod
+            def continue_conversation(**kwargs):
+                return _reply(kwargs)
+
+        def _reply(kwargs):
+            usage_view.record(kwargs["provider_name"], kwargs["model"],
+                              {"input_tokens": 10, "output_tokens": 1})
+            response = make_model_response(text=next(replies))
+            response.thread_id = uuid4()
+            return response
+
+        manager = SimpleNamespace(
+            active_context=lambda agent: None,
+            system_prompt_for=lambda *a, **k: "p")
+        agent = SimpleNamespace(model=None, provider=None, name="compactor")
+        ledger = UsageLedger()
+        with usage_view.counting(ledger):
+            summary = compaction._summarize(
+                _Loop, manager, agent, "base", "segment", 100, 9000,
+                "main-model", "ANTHROPIC", 2, None)
+        assert summary == "short enough"
+        assert list(_sections(ledger)) == [HARNESS]
+        assert _sections(ledger)[HARNESS][("ANTHROPIC", "main-model")] \
+            .calls == 2
+
+    def test_the_research_review_is_the_harnesss(self, mocker,
+                                                  real_harness_tier):
+        from core import config_loader
+        from core.reasoning import review as review_module
+        from tests.test_review import _reviewed_run
+
+        config_loader.initialize(str(real_harness_tier))
+
+        def _reviewer(**kwargs):
+            usage_view.record(kwargs["provider_name"], kwargs["model"],
+                              {"input_tokens": 9, "output_tokens": 9})
+            response = make_model_response(text="[]")
+            response.thread_id = uuid4()
+            return response
+
+        mocker.patch.object(RunAgentLoop, "run_agent_conversation",
+                            side_effect=_reviewer)
+        ledger = UsageLedger()
+        with usage_view.counting(ledger):
+            review_module.run_review(_reviewed_run(), "m", "ANTHROPIC")
+        assert list(_sections(ledger)) == [HARNESS]
+
+    def test_a_research_run_is_counted_as_a_run(self, mocker):
+        """The heading's "1 run": counted once per pipeline run, at the
+        point its record is created, a resumed run included."""
+        from tests.conftest import pass_stream, run_pipeline
+        from tests.test_orchestrator import (
+            _build_pass_mock,
+            _clean_pipeline_payloads,
+        )
+
+        mocker.patch.object(
+            RunAgentLoop, "stream_deep_research_mode",
+            side_effect=pass_stream(_build_pass_mock(
+                [], _clean_pipeline_payloads())))
+        ledger = UsageLedger()
+        with usage_view.counting(ledger):
+            run_pipeline(user_query="q", model="m",
+                         provider_name="ANTHROPIC")
+        assert ledger.snapshot()[1] == {RESEARCH: 1}
 
 
 class TestUsageInEachShell:
 
-    def test_the_cli_adds_turns_up_and_restarts_on_a_new_thread(self):
-        from types import SimpleNamespace
-
+    def test_the_cli_counts_a_thread_and_restarts_on_a_new_one(self):
         from cli_commands import ChatSession
-        from core.usage_view import UsageTally
-
-        def turn(thread, inp):
-            tally = UsageTally()
-            tally.add({"input_tokens": inp, "output_tokens": 1})
-            return SimpleNamespace(thread_id=thread, turn_usage=tally)
 
         session = ChatSession(provider_name="ANTHROPIC", model="m")
         first, second = uuid4(), uuid4()
         session.thread_id = first
-        session.count_usage(turn(first, 10))
-        session.count_usage(turn(first, 20))   # a wake turn, same thread
-        assert session.usage.totals["input_tokens"] == 30
-        session.thread_id = second
-        session.count_usage(turn(second, 5))
+        with session.counting():
+            usage_view.record("ANTHROPIC", "m", {"input_tokens": 10})
+        with session.counting():          # a later line, the same thread
+            usage_view.record("ANTHROPIC", "m", {"input_tokens": 20})
+        assert _sections(session.usage)[THREAD][("ANTHROPIC", "m")] \
+            .totals == {"input_tokens": 30}
+        session.thread_id = second        # /resume, /threads
+        with session.counting():
+            usage_view.record("ANTHROPIC", "m", {"input_tokens": 5})
         assert session.usage.calls == 1
-        assert session.usage.totals["input_tokens"] == 5
+        assert session.usage_thread == second
+
+    def test_a_line_on_no_thread_adopts_the_thread_it_creates(self):
+        """The first turn after /new creates its thread inside the line."""
+        from cli_commands import ChatSession
+
+        session = ChatSession(provider_name="ANTHROPIC", model="m")
+        created = uuid4()
+        with session.counting():
+            usage_view.record("ANTHROPIC", "m", {"input_tokens": 7})
+            session.thread_id = created
+        assert session.usage_thread == created
+        with session.counting():
+            usage_view.record("ANTHROPIC", "m", {"input_tokens": 1})
+        assert session.usage.calls == 2
+
+    def test_a_line_that_raises_keeps_what_it_counted(self):
+        """§97's gap register said a CLI turn that raises was missing from
+        /usage. Recorded at each call now, it is not."""
+        from cli_commands import ChatSession
+
+        session = ChatSession(provider_name="ANTHROPIC", model="m")
+        session.thread_id = uuid4()
+        with pytest.raises(RuntimeError), session.counting():
+            usage_view.record("ANTHROPIC", "m", {"input_tokens": 7})
+            raise RuntimeError("the turn failed")
+        with session.counting():
+            pass
+        assert session.usage.calls == 1
 
     def test_the_cli_command_prints_the_shared_report(self, capsys):
         from cli_commands import ChatSession, _cmd_usage
-        from core.usage_view import report_lines
 
         session = ChatSession(provider_name="ANTHROPIC", model="m")
         session.thread_id = session.usage_thread = uuid4()
-        session.usage.add({"input_tokens": 1_234, "output_tokens": 56})
+        session.usage.add(THREAD, "ANTHROPIC", "m",
+                          {"input_tokens": 1_234, "output_tokens": 56})
         _cmd_usage(session, "")
         printed = capsys.readouterr().out.splitlines()
         assert printed == report_lines(session.usage)
-        assert printed[1] == "  input        1,234"
+        assert printed[3] == "    input        1,234"
 
     def test_the_cli_shows_nothing_for_a_thread_it_has_not_counted(
             self, capsys):
-        """After /new, and after /resume before its first turn, the tally
+        """After /new, and after /resume before its first turn, the ledger
         still holds the previous thread's calls; they are not this one's."""
         from cli_commands import ChatSession, _cmd_usage
 
         session = ChatSession(provider_name="ANTHROPIC", model="m")
         session.usage_thread = uuid4()
-        session.usage.add({"input_tokens": 9, "output_tokens": 9})
+        session.usage.add(THREAD, "ANTHROPIC", "m",
+                          {"input_tokens": 9, "output_tokens": 9})
         session.thread_id = uuid4()
         _cmd_usage(session, "")
         assert "no model calls yet" in capsys.readouterr().out
 
-    def test_the_wake_turns_count_in_the_cli_too(self, mocker, cli_stdin):
-        """`_await_sessions` hands each wake turn's response to the same
-        counter as the turn that started the sessions.
-
-        Batch 265's wait reads `waited_on` rather than `live_for`, and
-        polls the one stdin reader while it waits, so both are scripted:
-        a real read in a test reads the runner's own stdin."""
+    def test_a_cli_chat_turn_and_its_session_wait_reach_slash_usage(
+            self, mocker, fake_storage, cli_stdin, capsys):
+        """The CALL SITE, end to end: `run_chat` counts the turn it ran and
+        the wake turns its session wait runs, and the `/usage` typed after
+        them prints both. Each stand-in records as `_run` does."""
         import main
         from core.client import ModelResponse
-
-        cli_stdin()
-        thread = uuid4()
-        sessions = mocker.patch.object(main, "sessions")
-        sessions.waited_on.side_effect = [True, False]
-        sessions.pending.return_value = False
-        sessions.wait_for_wake.return_value = [object()]
-        mocker.patch("core.session_wake.build_wake",
-                     return_value=("wake", {}))
-        woke = ModelResponse(text="ok")
-        mocker.patch.object(main.RunAgentLoop, "wake_conversation",
-                            return_value=woke)
-        counted = []
-        main._await_sessions(thread, model="m", provider_name="ANTHROPIC",
-                             effort=None, authorization=None,
-                             count_usage=counted.append)
-        assert counted == [woke]
-
-    def test_a_cli_chat_turn_reaches_slash_usage(self, mocker, fake_storage,
-                                                 cli_stdin, capsys):
-        """The CALL SITE, end to end: `run_chat` counts the turn it ran,
-        and the `/usage` typed after it prints that turn's calls. The
-        pieces above prove nothing if `_chat_turn` never counts."""
-        import main
-        from core.client import ModelResponse
-        from core.usage_view import UsageTally
 
         mocker.patch("sys.stdin.isatty", return_value=False)
         thread = uuid4()
-        tally = UsageTally()
-        tally.add({"input_tokens": 4_321, "output_tokens": 12})
 
         def _run(**kwargs):
+            usage_view.record("ANTHROPIC", kwargs["model"],
+                              {"input_tokens": 4_321, "output_tokens": 12})
             response = ModelResponse(text="ok")
             response.thread_id = thread
-            response.turn_usage = tally
             return response
+
+        def _wait(*args, **kwargs):
+            usage_view.record("ANTHROPIC", kwargs["model"],
+                              {"input_tokens": 1_000, "output_tokens": 1})
+            return main._WaitEnd()
 
         mocker.patch("main.RunAgentLoop.run_agent_conversation",
                      side_effect=_run)
+        mocker.patch("main._await_sessions", side_effect=_wait)
         cli_stdin("hello", "/usage")
         main.run_chat(None, "ANTHROPIC", "m")
         out = capsys.readouterr().out
-        assert "usage · this thread since it was opened · 1 call" in out
-        assert "  input        4,321" in out
+        assert "usage · this thread since it was opened · 2 calls" in out
+        assert "    input        5,321" in out
 
-    def test_the_cli_hands_its_counter_to_the_session_wait(
-            self, mocker, fake_storage, cli_stdin):
-        """The wake turns are counted only if `run_chat` hands the session
-        wait the same counter its own turn used."""
+    def test_a_cli_command_is_counted_too(self, mocker, fake_storage,
+                                          cli_stdin, capsys):
+        """/summary and /ref run the compactor from a COMMAND, not a turn,
+        so the line's scope has to cover commands as well."""
         import main
-        from core.client import ModelResponse
 
         mocker.patch("sys.stdin.isatty", return_value=False)
-        thread = uuid4()
+        session_thread = uuid4()
+        real = main.run_command
 
-        def _run(**kwargs):
-            response = ModelResponse(text="ok")
-            response.thread_id = thread
-            return response
+        def _command(session, line, **kwargs):
+            if line == "/spend":
+                session.thread_id = session.thread_id or session_thread
+                usage_view.record("ANTHROPIC", "m", {"input_tokens": 77})
+                return None
+            return real(session, line, **kwargs)
 
-        mocker.patch("main.RunAgentLoop.run_agent_conversation",
-                     side_effect=_run)
-        # Batch 265: the wait says how it ended, and run_chat reads that.
-        waited = mocker.patch("main._await_sessions",
-                              return_value=main._WaitEnd())
-        cli_stdin("hello")
+        mocker.patch("main.run_command", side_effect=_command)
+        cli_stdin("/spend", "/usage")
         main.run_chat(None, "ANTHROPIC", "m")
-        counter = waited.call_args.kwargs["count_usage"]
-        assert counter.__func__.__name__ == "count_usage"
+        out = capsys.readouterr().out
+        assert "usage · this thread since it was opened · 1 call" in out
+        assert "    input        77" in out
 
     @pytest.mark.asyncio
     async def test_the_tui_command_writes_the_shared_report(self):
-        from types import SimpleNamespace
-
-        from core.usage_view import UsageTally, report_lines
         from tui.app import VenastineApp
 
         app = VenastineApp("ANTHROPIC", "test-model", {})
         async with app.run_test() as pilot:
             await pump(pilot, 2)
-            tally = UsageTally()
-            tally.add({"input_tokens": 412_880, "output_tokens": 18_207,
-                       "cache_read_tokens": 301_440})
-            app._memory = SimpleNamespace(usage=tally, billed_tokens=0,
-                                          last_input_tokens=0)
+            ledger = UsageLedger()
+            ledger.add(THREAD, "ANTHROPIC", "test-model",
+                       {"input_tokens": 412_880, "output_tokens": 18_207,
+                        "cache_read_tokens": 301_440}, ())
+            ledger.add(SUBAGENTS, "ANTHROPIC", "sub-model",
+                       {"input_tokens": 9, "output_tokens": 1}, ())
+            app._usage = ledger
             written = []
             app._transcript.write_system = written.append
             from tui.commands import registry
             assert registry.dispatch(app, "/usage")
             await pilot.pause()
-            assert written == report_lines(tally)
+            assert written == report_lines(ledger)
+            assert "subagents · 1 call" in written
 
     @pytest.mark.asyncio
     async def test_the_tui_command_before_any_turn_writes_no_thread(
             self):
-        """`_memory`, never `memory`: asking must not create a thread."""
+        """Asking must not create a thread."""
         from tui.app import VenastineApp
 
         app = VenastineApp("ANTHROPIC", "test-model", {})
@@ -738,6 +890,85 @@ class TestUsageInEachShell:
             assert written == [
                 "usage · this thread since it was opened · no model calls yet"]
             assert app._memory is None
+
+    @pytest.mark.asyncio
+    async def test_a_tui_thread_worker_counts_into_the_thread_on_screen(
+            self):
+        """UF9. Every model run in the TUI is a thread worker, and a thread
+        starts with an empty context, so `run_worker` enters the ledger."""
+        import threading
+
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            ledger = app._usage
+            done = threading.Event()
+
+            def work():
+                usage_view.record("ANTHROPIC", "test-model",
+                                  {"input_tokens": 3})
+                done.set()
+
+            app.run_worker(work, thread=True, exit_on_error=False,
+                           name="probe")
+            assert await settle(pilot, done.is_set)
+            assert ledger.calls == 1 and app._usage is ledger
+
+    @pytest.mark.asyncio
+    async def test_a_new_thread_starts_a_new_ledger_and_late_calls_keep_theirs(
+            self):
+        """UF6. Switching thread counts from zero, as `billed` does; a
+        worker started for the thread before -- a background child, a run
+        still finishing -- lands in that thread's ledger, never this one."""
+        import threading
+
+        from tui.app import VenastineApp
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            before = app._usage
+            release, done = threading.Event(), threading.Event()
+
+            def work():
+                release.wait(10)
+                usage_view.record("ANTHROPIC", "test-model",
+                                  {"input_tokens": 3})
+                done.set()
+
+            app.run_worker(work, thread=True, exit_on_error=False,
+                           name="late")
+            app.memory = None               # /new
+            assert app._usage is not before
+            release.set()
+            assert await settle(pilot, done.is_set)
+            assert before.calls == 1 and app._usage.calls == 0
+
+    @pytest.mark.asyncio
+    async def test_a_memory_rebuilt_for_the_same_thread_keeps_its_ledger(
+            self):
+        """/grill-me reloads the thread it ran on into a new memory. That
+        is not a new span, so what the thread caused stays counted."""
+        from types import SimpleNamespace
+
+        from tui.app import VenastineApp
+
+        def _memory(thread):
+            return SimpleNamespace(thread_id=thread, billed_tokens=0,
+                                   last_input_tokens=0)
+
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            await pump(pilot, 2)
+            thread = uuid4()
+            app.memory = _memory(thread)
+            ledger = app._usage
+            app.memory = _memory(thread)
+            assert app._usage is ledger
+            app.memory = _memory(uuid4())
+            assert app._usage is not ledger
 
     @pytest.mark.asyncio
     async def test_the_usage_line_writes_millions_in_m(self):

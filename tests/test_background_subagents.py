@@ -588,6 +588,43 @@ class TestWhatTheChildInherits:
         assert _until(child.returned.is_set)
         assert child.kwargs["response_channel"] is channel
 
+    def test_its_calls_reach_the_spawning_threads_usage(self, agent, manager,
+                                                         mocker):
+        """ROADMAP_v3 §97 (UF6, UF9). The child spends on a session's
+        thread, AFTER the spawn has returned and the spawning turn has left
+        its counting scope, yet the calls are that thread's "subagents":
+        `start_subagent` hands the session thread a copy of the spawning
+        context, and the ledger rides in it."""
+        from core import usage_view
+
+        release = threading.Event()
+
+        class _Spending(_Child):
+            def __call__(self, **kwargs):
+                self.kwargs = kwargs
+                kwargs["on_thread"](CHILD)
+                self.released = release.wait(WAIT_S)
+                usage_view.record("SCRIPTED", kwargs["model"],
+                                  {"input_tokens": 40, "output_tokens": 4})
+                response = make_model_response(text=self.text)
+                response.thread_id = CHILD
+                self.returned.set()
+                return response
+
+        child = _install(mocker, _Spending())
+        ledger = usage_view.UsageLedger()
+        with usage_view.counting(ledger):
+            result = _spawn()
+        assert result["kind"] == ss.KIND_SUBAGENT
+        assert ledger.calls == 0
+        release.set()
+        assert _until(child.returned.is_set)
+        sections, _runs = ledger.snapshot()
+        assert [source for source in sections] == ["subagents"]
+        [(pair, tally)] = sections["subagents"]
+        assert pair == ("SCRIPTED", child.kwargs["model"])
+        assert tally.totals == {"input_tokens": 40, "output_tokens": 4}
+
     def test_escape_leaves_it_running(self, agent, manager, mocker,
                                       monkeypatch):
         """BG4. The turn's token stops the turn; the child has its own,

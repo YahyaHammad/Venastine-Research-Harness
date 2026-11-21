@@ -35,7 +35,7 @@ imports this module to register it, and core.loop imports tools.registry
 """
 
 import config
-from core import agent_activity
+from core import agent_activity, usage_view
 from storage import THREAD_KIND_SUBAGENT
 from tools.context import ToolContext
 
@@ -452,6 +452,12 @@ def run(params: dict, parent_context=None, parent_run=None,
         return {"error": str(e)}
 
 
+# ROADMAP_v3 §97 (UF8). Everything the child spends, its wakes and its own
+# children included, is the spawning thread's "subagents" in /usage. A
+# background child runs on a session's thread, which took the spawning
+# context with it (`start_subagent`'s copy_context), so the ledger is the
+# one its thread was counting when it was spawned.
+@usage_view.started(usage_view.SUBAGENTS)
 def _child_run(agent, task, child, common: dict, *, activity, memory,
                call_id, on_thread=None):
     """One spawned child's whole run, blocking or background, returning

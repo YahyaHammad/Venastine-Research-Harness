@@ -29,8 +29,10 @@ import config
 from agents import subagent_tool
 from core import agent_activity, config_loader
 from core.agent_activity import AgentActivity, AgentSpan
-from core.loop import RunAgentLoop
-from tests.conftest import make_model_response
+from core.client import StreamToken
+from core.interaction import ResponseChannel
+from core.loop import RunAgentLoop, run_to_completion
+from tests.conftest import FakeMemory, make_model_response
 from tools.context import ToolContext
 from tools.registry import registry
 from tui.widgets import AgentRow
@@ -536,6 +538,114 @@ class TestNothingChangesWhenNobodyIsWatching:
         result = subagent_tool.run({"agent_name": "worker", "task": "t"},
                                    parent_context=ToolContext())
         assert result == {"result": "done", "subagent_thread_id": "tid-1"}
+
+
+# ---------------------------------------------------------------------------
+# ---- ROADMAP_v3 §97 (UF6): a spawn's calls are the spawning thread's ---------
+# ---------------------------------------------------------------------------
+
+def _spawn_call(call_id, inp, out):
+    return make_model_response(
+        text="", tool_calls=[{"id": call_id, "name": "spawn_subagent",
+                              "input": {"agent_name": "worker", "task": "t"}}],
+        usage={"input_tokens": inp, "output_tokens": out})
+
+
+def _answer(text, inp, out):
+    return make_model_response(
+        text=text, usage={"input_tokens": inp, "output_tokens": out})
+
+
+def _scripted_by_model(script):
+    """A model stream answering from one queue per model, in call order:
+    the spawns run inside the parent's call, so the order is the stack's."""
+    queues = {model: list(responses) for model, responses in script.items()}
+
+    def _stream(client, provider_name, model, *args, **kwargs):
+        yield StreamToken(final_response=queues[model].pop(0))
+    return _stream, queues
+
+
+def _parent_turn(mocker, script, model):
+    from core import usage_view
+
+    stream, queues = _scripted_by_model(script)
+    mocker.patch("core.loop.api_initialization", return_value=object())
+    mocker.patch("core.loop.effort_for", return_value=None)
+    mocker.patch("core.loop.call_model_stream", side_effect=stream)
+    mocker.patch("memories.manager.manager.visible", return_value=[])
+    ledger = usage_view.UsageLedger()
+    with usage_view.counting(ledger):
+        run_to_completion(RunAgentLoop._run(
+            memory=FakeMemory(), system_prompt="s",
+            provider_name="ANTHROPIC", model=model, context=None,
+            max_steps=3,
+            response_channel=ResponseChannel(ask=lambda request: set()),
+            granted_tools=set()))
+    sections, _runs = ledger.snapshot()
+    return ({source: dict(blocks) for source, blocks in sections.items()},
+            queues)
+
+
+class TestASpawnsUsageIsTheSpawningThreads:
+    """`/usage` counts a thread's subagents at any depth, under the model
+    each ran on. Driven through the REAL loop and the real dispatch at every
+    level: only the model stream is scripted, so the recursion is the one a
+    session has, the span's own ContextVar beside the ledger's."""
+
+    def test_a_grandchilds_calls_reach_the_thread_that_started_it(
+            self, _roots, mocker, fake_storage):
+        """Depth 2, on an agent locked to a model of its own: the parent's
+        two calls are this thread's, and the child's two and the
+        grandchild's one are subagents', on the child's model."""
+        _write_harness_agent(_roots, "worker", fm_lines=("model: worker-model",))
+        config_loader.initialize(str(_roots["project"]))
+        sections, queues = _parent_turn(mocker, {
+            "main-model": [_spawn_call("p1", 100, 10),
+                           _answer("done", 200, 20)],
+            "worker-model": [_spawn_call("c1", 1000, 1),
+                             _answer("leaf", 2000, 2),
+                             _answer("middle", 3000, 3)],
+        }, model="main-model")
+
+        assert queues == {"main-model": [], "worker-model": []}, (
+            "a scripted call was never made, so the stack never reached "
+            "depth 2 and this test measured less than it says")
+        assert set(sections) == {"thread", "subagents"}
+        own = sections["thread"][("ANTHROPIC", "main-model")]
+        assert own.calls == 2 and own.totals == {"input_tokens": 300,
+                                                 "output_tokens": 30}
+        spawned = sections["subagents"]
+        assert list(spawned) == [("ANTHROPIC", "worker-model")]
+        assert spawned[("ANTHROPIC", "worker-model")].calls == 3
+        assert spawned[("ANTHROPIC", "worker-model")].totals == {
+            "input_tokens": 6000, "output_tokens": 6}
+
+    def test_a_submodel_childs_calls_are_under_the_submodel(
+            self, _roots, mocker, fake_storage):
+        """`/submodel` puts an unpinned agent on another pair (§57 SM7),
+        which is billed at its own rate, so it is its own block."""
+        from core import pipeline_models
+
+        _write_harness_agent(_roots, "worker")
+        config_loader.initialize(str(_roots["project"]))
+        real = pipeline_models.resolve
+        mocker.patch.object(
+            pipeline_models, "resolve",
+            side_effect=lambda role: ({"model": "sub-model",
+                                       "provider_name": "OTHER"}
+                                      if role == "subagent" else real(role)))
+        sections, queues = _parent_turn(mocker, {
+            "main-model": [_spawn_call("p1", 100, 10),
+                           _answer("done", 200, 20)],
+            "sub-model": [_answer("leaf", 50, 5)],
+        }, model="main-model")
+
+        assert queues == {"main-model": [], "sub-model": []}
+        assert list(sections["subagents"]) == [("OTHER", "sub-model")]
+        assert sections["subagents"][("OTHER", "sub-model")].totals == {
+            "input_tokens": 50, "output_tokens": 5}
+        assert list(sections["thread"]) == [("ANTHROPIC", "main-model")]
 
 # ---------------------------------------------------------------------------
 # ---- the sidebar panel ----------------------------------------------------
