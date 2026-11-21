@@ -80,8 +80,13 @@ import config
 from core import pipeline_models, usage_view
 from core.config_loader import effective_confidence, effective_source_scoring
 from core.loop import RunAgentLoop
+from core.reasoning import thin_evidence
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
-from core.reasoning.confidence_scoring import is_contested, run_confidence_tiering
+from core.reasoning.confidence_scoring import (
+    FLAGGED_TIERS,
+    is_contested,
+    run_confidence_tiering,
+)
 from core.reasoning.events import PipelineEvent
 from core.reasoning.json_retry import parse_json_response as _parse_json_response
 from core.reasoning.json_retry import stream_until_json, stream_until_text
@@ -101,7 +106,7 @@ from tools.registry import registry
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROVIDER = "ANTHROPIC"
-FLAGGED_TIERS = {"LOW", "UNVERIFIED"}
+# FLAGGED_TIERS is confidence_scoring's, imported above (ROADMAP_v3 §105).
 MAX_RETRIES = config.MAX_PIPELINE_RETRIES
 # The JSON-retry budget lives in core/reasoning/json_retry.py since the
 # §20 extraction; a second constant here was a dead knob that invited
@@ -1236,13 +1241,24 @@ def _tier_events(run: PipelineRun):
                             tier=claim.confidence_tier)
 
 
-def _apply_fallback(claim: Claim) -> None:
-    """D2 exhausted / fallback branch -- pure code, no LLM call."""
-    claim.confidence_tier = "UNVERIFIED"
-    claim.annotation = (
-        f"[UNVERIFIED] Could not be adequately verified after {claim.retry_count} "
-        f"revision attempt(s). Treat with caution."
-    )
+def _apply_fallback(claim: Claim, weights: dict | None = None) -> None:
+    """D2 exhausted branch -- pure code, no LLM call.
+
+    ROADMAP_v3 §105. THE TIER IS LEFT AS PASS 6b SCORED IT (XR1). This
+    used to set UNVERIFIED whatever the claim had earned, so a partly
+    grounded claim scoring 0.45 (LOW) was published under the label of a
+    claim nothing supports, beside a score_breakdown still saying 0.45 --
+    one label for two facts, and a breakdown that no longer recomputed
+    the tier (B10). Running out of rounds is recorded where it belongs,
+    in `loop_exhausted` and the annotation.
+
+    The published text is the last revision (XR3): it is the text 6b
+    grounded and critiqued (revalidate.md scores "the REVISED text, not
+    the original"), so it is the text the kept tier belongs to. `text`
+    still holds what the claim was first stated as, and the report's
+    "where the evidence is thin" section shows both."""
+    claim.loop_exhausted = True
+    claim.annotation = thin_evidence.annotation(claim, weights)
     claim.final_text = claim.revision_text or claim.text
 
 
@@ -1736,8 +1752,9 @@ def stream_deep_research_pipeline(
         # checked. ENTRY ONLY -- `still_flagged` below reads the tier alone.
         # Who asserted a claim does not change when 6a rewrites it, so a
         # loop that kept a contested claim for being contested would hold
-        # it to D2's cap and publish it UNVERIFIED, which is the defect the
-        # E8 penalty had.
+        # it to D2's cap for a reason no revision can change, which is the
+        # defect the E8 penalty had (it was published UNVERIFIED then; since
+        # §105 it would be published as having run out of rounds).
         if not done("D1"):
             flagged = [c for c in run.claims
                        if c.confidence_tier in FLAGGED_TIERS or is_contested(c)]
@@ -1870,11 +1887,16 @@ def stream_deep_research_pipeline(
                 # per claim, so a round that exhausted six claims would
                 # read as six separate stages.
                 yield from _stage("D2")
+            # §105 (XR1): no claim_tiered event here any more. D2 used to
+            # change the tier, and the panel had to hear of it; it now
+            # keeps the tier 6b scored, which _tier_events above has
+            # already reported.
             for c in exhausted:
-                _apply_fallback(c)
-                yield PipelineEvent(kind="claim_tiered", claim_id=c.id,
-                                    tier=c.confidence_tier)
-                yield from progress.checkpoint(f"D2: claim {c.id} exhausted retries ({c.retry_count}) -> fallback UNVERIFIED.")
+                _apply_fallback(c, confidence_weights)
+                yield from progress.checkpoint(
+                    f"D2: claim {c.id} exhausted retries ({c.retry_count}) "
+                    f"-> kept {c.confidence_tier}, limited by "
+                    f"{thin_evidence.reason(c, confidence_weights)}.")
 
             flagged = [c for c in still_flagged if c.retry_count < MAX_RETRIES]
             # §98: the round is over, D2 included. The point names the batch
@@ -1886,6 +1908,9 @@ def stream_deep_research_pipeline(
             for claim in run.claims:
                 if claim.final_text is None:
                     claim.final_text = claim.revision_text or claim.text
+                # §105 (XR2): no flagged claim reaches here without an
+                # annotation. D1 takes every flagged claim into the loop,
+                # and each leaves it clean or exhausted, which D2 annotates.
                 if claim.annotation is None:
                     claim.annotation = f"[{claim.confidence_tier}]"
             yield from _stage("Pass 6c")
@@ -1906,6 +1931,15 @@ def stream_deep_research_pipeline(
                                  authorization, review,
                                  enabled=subagent_review, effort=effort,
                                  activity=activity)
+
+        # --- §105 (XR4): where the evidence is thin (pure code) ---
+        # AFTER the review, which can change a claim's tier and regenerate
+        # the report, and before the run is stored and announced, so every
+        # shell's copy of the report has it: report.md and report.pdf, the
+        # CLI's printout, the TUI's answer and /copy all read final_report.
+        # The reviewer reads the report before this, the model's text alone.
+        run.final_report = thin_evidence.with_section(
+            run.final_report, run.claims, confidence_weights)
 
         update_pipeline_run(run.run_id, run, status="complete")
         yield PipelineEvent(kind="run_complete", run=run)

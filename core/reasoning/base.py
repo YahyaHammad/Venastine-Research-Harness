@@ -95,6 +95,11 @@ class Claim:
     # Populated by the D1/6a/6b/D2/fallback retry loop.
     revision_text: Optional[str] = None
     retry_count: int = 0
+    # ROADMAP_v3 §105 (XR1). True when D2 ended this claim's revisions
+    # because it ran out of rounds while still flagged. Its tier stays the
+    # one Pass 6b scored; this field, with retry_count, is what records
+    # that the rounds ran out. UNVERIFIED means only what Pass 5 means.
+    loop_exhausted: bool = False
 
     # Populated by 6c (annotate) / fallback -- the actual final text and
     # confidence tag a claim carries into the merged output.

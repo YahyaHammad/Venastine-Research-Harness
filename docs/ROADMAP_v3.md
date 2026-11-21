@@ -49,6 +49,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§99. A pass being corrected is seen while it runs** - **(BUILT in batch 270)** (a JSON pass's corrective retry, and a prose pass's no-text one, reached the model through `continue_conversation`, which drains its own loop: the owner's resumed Pass 6b spent 25 minutes and 14 model calls correcting one answer with its tool count frozen and its row gone from the panel, and looked hung. A retry now goes through the pass's own entry point, so its tool calls, its row and its character total show as the attempt's do, its reason is saved and shown the moment the parse fails, and its fetched pages reach the corpus; SR1-SR6)
 - **§100. A subagent that runs while its parent works** - **(BUILT in batch 271)** (a spawn blocked its parent until the child answered, and NA9's parallelism existed only within one reply, so the main agent could not delegate and keep working; SS10 had deferred background subagents since §49. `spawn_subagent` takes `background: true`, which returns at once and runs the child as a session of kind `subagent` (ids `a1`, `a2`, ...) that shares the session cap, the post-turn wait, kill and quit, and wakes the parent with its answer; it asks for approval as a blocking child does, escape leaves it running, the CLI's reader gives a question the terminal, and `shell_sessions`, `shell_output` and `shell_kill` ship on; BG1-BG10)
 - **§101. Flags a full-screen launch dropped: `--effort`, `--thread` and `--ref` under `--tui`** - **(BUILT in batch 277; LF5 in batch 278)** (`run_tui()` received the provider and model and nothing else, so `--tui --effort low` ran at the shipped `high` with `high` in the sidebar, the `--thread` a `/config` restart writes was ignored by the TUI it relaunched, and `--ref` attached nothing. All three reach the TUI now: the flag's effort outranks `tui.effort`, the thread opens at mount through `switch_to_thread`, the references attach through `/ref`'s writer and a restart does not attach them twice; and a census read from the parser gives every flag one answer under `--tui`. Batch 278 refuses `--tui` with a data command such as `--memories`, which ran while `--tui` went unused, and names the slash command; LF1-LF5)
+- **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280)** (D2 overwrote the tier of every claim that ran out of revision rounds with UNVERIFIED, so a partly grounded claim scoring 0.45 (LOW) was published as one nothing supports beside a breakdown still saying 0.45. D2 keeps the tier 6b scored and records `loop_exhausted`; a flagged claim names its largest deduction; an exhausted claim publishes the revision 6b scored with what it was first stated as beside it; and every shell's report ends with a code-rendered "Where the evidence is thin" section, built after the review; XR1-XR4)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -3068,6 +3069,115 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §105. A claim that ran out of rounds keeps the tier it earned
+
+**Proposed 2026-11-20 in `ROADMAP_v3_researcher_feedback.md`, accepted by the owner and built in
+batch 280 (2026-11-21).** A researcher's run printed `Pass 6b: 0 claim(s) now clean, 37 still
+flagged`, then 37 lines of `D2: claim cXXX exhausted retries (2) -> fallback UNVERIFIED`, and the
+tally moved from `low 36, unverified 1` to `medium 50, unverified 37`. They read it as the retries
+running out, and the code says they were right. To that reader the flagged claims are the most
+informative part of a run, because that is where the real problems with the research live, and the
+tier and annotation were the least specific thing about them. The proposal's §105 is this section;
+the feedback document now points here.
+
+### What the code did (main `3e56722`, 0.3.22)
+
+- **`_apply_fallback` set `confidence_tier = "UNVERIFIED"` whatever Pass 6b had scored.** Measured
+  with the real `score_claim` and `_apply_fallback`:
+
+  | the claim as 6b left it | 6b's tier | `raw_score` | after D2 |
+  |---|---|---|---|
+  | factual, partial grounding, one assumption flag | LOW | 0.45 | UNVERIFIED, `raw_score` still 0.45 |
+  | factual, partial grounding, critic severity 0.4 | LOW | 0.46 | UNVERIFIED, still 0.46 |
+  | factual, grounded, two flags, severity 0.5 | LOW | 0.375 | UNVERIFIED, still 0.375 |
+  | speculative, severity 0.5, one flag | LOW | 0.35 | UNVERIFIED, still 0.35 |
+  | factual, ungrounded | UNVERIFIED | 0.35 | UNVERIFIED |
+
+  So one label meant two things, "nothing supports this" (Pass 5's forced rule, and any score under
+  0.3) and "partly supported, and two rounds did not raise it"; and the breakdown no longer
+  recomputed the tier, the property ROADMAP_v2 §30 (B10) and §66 both defend.
+- **The annotation said only that it "could not be adequately verified".** Nothing said what had
+  held the claim back, although its `score_breakdown` already recorded every deduction.
+- **The published text was the revision**, `revision_text or text`, with nothing to show it had not
+  cleared or what the claim first said.
+- **`report.md` was the synthesis model's text and nothing else.** `final_synthesis.md` tells the
+  model to compose the claims and not to talk about how they were checked, so no list of the weak
+  claims could come from it complete.
+- **The proposal had one thing backwards, found by reading `revalidate.md`.** Pass 6b grounds and
+  critiques the REVISED text ("Assign a fresh `grounded`/`partial`/`ungrounded` status based on the
+  REVISED text, not the original"), so the tier it scores is the revision's. Publishing the original
+  with the revision beside it, as the proposal's XR3 read, would have put the revision's tier on the
+  original's words.
+
+### Decisions (XR1-XR4)
+
+| # | Decision |
+|---|---|
+| **XR1** | **D2 keeps the tier Pass 6b scored and sets `Claim.loop_exhausted`**; UNVERIFIED means what Pass 5 means and nothing else. The round count is `retry_count`, as before. D2 no longer emits `claim_tiered`, since it changes no tier, and its trace line says what it kept and why: `D2: claim c012 exhausted retries (2) -> kept LOW, limited by an assumption it rests on ("rests on one preprint").` |
+| **XR2** | **A flagged claim names what limited it: the largest deduction** (owner, over every deduction ranked), read off its `score_breakdown` with the weights that scored it (`confidence_scoring.deductions` and `limiting_factor`). The deductions are measured from the best each part could give: no or partial grounding, source quality, the critic, and the assumption flags; a tie goes to the earlier of those. A factual claim nothing grounds is forced to UNVERIFIED by Pass 5's rule, so that is its reason; a tier the §20 review set is the review's. An exhausted claim's annotation is `[LOW] Did not clear after 2 rounds of revision; limited by an assumption it rests on ("rests on one preprint").`, and a flagged tier the review set is `[LOW] Limited by the review's correction.` |
+| **XR3** | **An exhausted claim publishes its last revision, the text its kept tier belongs to, and shows the text it was first stated as beside it** (owner, amending the proposal, which had the original published with the revision beside it). Both are in the report's section (XR4) and in `/claims`. A claim that cleared shows only the text that cleared, as `/claims` always has |
+| **XR4** | **The report ends with a code-rendered "Where the evidence is thin" section**: every claim whose final tier is LOW or UNVERIFIED, under XR2's reason, in that order, each group with its count. An entry gives the tier, the rounds when they ran out, the published text, the first statement when it differs, and the critic's first finding or the first assumption flag when that is the reason. It is added to `final_report` after the §20 review, which can change a tier and regenerate the report, and before the run is stored and announced (owner: in every shell's report), so `report.md`, `report.pdf`, the CLI's printout, the TUI's answer and `/copy` all carry it. A run resumed after it was added does not get it twice |
+
+XR2's reason being the largest deduction alone, XR3's text and XR4's placement are the owner's
+choices; XR1 is the proposal's, accepted as written. The section's layout is the one the owner
+approved, with its second-level lines written as nested list items so a Markdown renderer keeps
+them on their own lines.
+
+### What §105 deliberately does not change
+
+- **The formula, the weights, the thresholds, D1's routing and D2's cap.** No claim scores
+  differently; an exhausted one is labelled with what it scored.
+- **Pass 6b still does not re-run Pass 4** (AGENTS.md's known gap). A claim flagged for an
+  assumption still cannot clear by revision; it now ends at the LOW it scored, named as limited by
+  that assumption, rather than UNVERIFIED.
+- **Coverage gaps are not in the section.** UNVERIFIED_COVERAGE entries are absences rather than
+  claims, and final synthesis is already told to disclose them.
+- **The synthesis prompt.** The model still writes the report from `vars(c)`, which now carries the
+  new annotations and `loop_exhausted`. The §20 reviewer reads the report before the section.
+
+### Built (batch 280)
+
+- **`core/reasoning/base.py`**: `Claim.loop_exhausted`, JSON-native, so every `vars(c)` site and
+  §98's resume carry it.
+- **`core/reasoning/confidence_scoring.py`**: `FLAGGED_TIERS` (moved from `orchestrator.py`, which
+  imports it), the `LIMIT_*` keys and their order, `deductions` and `limiting_factor`.
+- **`core/reasoning/thin_evidence.py`** (new): `reason`, `annotation`, `section` and
+  `with_section`.
+- **`core/reasoning/orchestrator.py`**: `_apply_fallback` keeps the tier (XR1, XR3); D2's line; the
+  section after the review (XR4).
+- **`core/reasoning/review.py`**: a flagged tier the review sets gets XR2's annotation.
+- **`core/reasoning/output_writer.py`**: `06_revisions.json` records `loop_exhausted`.
+- **`core/claims_view.py`**: an exhausted claim's heading says it did not clear, and its first
+  statement follows its text.
+
+Tests: `tests/test_thin_evidence.py` (the measured claim stays LOW and its breakdown recomputes its
+tier, each deduction and each reason, the annotations, the section in the approved layout, once on
+a resume, `/claims` and `06_revisions.json`), the loop's four exhaustion tests in
+`tests/test_orchestrator.py` (the D2 line and the report's section end to end), and in
+`tests/test_review.py` the review's annotation both ways and
+`test_the_thin_evidence_section_is_built_after_the_review`, which stores the report as the section
+left it. Twenty-seven mutations, one per line that carries a decision, were each killed by a
+failed assertion. The first pass left four alive. Three were gaps in the harness itself: it did
+not select the review's annotation tests, and one mutant added a call instead of moving it. The
+fourth was a real gap: an unrecognised grounding status matters only when another deduction
+outweighs "no source", and a test now covers that case.
+
+### Gap register
+
+- **Every count of tiers changes.** The panel, `/claims`, the confidence chart and anything reading
+  `05_confidence.json` now count an exhausted claim at the tier it scored. A script that read
+  UNVERIFIED as "ran out of rounds" should read `loop_exhausted`.
+- **A run stored before this batch and resumed after D2** keeps its claims' old UNVERIFIED tier and
+  annotation; the section lists them as UNVERIFIED with no rounds, since `loop_exhausted` was not
+  recorded then.
+- **The section's text is the claims' own.** A claim containing Markdown renders as Markdown inside
+  its quotes, as the synthesis model's text always has.
+- **The wiki's user guide** (a separate repository) may still describe D2's UNVERIFIED fallback.
+- **A "retry honesty" figure** (the owner's notes, outside this repository) can now be computed from
+  `loop_exhausted`; it is not built.
+
 ---
 
 ## §101. Flags a full-screen launch dropped: `--effort`, `--thread` and `--ref` under `--tui`

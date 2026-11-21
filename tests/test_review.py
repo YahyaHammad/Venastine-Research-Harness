@@ -912,8 +912,24 @@ class TestReviewHardening:
         make_stage(run, mocker, consent=_consent(("accept", "")))
 
         assert run.claims[0].confidence_tier == "LOW"
-        assert run.claims[0].annotation == "[LOW]"
+        # ROADMAP_v3 §105 (XR2): a flagged tier says what limited it, and
+        # one the review set was limited by the review.
+        assert run.claims[0].annotation == (
+            "[LOW] Limited by the review's correction.")
         assert run.claims[0].score_breakdown["review_override"] == "LOW"
+
+    def test_a_tier_override_to_a_clean_tier_keeps_the_bare_tag(
+            self, mocker, make_stage):
+        """§105 changes the tag of a FLAGGED tier only: a review that
+        raises a claim to MEDIUM tags it [MEDIUM], as before."""
+        run = _reviewed_run()
+        _stub_reviewer(mocker, [dict(TIER_FINDING, proposed="MEDIUM")])
+        _stub_resynthesis(mocker)
+
+        make_stage(run, mocker, consent=_consent(("accept", "")))
+
+        assert run.claims[0].confidence_tier == "MEDIUM"
+        assert run.claims[0].annotation == "[MEDIUM]"
 
     def test_an_equal_value_correction_is_a_no_op(self, mocker, make_stage):
         """r4-1: accepting a 'correction' equal to the current value must
@@ -1215,6 +1231,49 @@ class TestTheStageIsWiredIntoThePipeline:
             user_query="q", model="m", provider_name="ANTHROPIC")
 
         assert order[-2:] == ["Final synthesis", "review"]
+
+    def test_the_thin_evidence_section_is_built_after_the_review(self, mocker):
+        """ROADMAP_v3 §105 (XR4). The review can lower a tier and
+        regenerate the report, so the section is built from the claims
+        the review left, onto the report it left, and stored that way.
+        Built before the review, the reviewer's LOW would be missing from
+        it and the regenerated report would have no section at all."""
+        from core.reasoning import orchestrator
+
+        canned = dict(_CANNED, **{
+            "Pass 2": json.dumps([{"id": "c1", "text": "original text",
+                                   "type": "synthesis"}])})
+        mocker.patch.object(orchestrator, "create_pipeline_run",
+                            return_value=uuid4())
+        # The report AS STORED, copied at the call: the run is one object,
+        # so its call_args would show the report as it is at the end.
+        stored = []
+        mocker.patch.object(
+            orchestrator, "update_pipeline_run",
+            side_effect=lambda run_id, run, **k: stored.append(
+                (k.get("status"), run.final_report)))
+        mocker.patch.object(
+            orchestrator, "_run_pass",
+            side_effect=_as_generator(lambda *a, **k: "REPORT v1"))
+        mocker.patch.object(
+            orchestrator, "_run_pass_with_json_retry",
+            side_effect=_as_generator(lambda pass_id, *a, **k: canned[pass_id]))
+
+        def _review(run, *a, **k):
+            # What an accepted tier finding and its re-synthesis leave.
+            review_module._apply_one(run, dict(TIER_FINDING, decision="accept"))
+            run.final_report = "REPORT v2"
+
+        mocker.patch.object(orchestrator, "_review_stage",
+                            side_effect=_as_generator(_review))
+
+        run = run_pipeline(user_query="q", model="m", provider_name="ANTHROPIC")
+
+        assert run.claims[0].confidence_tier == "LOW"
+        assert run.final_report.startswith("REPORT v2\n\n## Where the evidence is thin")
+        assert run.final_report.endswith(
+            '### Set by the review (1)\n\n- LOW: "original text"\n')
+        assert stored[-1] == ("complete", run.final_report)
 
 
 _CANNED = {

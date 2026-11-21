@@ -50,6 +50,8 @@ from core import agent_activity, interaction, usage_view
 # already use -- two spellings of the same four strings is how a decoder and
 # its caller come to disagree about what "refine" is.
 from core.interaction import ACCEPT, REFINE, REJECT, REJECT_ALL
+from core.reasoning import thin_evidence
+from core.reasoning.confidence_scoring import FLAGGED_TIERS
 from core.reasoning.json_retry import parse_json_response, retry_until_json
 from storage import THREAD_KIND_SUBAGENT
 
@@ -633,12 +635,6 @@ def _apply_one(run, decision) -> bool:
         if claim.confidence_tier == decision["proposed"]:
             return False
         claim.confidence_tier = decision["proposed"]
-        # The old tier's tag would otherwise contradict the corrected
-        # tier inside the re-synthesis input and in every vars(c) dump
-        # (02_claims.json, claims_json) -- the same stale-field class the
-        # review_override marker below was added for, one field over
-        # (review r3-1).
-        claim.annotation = f"[{decision['proposed']}]"
         # Pass 5's breakdown was computed from grounding and critic data
         # that the review did not change, so it still describes the OLD
         # tier. Without this marker 05_confidence.json shows a 0.91
@@ -647,6 +643,16 @@ def _apply_one(run, decision) -> bool:
         # adds no field to Claim and triggers no vars(c) migration (V8).
         claim.score_breakdown = dict(claim.score_breakdown or {})
         claim.score_breakdown["review_override"] = decision["proposed"]
+        # The old tier's tag would otherwise contradict the corrected
+        # tier inside the re-synthesis input and in every vars(c) dump
+        # (02_claims.json, claims_json) -- the same stale-field class the
+        # review_override marker above was added for, one field over
+        # (review r3-1). A flagged tier also says what limited it, which
+        # is the review (ROADMAP_v3 §105, XR2); limiting_factor reads that
+        # from the marker, which is why the marker is set first.
+        claim.annotation = (thin_evidence.annotation(claim)
+                            if claim.confidence_tier in FLAGGED_TIERS
+                            else f"[{decision['proposed']}]")
         return True
 
     return False

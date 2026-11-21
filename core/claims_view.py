@@ -79,11 +79,23 @@ def render_claims(claims: list) -> str:
         head = f"{tier:<20} {claim.get('id', '?')}  {claim.get('type') or ''}"
         if claim.get("retry_count"):
             head += f"   revised x{claim['retry_count']}"
+            # ROADMAP_v3 §105 (XR1): the tier no longer says the rounds ran
+            # out, so the heading does.
+            if claim.get("loop_exhausted"):
+                head += ", did not clear"
         out.append(head.rstrip())
         # final_text is what the claim carries into the report; text is
         # what Pass 2 extracted. Showing final_text when they differ means
         # the view matches the report rather than the draft behind it.
-        out.append(f"  {claim.get('final_text') or claim.get('text') or ''}")
+        # Except (§105, XR3) for a claim whose rounds ran out: its revision
+        # never cleared, and the report shows what it was first stated as
+        # beside it, so the view does too. A claim that cleared shows only
+        # the text that cleared.
+        shown = claim.get("final_text") or claim.get("text") or ""
+        out.append(f"  {shown}")
+        if (claim.get("loop_exhausted") and claim.get("text")
+                and claim["text"] != shown):
+            out.append(f"  first stated as: {claim['text']}")
         if claim.get("entities"):
             out.append("  entities: "
                        + ", ".join(as_display_list(claim["entities"])))
