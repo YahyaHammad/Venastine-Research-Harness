@@ -1,6 +1,6 @@
 {
   "name": "@yahyahammad/venastine",
-  "version": "0.3.22-b.1.exhausted-claim-tier.r684b0e917dd8",
+  "version": "0.3.23",
   "description": "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline.",
   "keywords": [
     "agent",
