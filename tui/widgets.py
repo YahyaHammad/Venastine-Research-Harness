@@ -19,20 +19,24 @@ nothing here reads config, storage, a session or a tool.
 """
 
 import webbrowser
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from rich import box
 from rich.cells import cell_len
 from rich.console import Console
 from rich.measure import measure_renderables
+from rich.segment import Segment
 from rich.style import Style
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from textual.binding import Binding
 from textual.content import Content
+from textual.dom import NoScreen
 from textual.message import Message
 from textual.reactive import reactive
+from textual.strip import Strip
 from textual.widgets import ContentSwitcher, RichLog, Static, TextArea
 
 from core.ansi import AnsiStripper
@@ -2275,6 +2279,46 @@ class PromptInput(TextArea):
         super().action_cursor_down(select)
 
 
+def new_lines_marker(count: int) -> str:
+    """A transcript's bottom-border note while its reader is scrolled up
+    (ROADMAP_v3 §103 SV1): empty until output arrives below them, then how
+    many rows of it. The owner chose a count over a standing "more below",
+    which the scrollbar already says."""
+    if count <= 0:
+        return ""
+    return f"\u25bc {count} new line{'' if count == 1 else 's'} below"
+
+
+def _highlight_span(strip: Strip, start: int, end: int, style: Style) -> Strip:
+    """`strip` with characters `[start, end)` drawn in `style` (§103 SV2).
+
+    CHARACTERS, not cells, and that is the one thing here that is easy to
+    get wrong. The positions the screen hands back count characters --
+    `Strip.apply_offsets` advances by `len(segment.text)`, and the
+    compositor walks a wide character's two cells back to one index -- so
+    a cell split such as `Segment.divide` would highlight a row of CJK text
+    at the wrong place. `end == -1` is "to the end of the row", which is
+    `Selection.get_span`'s convention.
+    """
+    out = []
+    position = 0
+    for segment in strip:
+        text, base, control = segment
+        first, past = position, position + len(text)
+        position = past
+        if control or past <= start or (end != -1 and first >= end):
+            out.append(segment)
+            continue
+        cut = max(start - first, 0)
+        stop = len(text) if end == -1 else min(end - first, len(text))
+        if cut:
+            out.append(Segment(text[:cut], base))
+        out.append(Segment(text[cut:stop], base + style if base else style))
+        if stop < len(text):
+            out.append(Segment(text[stop:], base))
+    return Strip(out, strip.cell_length)
+
+
 class Transcript(RichLog):
     """The conversation. Code fences render highlighted via Rich's Syntax.
 
@@ -2353,7 +2397,12 @@ class Transcript(RichLog):
     """
 
     def __init__(self, **kwargs):
-        super().__init__(wrap=True, markup=False, **kwargs)
+        # ROADMAP_v3 §103. `auto_scroll` OFF FOR GOOD: RichLog scrolls to
+        # the end on every write whatever the reader is doing, which is the
+        # defect -- measured, a reader at row 5 of 40 was at the bottom
+        # again after five streamed rows. `write()` passes
+        # `scroll_end=False` and the follow flag below decides instead.
+        super().__init__(wrap=True, markup=False, auto_scroll=False, **kwargs)
         self._pending = ""
         self._entries: list[tuple[str, str]] = []
         # Batch 65. Click TARGETS for entry N, when the drawn line is
@@ -2394,6 +2443,16 @@ class Transcript(RichLog):
         # `retract_to_mark` truncates back to. None means nothing is
         # retractable. See that method for why a mark and not a span.
         self._retract_mark: int | None = None
+        # ROADMAP_v3 §103 (SV1). Whether new output scrolls this pane, how
+        # many rows have arrived below a reader who scrolled up, whether a
+        # redraw is emptying and refilling the pane (so the rows it draws
+        # again are not new, and a reset inside it is a repaint rather than
+        # a new pane), and whether a scroll to the end is already queued.
+        # See `following` for the rule.
+        self._following = True
+        self._unseen = 0
+        self._redrawing = 0
+        self._end_pending = False
         # Batch 145. Three, and each one is measured -- see
         # `_strip` for the vocabulary and `_new_strippers` for why the
         # count is three rather than one.
@@ -2500,13 +2559,22 @@ class Transcript(RichLog):
         # which is what `on_resize` compares against, so a resize that does
         # not change the wrap width (a height-only drag) redraws nothing.
         self._drawn_width = self._wrap_width()
+        rows = len(self.lines)
         if args:
             # Textual's own replay (or any positional caller): pass
             # through byte-identical, never merging a keyword beside it.
-            return super().write(content, *args, **kwargs)
-        if width is None:
-            width = self._borrowed_render_width(content, **kwargs)
-        return super().write(content, width=width, **kwargs)
+            # A deferred write was stored with the `scroll_end=False` the
+            # branch below passes, so its replay does not scroll either.
+            result = super().write(content, *args, **kwargs)
+        else:
+            if width is None:
+                width = self._borrowed_render_width(content, **kwargs)
+            # §103: never RichLog's scroll. `_after_write` follows, or
+            # counts the rows for the marker, from the one flag.
+            kwargs["scroll_end"] = False
+            result = super().write(content, width=width, **kwargs)
+        self._after_write(len(self.lines) - rows)
+        return result
 
     def _borrowed_render_width(self, content, expand: bool = False,
                                shrink: bool = True,
@@ -3567,6 +3635,16 @@ class Transcript(RichLog):
         # thread's Nth line with the previous thread's run.
         self._opens.clear()
         self.clear()
+        if not self._redrawing:
+            # §103. A pane emptied for something NEW -- a resumed thread,
+            # a viewer opened on another run -- starts at the bottom,
+            # following, with nothing selected. Inside `keeping_place` the
+            # same reset is a repaint of what the reader is looking at, and
+            # that restores all three itself.
+            self._following = True
+            self._unseen = 0
+            self._show_marker()
+            self._drop_selection()
 
     def opens_at(self, index: int) -> tuple:
         """The `(kind, call id)` recorded for entry `index`, or `()`
@@ -3593,7 +3671,12 @@ class Transcript(RichLog):
         does not (TECHNICAL_DEBT 23).
         """
         self.flush_stream()
-        self._replay()
+        # §103. /theme still lands at the bottom, but now because it is
+        # typed at the prompt and a submit follows (SV1), not because the
+        # replay scrolled: a redraw keeps the place of a reader who
+        # scrolled up, whoever started it.
+        with self.keeping_place():
+            self._replay()
 
     def _replay(self) -> None:
         """Draw `_entries` from an empty screen. The shared half of
@@ -3638,6 +3721,12 @@ class Transcript(RichLog):
         on-screen sibling through `_region_width` and DOES reflow, which is
         batch 90's fix and the reason this cannot simply skip hidden panes.
         """
+        if self._following:
+            # §103. A pane that got SHORTER while following is no longer
+            # at its bottom and nothing scrolled to say so -- `scroll_y`
+            # did not change, so `watch_scroll_y` never ran. The prompt's
+            # suggestion panel opening is the everyday case.
+            self._schedule_end()
         width = self._wrap_width()
         if not width or width == self._drawn_width:
             return
@@ -3657,14 +3746,17 @@ class Transcript(RichLog):
         """
         if not self._wrap_width():
             return
-        fraction, at_bottom = self._scroll_fraction()
-        # AUTO-SCROLL OFF FOR THE REDRAW. RichLog scrolls to the end after
-        # every write, and it DEFERS that scroll to after the next screen
-        # refresh -- so a position set here would be overwritten a frame
-        # later by the last write's pending scroll_end, and the reader
-        # would land at the bottom however carefully it was computed.
-        # `rerender()` is left alone: /theme belongs at the bottom.
-        auto, self.auto_scroll = self.auto_scroll, False
+        fraction, _ = self._scroll_fraction()
+        # §103. What stood here turned RichLog's `auto_scroll` off for the
+        # redraw, because its deferred scroll_end would overwrite the
+        # position a frame later. It is off for good now, and the FOLLOW
+        # FLAG says what "at the bottom" means rather than the position
+        # does: a reader one row up is a reader who scrolled up. The
+        # redraw is fenced so the rows it draws again are not counted as
+        # new output, and the reader's place is put back after it.
+        following = self._following
+        held = self._held_selection()
+        self._redrawing += 1
         try:
             self._uncommit_partial_line()
             self._replay()
@@ -3677,8 +3769,14 @@ class Transcript(RichLog):
             self._commit_ready()
             self._commit_thinking_ready()
         finally:
-            self.auto_scroll = auto
-        self._restore_scroll(fraction, at_bottom)
+            self._redrawing -= 1
+        # Both restores are IMMEDIATE, so the position is current and the
+        # flag can be read straight back off it.
+        self._restore_scroll(fraction, following)
+        self._sync_follow()
+        # A new width re-wraps every row, so a selection is cleared here
+        # unless nothing it covered moved (SV2).
+        self._settle_selection(held)
 
     def _uncommit_partial_line(self) -> None:
         """Give an open span's half-drawn line back to its pending buffer.
@@ -3795,11 +3893,14 @@ class Transcript(RichLog):
         # closed -- which is correct here and is exactly what `reflow()`
         # must NOT do, the one place the two callers differ.
         self._retract_mark = None
-        self._replay()
-        # No scroll restore, unlike `reflow()`. A retraction happens at the
-        # live end of the transcript with the reader watching it, so
-        # `auto_scroll` keeping them at the bottom is the right answer --
-        # `/theme`'s reasoning, not a resize's.
+        # §103. What stood here said a retraction needed no scroll restore
+        # because the reader is watching the live end. A reader who is
+        # FOLLOWING still is, and stays at the bottom; one who scrolled up
+        # to read was being taken there by the retry of a call they were
+        # not watching. A selection over the retracted rows goes with them
+        # (SV2), one above them stays.
+        with self.keeping_place():
+            self._replay()
         if note:
             # AND IT SURVIVES THE NEXT RETRACTION for free, which is worth
             # a sentence because the first version of this method bought
@@ -3835,6 +3936,239 @@ class Transcript(RichLog):
             return
         self.scroll_to(y=round(fraction * self.max_scroll_y),
                        animate=False, immediate=True)
+
+    # -- the reader's place (ROADMAP_v3 §103 SV1, SV4) -----------------------
+
+    @property
+    def following(self) -> bool:
+        """Whether new output scrolls this pane (§103 SV1).
+
+        True while the reader is at the bottom, false from the moment they
+        scroll up, true again when they get back there -- or when anything
+        is submitted at the prompt, which calls `follow()` (the owner's
+        choice, so what was sent is seen landing). One rule for all four
+        panes (SV4), because they are this widget.
+        """
+        return self._following
+
+    def follow(self) -> None:
+        """Follow new output again, from the bottom (SV1)."""
+        self._following = True
+        self._unseen = 0
+        self._show_marker()
+        self._schedule_end()
+
+    def _at_bottom(self) -> bool:
+        return round(self.scroll_y) >= self.max_scroll_y
+
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        """Every scroll decides whether the pane follows.
+
+        ONE place reads the position, so a wheel, a scrollbar drag and a
+        key all count and nothing has to know which moved it. The write
+        path never moves `scroll_y` itself -- it appends rows and queues
+        `_end_if_following` -- so a change seen here is a scroll, not a
+        write. Nor is a redraw one: `clear()` and the refill happen in one
+        call, and the position is clamped only at the next refresh, by when
+        the rows are back. Measured: a reader at row 30 was at row 30 after
+        a `clear()` and sixty rows drawn again, and this never ran.
+        """
+        super().watch_scroll_y(old_value, new_value)
+        self._sync_follow()
+
+    def _sync_follow(self) -> None:
+        self._following = self._at_bottom()
+        if self._following:
+            self._unseen = 0
+        self._show_marker()
+
+    def _schedule_end(self) -> None:
+        """Scroll to the end after the next refresh, if still following.
+
+        DECIDED WHEN IT RUNS, not when it is asked for, which is the one
+        difference from RichLog's own `scroll_end(immediate=False)`: a
+        reader who scrolls up between a write and its deferred scroll would
+        otherwise be taken back by a scroll queued before they moved. One
+        queued at a time, because a streamed answer writes many rows a
+        frame.
+        """
+        if self._end_pending:
+            return
+        self._end_pending = True
+        self.call_after_refresh(self._end_if_following)
+
+    def _end_if_following(self) -> None:
+        self._end_pending = False
+        if self._following:
+            self.scroll_end(animate=False, immediate=True, x_axis=False)
+
+    def _after_write(self, added: int) -> None:
+        if self._following:
+            self._schedule_end()
+        elif added > 0 and not self._redrawing:
+            self._unseen += added
+            self._show_marker()
+
+    def _show_marker(self) -> None:
+        """Say how much new output is below a reader who scrolled up.
+
+        Capped by the rows actually below the view, because a retraction
+        can take back rows that were counted and a reflow re-wraps them.
+        """
+        count = 0
+        if not self._following:
+            below = max(0, self.max_scroll_y - round(self.scroll_y))
+            count = min(self._unseen, below)
+        note = new_lines_marker(count)
+        if self.border_subtitle != note:
+            self.border_subtitle = note
+
+    @contextmanager
+    def keeping_place(self):
+        """Redraw inside this and a reader who scrolled up stays put (SV4).
+
+        For the redraws that EMPTY the pane and fill it again: a viewer's
+        poll repainting a live run or session, a retraction, a /theme
+        replay. Outside this a `reset()` is a NEW pane, which follows, so
+        the refill queued a scroll to the end -- measured, a reader scrolled
+        up in a live run's viewer was taken to the bottom every time the run
+        wrote, because the poll repaints the whole pane. Inside it the
+        reset is a repaint and the follow flag carries over.
+
+        The ROW needs no restoring, and an explicit restore here was removed
+        when the mutation pass showed nothing could tell it was there: the
+        refill happens in the same call as the `clear()`, and the position
+        is clamped only at the next refresh (see `watch_scroll_y`). These
+        redraws keep the width, so the rows above any change are drawn
+        again where they were; `reflow()` changes the width and keeps a
+        fraction instead.
+
+        Rows the redraw added count as new output for the marker, and rows
+        it took away are taken off the count (a retraction draws less than
+        was there, and what it removed is the newest output). A
+        selection survives if every row it covers is drawn again unchanged
+        (SV2), which is what lets a reader select in a viewer that is still
+        being written to.
+        """
+        following, unseen = self._following, self._unseen
+        rows = len(self.lines)
+        held = self._held_selection()
+        self._redrawing += 1
+        try:
+            yield self
+        finally:
+            self._redrawing -= 1
+            if following:
+                self.follow()
+            else:
+                # Read back from the position rather than assumed: a redraw
+                # that drew less than was there (a retraction) can leave the
+                # reader's row at or past the new bottom, and that reader is
+                # at the bottom now. NOT done when following, where the end
+                # scroll is still queued and the position is stale.
+                self._unseen = max(0, unseen + len(self.lines) - rows)
+                self._sync_follow()
+            self._settle_selection(held)
+
+    # -- selection (ROADMAP_v3 §103 SV2) -------------------------------------
+    #
+    # Textual has selected text at the SCREEN level since 2.0.0, and the
+    # 8.2.8 pin has it; what it needs from a widget is the three methods
+    # below, and `RichLog` implements none of them. That is why a drag over
+    # the transcript selected nothing, and why `/copy` was the only way out
+    # (§26). ctrl+c copies a selection under the rule it already had --
+    # "copies when there is something to copy, and starts a quit when there
+    # is not" -- see `VenastineApp._copy_selection`.
+
+    def render_line(self, y: int) -> Strip:
+        """RichLog's row, with the selection drawn on it and the offsets the
+        screen maps a pointer through.
+
+        The OFFSETS are the half RichLog lacks and textual's own `Log` has:
+        the screen reads each cell's `offset` metadata to learn which
+        character of which row the pointer is over, and a strip without it
+        maps nowhere. Applied to RichLog's cached strip before its base
+        style, so the strip's own offset cache is hit on every repaint of a
+        row that did not change.
+
+        A row past the end of the content carries no offsets, as in `Log`.
+        The screen reads a release there as past the content and selects to
+        its end by itself; a mapping of those rows to the end of the last
+        row was written first, and removed when the mutation pass showed the
+        drag into the space below selected the same text without it.
+        """
+        scroll_x, scroll_y = self.scroll_offset
+        row = scroll_y + y
+        width = self.scrollable_content_region.width
+        line = self._render_line(row, scroll_x, width)
+        if row < len(self.lines):
+            selection = self._own_selection()
+            span = selection.get_span(row) if selection is not None else None
+            if span is not None:
+                style = self.screen.get_component_rich_style("screen--selection")
+                line = _highlight_span(self.lines[row], *span, style).crop_extend(
+                    scroll_x, scroll_x + width, self.rich_style)
+            line = line.apply_offsets(scroll_x, row)
+        return line.apply_style(self.rich_style)
+
+    def get_selection(self, selection):
+        """The selected text AS DRAWN (SV2, the owner's choice).
+
+        What is highlighted is what is copied, the way a terminal's own
+        selection works: a paragraph keeps the breaks it was wrapped at,
+        and labels, a table's borders and a code block's lines come with
+        it. Trailing padding is trimmed from every row. The source text of
+        whole entries is `/copy`'s job, which this does not replace.
+        """
+        start = selection.start
+        if start is not None and start.y >= len(self.lines):
+            return None
+        text = "\n".join(strip.text.rstrip() for strip in self.lines)
+        return selection.extract(text), "\n"
+
+    def _own_selection(self):
+        try:
+            return self.screen.selections.get(self)
+        except NoScreen:
+            return None
+
+    def _drop_selection(self) -> None:
+        try:
+            screen = self.screen
+        except NoScreen:
+            return
+        if self in screen.selections:
+            screen.selections = {widget: selection for widget, selection
+                                 in screen.selections.items()
+                                 if widget is not self}
+
+    def _held_selection(self):
+        """This pane's selection and the text of the rows it covers, or None."""
+        selection = self._own_selection()
+        if selection is None:
+            return None
+        return selection, self._rows_under(selection)
+
+    def _rows_under(self, selection) -> list:
+        start, end = selection
+        first = 0 if start is None else start.y
+        last = len(self.lines) - 1 if end is None else end.y
+        return [strip.text for strip in self.lines[first:last + 1]]
+
+    def _settle_selection(self, held) -> None:
+        """After a redraw: keep the selection if its rows are unchanged.
+
+        One rule for every redraw rather than one per caller. A retraction
+        clears a selection over the rows it took back and keeps one above
+        them (the proposal's rule); a viewer's repaint keeps it, because a
+        live run only appends; a reflow clears it, because a new width
+        re-wraps every row.
+        """
+        if held is None or self._own_selection() is None:
+            return
+        selection, before = held
+        if self._rows_under(selection) != before:
+            self._drop_selection()
 
     def last_answer(self) -> str:
         """The most recent answer in this session, or "" (for /copy last).

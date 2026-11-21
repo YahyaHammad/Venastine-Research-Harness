@@ -34,6 +34,7 @@ import logging
 import os
 import queue
 import threading
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic, time
@@ -2846,7 +2847,7 @@ class VenastineApp(App):
                  else [("chat", None)])
         return list(chain) + [(label, None)]
 
-    def _paint_session_view(self, row) -> None:
+    def _paint_session_view(self, row, keep_place: bool = False) -> None:
         """Draw a live session, and remember how much output was drawn.
 
         The tail and the truncation flag come from the manager's buffer
@@ -2862,22 +2863,28 @@ class VenastineApp(App):
         buffer = shell_sessions.sessions.buffer(row.id)
         tail, truncated = (buffer.last() if buffer is not None
                            else ("", False))
-        self._paint_session_entries(live_entries(row, tail, truncated))
+        self._paint_session_entries(live_entries(row, tail, truncated),
+                                    keep_place=keep_place)
         # THE BUFFER'S OWN COUNT, which is what the poll compares
         # against -- see `_poll_session_view` for why the drawn length
         # is the wrong number.
         self._viewed_entries = row.output_chars
 
-    def _paint_session_entries(self, entries) -> None:
+    def _paint_session_entries(self, entries, keep_place: bool = False) -> None:
         """Draw `(role, text)` entries into the session pane.
 
         IT RESETS, `_paint_thread_view`'s rule: the poll repaints, so
         anything written into this pane by hand does not survive.
+
+        `keep_place` for a repaint of the session already on screen, so a
+        reader who scrolled up stays there (ROADMAP_v3 §103 SV4); opening
+        a session is a new pane and starts at the bottom.
         """
         view = self._session_view
-        view.reset()
-        for role, text in entries:
-            view.write_role(role, text)
+        with view.keeping_place() if keep_place else nullcontext():
+            view.reset()
+            for role, text in entries:
+                view.write_role(role, text)
 
     def action_close_thread_view(self) -> None:
         self.close_thread_view()
@@ -2966,7 +2973,7 @@ class VenastineApp(App):
             self._view_timer.stop()
             self._view_timer = None
 
-    def _paint_thread_view(self, entries) -> None:
+    def _paint_thread_view(self, entries, keep_place: bool = False) -> None:
         """Draw a viewed run, and remember how much of it was drawn.
 
         ONE write path for the two callers -- opening a run and the poll
@@ -2984,6 +2991,17 @@ class VenastineApp(App):
         knowing before treating this pane as somewhere a message lasts.
         """
         view = self._thread_view
+        # ROADMAP_v3 §103 (SV4). The poll's repaint keeps a scrolled-up
+        # reader's place; measured before, every new entry in a live run
+        # took them to the bottom, because this empties the pane first.
+        with view.keeping_place() if keep_place else nullcontext():
+            self._repaint_thread_view(view, entries)
+        # WHAT THE ARCHIVE HELD, not what the widget drew. See the poll.
+        self._viewed_entries = len(entries)
+
+    def _repaint_thread_view(self, view, entries) -> None:
+        """`_paint_thread_view`'s drawing, which may be fenced by
+        `keeping_place`."""
         view.reset()
         # This runs while the switcher is still showing `#transcript`, so
         # the viewer measures 0 -- and paints at the live pane's width by
@@ -3001,8 +3019,6 @@ class VenastineApp(App):
             # first: the poll used to repaint without it and leave the pane
             # blank.
             view.write_system("This run has not written anything yet.")
-        # WHAT THE ARCHIVE HELD, not what the widget drew. See the poll.
-        self._viewed_entries = len(entries)
 
     def _poll_view(self) -> None:
         """The timer's one tick: whichever of the two views is open.
@@ -3038,7 +3054,7 @@ class VenastineApp(App):
                 return
             if row.output_chars == self._viewed_entries:
                 return
-            self._paint_session_view(row)
+            self._paint_session_view(row, keep_place=True)
         except Exception:                                   # noqa: BLE001
             logger.exception("Could not refresh the session view.")
 
@@ -3074,7 +3090,7 @@ class VenastineApp(App):
             entries = replay_entries(viewing)
             if len(entries) == self._viewed_entries:
                 return
-            self._paint_thread_view(entries)
+            self._paint_thread_view(entries, keep_place=True)
         except Exception:                                   # noqa: BLE001
             logger.exception("Could not refresh the thread view.")
 
@@ -3267,7 +3283,11 @@ class VenastineApp(App):
             return
         try:
             transcript = self._transcript
-            pinned = transcript.scroll_offset.y >= transcript.max_scroll_y
+            # ROADMAP_v3 §103: the pane's own follow flag, which is what
+            # "the reader was at the bottom" means now, rather than a
+            # second reading of the position that could disagree with it
+            # while an end scroll is queued.
+            pinned = transcript.following
         except NoMatches:                      # never mounted (see #104)
             transcript, pinned = None, False
         apply()
@@ -3297,6 +3317,12 @@ class VenastineApp(App):
         if not text:
             event.prompt.value = ""
             return
+        # ROADMAP_v3 §103 (SV1, the owner's choice). Anything submitted
+        # takes the reader back to the bottom so they see it land: a
+        # message, a command, and a message refused because a turn is
+        # running -- its refusal is drawn at the bottom too. An empty Enter
+        # sends nothing and moves nothing.
+        self._transcript.follow()
         # Clear AFTER the busy check, not before. /research holds _busy
         # for a whole ten-pass pipeline, so a follow-up typed during one
         # was wiped and had to be retyped from memory.
@@ -3990,7 +4016,7 @@ class VenastineApp(App):
         if session_id is not None:
             for row in message.rows:
                 if row.id == session_id:
-                    self._paint_session_view(row)
+                    self._paint_session_view(row, keep_place=True)
                     break
         self._sync_view_poll()
         # §49 (SS2). ctrl+b is bound only while something is running, so
@@ -4623,9 +4649,24 @@ class VenastineApp(App):
         sequence of copies can end the session.
         """
         selection = getattr(self.focused, "selected_text", "")
-        if not selection:
+        if selection:
+            self.copy_to_clipboard(selection)
+            return True
+        # ROADMAP_v3 §103 (SV2). A MOUSE selection -- in a transcript pane,
+        # or anywhere else textual lets the reader drag -- is held by the
+        # screen, not by the focused widget, so the rule above is asked of
+        # it second. Said in a toast rather than a transcript line: a line
+        # would scroll a pane the reader is busy selecting in. And SAID,
+        # for `/copy`'s reason: OSC 52 cannot be confirmed, so this reports
+        # what was sent and names the route that does not depend on it.
+        selected = self.screen.get_selected_text()
+        if not selected:
             return False
-        self.copy_to_clipboard(selection)
+        self.copy_to_clipboard(selected)
+        self.notify(f"Sent {len(selected)} chars to the clipboard. If "
+                    f"nothing pastes, this terminal is dropping OSC 52 -- "
+                    f"shift+drag selects with the terminal itself.",
+                    timeout=4)
         return True
 
     def action_arm_quit(self) -> None:
@@ -5844,14 +5885,16 @@ def _cmd_help(app: VenastineApp, args: str) -> None:
                 if command.aliases else "")
         app._transcript.write_system(
             f"  /{command.name}{usage} — {command.summary}{also}")
-    # §26. Worth saying plainly: the pinned textual has no text selection,
-    # so someone trying to select with the mouse gets nothing and has no
-    # way to know why. Most terminals let shift+drag bypass the app's
-    # mouse capture and select natively.
+    # ROADMAP_v3 §103 (SV3). What stood here said "Text selection is not
+    # supported by this Textual version", written at textual 1.0.0 (§26).
+    # The pin has had screen-level selection since 8.2.8 and the transcript
+    # implements it now; shift+drag stays worth naming, because some
+    # readers want the terminal's own selection and most terminals give it
+    # past the app's mouse capture.
     app._transcript.write_system(
-        "Text selection is not supported by this Textual version — hold "
-        "shift while dragging to select with the terminal itself, or use "
-        "/copy.")
+        "Drag over the transcript to select text and press ctrl+c to copy "
+        "it. Hold shift while dragging to select with the terminal itself "
+        "instead. /copy sends a whole answer or the conversation.")
 
 
 def _cmd_theme(app: VenastineApp, args: str) -> None:
@@ -6888,11 +6931,13 @@ PICKER_THREAD_LIMIT = 200
 def _cmd_copy(app: VenastineApp, args: str) -> None:
     """Copy something out of the session (§26).
 
-    Exists because the pinned textual (1.0.0) has NO text selection --
-    App.ALLOW_SELECT and RichLog.allow_select arrived in 3.x -- so there
-    is no way to get text out of the transcript at all. That is a
-    dependency ceiling rather than a styling problem, which is why the
-    answer is a command rather than a widget setting.
+    BUILT when the pinned textual (1.0.0) had no text selection, so this
+    was the only way to get text out of the transcript. The pin moved to
+    8.2.8, whose screen selects text (since 2.0.0, not 3.x as this used to
+    say), and ROADMAP_v3 §103 made the transcript implement it: a drag and
+    ctrl+c copy what is drawn. This stays for what a selection cannot do
+    -- a whole answer or the whole conversation without scrolling to it,
+    its SOURCE text rather than the wrapped rows, and `--file`.
 
     App.copy_to_clipboard writes OSC 52, and OSC 52 CANNOT BE CONFIRMED:
     the terminal either honours the escape sequence or silently ignores

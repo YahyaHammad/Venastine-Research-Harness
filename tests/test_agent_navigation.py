@@ -649,6 +649,45 @@ class TestFollowingARunThatIsStillGoing:
 # ---- leaving the conversation ----------------------------------------------
 # ---------------------------------------------------------------------------
 
+    @pytest.mark.asyncio
+    async def test_a_poll_leaves_a_scrolled_up_reader_where_they_were(
+            self, lineage, mocker):
+        """ROADMAP_v3 §103 (SV4). Measured before: the poll's repaint empties
+        the pane and fills it again, so every entry a live run wrote took a
+        reader who had scrolled up back to the bottom. Now they stay, and
+        the border says how much arrived below them."""
+        from tui.widgets import new_lines_marker
+
+        texts = [f"entry {index}" for index in range(60)]
+        replay = mocker.patch("tui.app.replay_entries",
+                              return_value=_entries(*texts))
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test(size=(80, 30)) as pilot:
+            await pilot.pause()
+            app._agent_stack = [AgentRow("explore", 1, "s1", lineage.child)]
+            app.open_agent_thread(str(lineage.child))
+            await pilot.pause()
+            await pilot.pause()
+            view = app.query_one("#thread-view", Transcript)
+            opened_at_bottom = view.scroll_y == view.max_scroll_y
+            view.scroll_to(y=5, animate=False, immediate=True)
+            await pilot.pause()
+            before = len(view.lines)
+
+            replay.return_value = _entries(*texts, "entry 60", "entry 61")
+            app._poll_thread_view()
+            await pilot.pause()
+            await pilot.pause()
+            place, limit = view.scroll_y, view.max_scroll_y
+            said = view.border_subtitle
+            added = len(view.lines) - before
+
+        assert opened_at_bottom, "opening a run did not start at its end"
+        assert place == 5 and limit > 5, (
+            "the poll's repaint took the reader back to the bottom")
+        assert added > 0 and said == new_lines_marker(added)
+
+
 class TestLeavingTheThreadClosesTheView:
     """Switching conversations while a run is on screen.
 

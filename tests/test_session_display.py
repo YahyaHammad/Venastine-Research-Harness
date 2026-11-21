@@ -30,6 +30,7 @@ arming on screen, the panel in the sidebar, mount and unmount) say so by
 using `run_test`.
 """
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
@@ -82,10 +83,18 @@ class _Pane:
     def __init__(self):
         self.entries = []
         self.resets = 0
+        # ROADMAP_v3 §103 (SV4): how many repaints were fenced so a
+        # scrolled-up reader keeps their place, against how many reset.
+        self.kept = 0
 
     def reset(self):
         self.resets += 1
         self.entries.clear()
+
+    @contextmanager
+    def keeping_place(self):
+        self.kept += 1
+        yield self
 
     def write_role(self, role, text, *a, **k):
         self.entries.append((role, text))
@@ -1113,3 +1122,38 @@ class TestThePollFollowsWhatIsLive:
 
         drawn = "\n".join(t for _r, t in app._session_view_widget.entries)
         assert "stopped" in drawn
+
+
+class TestARepaintKeepsTheReadersPlace:
+    """ROADMAP_v3 §103 (SV4). The session view repaints whenever the
+    session writes, and a repaint empties the pane first -- so unfenced it
+    took a reader who had scrolled up back to the bottom on every new line
+    of output. Opening a session is a new pane and is not fenced."""
+
+    def test_opening_a_session_is_a_new_pane(self, manager):
+        app = _bare_app()
+        _start(manager)
+        app.open_session("s1")
+
+        assert app._session_view_widget.resets >= 1
+        assert app._session_view_widget.kept == 0
+
+    def test_the_poll_fences_its_repaint(self, manager):
+        app = _bare_app()
+        _start(manager)
+        app.open_session("s1")
+        manager.buffer("s1").append("some output\n")
+
+        app._poll_session_view()
+
+        assert app._session_view_widget.kept == 1
+
+    def test_a_session_finishing_fences_its_repaint(self, manager):
+        app = _bare_app()
+        _start(manager)
+        app.open_session("s1")
+        manager.kill("s1", owner_thread=ss.ANY_OWNER, reason=ss.KILL_USER)
+
+        app.on_session_rows_changed(SessionRowsChanged(manager.rows()))
+
+        assert app._session_view_widget.kept == 1
