@@ -2093,7 +2093,7 @@ class TestTheModeValidations:
 # ===========================================================================
 
 #: Every option string `main.build_parser()` accepts, and what a `--tui`
-#: launch does with it. ONE of four answers each, and LF3 is the reason the
+#: launch does with it. ONE answer each, and LF3 is the reason the
 #: table exists at all: before §101, `--effort`, `--thread` and `--ref` were
 #: read, validated and dropped on this path without a word, while main.py
 #: already refused `--tui` with a query because "silently dropped" is not
@@ -2129,16 +2129,22 @@ _REFUSED = {
     # table for a reason that is not main()'s.
     "--resume": ["--resume"],
 }
-#: RUNS INSTEAD OF A SHELL -- a data command that exits before either
-#: shell starts, --tui or not. `--project-config` is a refusal of its own
-#: (it belongs to --init), on this list because it, too, starts no shell.
-_RUNS_INSTEAD = {
-    "--memories": ["--memories"],
-    "--forget": ["--forget", "x"],
-    "--summary": ["--summary"],
-    "--secrets": ["--secrets", "status"],
-    "--init": ["--init"],
-    "--project-config": ["--project-config"],
+#: A DATA COMMAND, REFUSED BEFORE ANYTHING RUNS (LF5). Without --tui each
+#: runs instead of a shell; under --tui it used to run too, leaving --tui
+#: unused without a word, and now parser.error names the slash command
+#: straight after parse_args. `--project-config` is a refusal of its own
+#: without --tui (it belongs to --init), and under --tui is refused as the
+#: /init option it is. Each with an argv, the spelling its refusal names,
+#: and what `startup` records when it runs without --tui (None: it prints
+#: its own refusal and returns 1).
+_DATA_COMMANDS = {
+    "--memories": (["--memories"], "use /memories inside", "memories"),
+    "--forget": (["--forget", "x"], "use /forget inside", "memories"),
+    "--summary": (["--summary"], "and use /summary", "summary"),
+    "--secrets": (["--secrets", "status"], "use /secrets inside", "secrets"),
+    "--init": (["--init"], "use /init inside", "init"),
+    "--project-config": (["--project-config"], "use /init --config inside",
+                         None),
 }
 #: MODIFIES --init -- read inside run_init_command only, so without --init
 #: it is ignored in EVERY shell, deliberately: §24 I17 refused
@@ -2169,7 +2175,7 @@ def tui_launch(startup, monkeypatch):
 
 
 class TestEveryFlagReachesTheTuiOrIsRefused:
-    """ROADMAP_v3 §101 (LF1-LF3)."""
+    """ROADMAP_v3 §101 (LF1-LF3, LF5)."""
 
     def test_every_flag_has_exactly_one_answer(self):
         """The census. Read from the parser itself, so a flag added to
@@ -2182,7 +2188,7 @@ class TestEveryFlagReachesTheTuiOrIsRefused:
                 continue
             accepted.update(action.option_strings or [action.dest])
         tables = (set(_TUI_TAKES), set(_USED_BEFORE), set(_REFUSED),
-                  set(_RUNS_INSTEAD), _INIT_ONLY)
+                  set(_DATA_COMMANDS), _INIT_ONLY)
         placed = [name for table in tables for name in table]
         assert len(placed) == len(set(placed)), \
             "a flag has two answers; it can have only one"
@@ -2202,13 +2208,80 @@ class TestEveryFlagReachesTheTuiOrIsRefused:
         assert exit_info.value.code == 2
         assert "setup_mcp" not in startup and "run_tui" not in startup
 
-    @pytest.mark.parametrize("flag", sorted(_RUNS_INSTEAD))
-    def test_a_data_command_runs_and_no_shell_starts(self, flag, startup,
-                                                     tui_launch):
+    @pytest.mark.parametrize("flag", sorted(_DATA_COMMANDS))
+    def test_a_data_command_is_refused_before_anything_runs(
+            self, flag, startup, tui_launch, capsys):
+        """LF5. Before batch 278 the command ran and --tui did nothing.
+        `startup` empty is the strong half: no log directory, no database,
+        no project config read, the command itself not run, no shell."""
         import main
 
-        main.main(["--tui", *_RUNS_INSTEAD[flag]])
+        argv, spelling, _ = _DATA_COMMANDS[flag]
+        with pytest.raises(SystemExit) as exit_info:
+            main.main(["--tui", *argv])
+        assert exit_info.value.code == 2
+        assert startup == []
+        err = capsys.readouterr().err
+        assert f"--tui does not take {flag};" in err
+        assert spelling in err
+
+    @pytest.mark.parametrize("flag", sorted(_DATA_COMMANDS))
+    def test_without_tui_a_data_command_still_runs_instead_of_a_shell(
+            self, flag, startup, tui_launch, capsys):
+        """The control: LF5 refuses the combination, not the command."""
+        import main
+
+        argv, _, ran = _DATA_COMMANDS[flag]
+        code = main.main(argv)
         assert "run_tui" not in startup and "run_chat" not in startup
+        if ran is None:
+            assert code == 1
+            assert "--project-config is part of --init" in capsys.readouterr().out
+        else:
+            assert code == 0
+            assert ran in startup
+
+    @pytest.mark.parametrize("argv, spelling", [
+        (["--init", "--software-project"],
+         "--tui does not take --init; use /init --software inside the TUI."),
+        (["--init", "--research-project", "--project-config"],
+         "--tui does not take --init; use /init --research --config inside"),
+        (["--init", "--software-project", "--research-project"],
+         "use /init [--software|--research] inside"),
+        (["--project-config", "--software-project"],
+         "--tui does not take --project-config; use /init --software --config"),
+    ])
+    def test_an_init_refusal_spells_init_s_own_options(
+            self, argv, spelling, startup, tui_launch, capsys):
+        """The kind flags are /init's options under longer names; both at
+        once is offered as the choice, since /init refuses the pair."""
+        import main
+
+        with pytest.raises(SystemExit):
+            main.main(["--tui", *argv])
+        assert spelling in capsys.readouterr().err
+
+    @pytest.mark.parametrize("argv, named", [
+        (["--summary", "--memories"], "--memories"),
+        (["--init", "--secrets", "status"], "--secrets"),
+    ])
+    def test_the_flag_named_is_the_one_that_would_have_run(
+            self, argv, named, startup, tui_launch, capsys):
+        import main
+
+        with pytest.raises(SystemExit):
+            main.main(["--tui", *argv])
+        assert f"--tui does not take {named};" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("flag", sorted(_INIT_ONLY))
+    def test_a_kind_flag_without_init_still_starts_the_tui(
+            self, flag, startup, tui_launch):
+        """The other control: §24 I17 keeps these silent without --init in
+        every shell, and LF5 refuses only what would have run instead."""
+        import main
+
+        main.main(["--tui", flag])
+        assert "run_tui" in startup
 
     def test_effort_reaches_the_tui_pinned(self, startup, tui_launch):
         """LF1. Before §101 the sidebar read the shipped `high` whatever

@@ -3264,6 +3264,53 @@ def _classify_legacy_threads() -> None:
         connection.close()
 
 
+def _refuse_a_data_command_under_tui(parser, args) -> None:
+    """`--tui` with a command that runs instead of a shell is refused, naming
+    the slash command that does what was asked (ROADMAP_v3 §101, LF5).
+
+    Before batch 278 the data command ran and `--tui` went unused without a
+    word: `--tui --memories` printed the list and exited, which is the
+    silence the positional-query refusal below calls a defect. All five have
+    a slash command, so the refusal can say what to type instead.
+
+    Called straight after parse_args, unlike the other --tui refusals, and
+    for a reason they do not share: these commands return before those are
+    reached, so a check placed beside them would come after the command it
+    refuses had already run. A combination of flags is an argument error,
+    so it exits the way argparse's own do -- before the log directory, the
+    database and the project's trust prompt. Checked in the order main()
+    would run them, so the flag named is the one that would have run.
+    """
+    if not args.tui:
+        return
+    if args.memories:
+        refused, use = "--memories", "use /memories inside the TUI"
+    elif args.forget:
+        refused, use = "--forget", "use /forget inside the TUI"
+    elif args.secrets:
+        refused, use = "--secrets", "use /secrets inside the TUI"
+    elif args.summary is not None:
+        refused, use = "--summary", ("open the thread (--thread, or /resume "
+                                     "inside the TUI) and use /summary")
+    elif args.init or args.project_config:
+        # The kind flags are /init's own options under shorter names. Both
+        # at once is refused by run_init_command, so the spelling offers
+        # the choice rather than a command /init would refuse in turn.
+        if args.software_project and args.research_project:
+            options = ["[--software|--research]"]
+        else:
+            options = [option for given, option in (
+                (args.software_project, "--software"),
+                (args.research_project, "--research")) if given]
+        if args.project_config:
+            options.append("--config")
+        refused = "--init" if args.init else "--project-config"
+        use = f"use {' '.join(['/init', *options])} inside the TUI"
+    else:
+        return
+    parser.error(f"--tui does not take {refused}; {use}.")
+
+
 def _drop_flag(args: list, flag: str) -> list:
     """`args` without `flag` and its value, in either spelling.
 
@@ -3389,6 +3436,7 @@ def main(argv=None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+    _refuse_a_data_command_under_tui(parser, args)
 
     # Below parse_args for #101's other half: this creates the log
     # DIRECTORY, so --help left one behind too. Nothing above logs
@@ -3717,7 +3765,8 @@ def main(argv=None) -> int:
             # word. `effort_pinned` is cli_pinned's shape, for its reason.
             # tests/test_cli.py's TestEveryFlagReachesTheTuiOrIsRefused is
             # the census that every flag is consumed here, refused above,
-            # or exits before a shell (LF3).
+            # or modifies --init (LF3); a data command under --tui is
+            # refused before anything runs (LF5).
             restart = run_tui(provider, model, settings,
                               cli_pinned=args.provider is not None
                               or args.model is not None,

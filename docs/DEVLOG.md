@@ -32712,3 +32712,43 @@ requirements or workflow file changed, so pip-audit was not re-run. Not driven i
 the TUI tests run on Textual's headless pilot.
 
 - **Version:** the branch's beta identity, `0.3.21-b.1.tui-launch-flags.r8a2d097873a1`.
+
+## Batch 278 -- a data command under `--tui` is refused, naming its slash command (ROADMAP_v3 §101, LF5) (2026-11-21)
+
+**Asked.** Work on the gap batch 277 left before opening a PR: `--tui` with a data command ran the
+command and left `--tui` unused without a word.
+
+**Checked first.** On the branch at `68fff82`, `main()` returns from `--memories`/`--forget`,
+`--secrets`, `--summary` and `--init` before any `--tui` refusal is reached; `--project-config`
+without `--init` prints its own refusal and returns 1. All five data commands have a slash command
+(`/memories`, `/forget`, `/summary`, `/secrets`, `/init` with `--software`, `--research` and
+`--config`). Nothing in the tree combines them: the hosted bridge launches `main.py --tui` alone, and
+no launcher adds `--tui`.
+
+**Settled with the owner.** Refuse it (recommended), over running the command with a line saying
+`--tui` was not used, or leaving it. The cost was named in the question: a shell alias that adds
+`--tui` and is then used with `--memories` now exits 2. Recorded as LF5, with LF3's "runs instead of
+a shell" answer amended and §101's not-decided bullet struck through and pointed at LF5.
+
+**Built.** `main.py`'s `_refuse_a_data_command_under_tui`, called straight after `parse_args`. It
+sits apart from the other `--tui` refusals because the commands it refuses return before those are
+reached; and as an argument error it exits the way argparse's own do, before the log directory, the
+database and the project's trust prompt. It checks in `main()`'s own order, so with several data
+flags it names the one that would have run. `--init`'s kind flags become `/init`'s options, and both
+at once, which `run_init_command` refuses, is offered as `[--software|--research]` rather than as a
+command `/init` would refuse in turn.
+
+**Tests.** In `TestEveryFlagReachesTheTuiOrIsRefused`, `_DATA_COMMANDS` replaces `_RUNS_INSTEAD`.
+Each data command under `--tui` exits 2 with `startup` recording nothing at all and the error naming
+its slash command; each still runs without `--tui`; four argv spell `/init`'s options; two name the
+flag that would have run; and a kind flag without `--init` still starts the TUI, which is §24 I17's
+control. 20 tests replace 6. Eight mutations of the new function, one per line that carries a
+decision, were each killed, each by a failed assertion and not by an error.
+
+Full suite green on Windows with AGENT_WORKSPACE unset, run on the commit (10037 collected, 8 integration deselected).
+
+ruff is clean. bandit 1.9.4 reports 47 live findings and none new against the baseline, and `bandit-count-check.py` finds none of the 62 (file, test) pairs grown.
+gitleaks 8.30.1 on an export of the tracked files finds nothing. No requirements or workflow
+file changed, so pip-audit was not re-run.
+
+- **Version:** the branch's beta counter, `0.3.21-b.2.tui-launch-flags.r8a2d097873a1`.
