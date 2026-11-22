@@ -33035,6 +33035,19 @@ the baseline, and `bandit-count-check.py` finds none of the 62 (file, test) pair
 the export so that `.gitleaksignore`'s pins match. No requirements file changed, so pip-audit has
 nothing new to check.
 
+**CI on PR #301 found one more.** Both Linux `pytest` jobs failed one test of 10,132,
+`TestCtrlCCopiesASelection::test_with_nothing_selected_it_still_starts_a_quit`, and nothing else.
+It read the quit arm after the arm's 2.0s wall-clock window had closed: batch 157's second cause of
+a TUI flake. Shrinking `QUIT_CONFIRM_S` to 10ms failed it here at the same line, and at 2.0s it
+passed. Every quit test in `test_tui.py` pins that window; this file's two did not. The copying test
+had the same defect twice, and both halves were hidden. Its `not armed` also passes for a press that
+armed and then expired: under the 10ms window the mutant "a copy also arms the quit" survived it.
+And its toast check read `app._notifications`, which drops an expired toast as it is read: with
+every toast expired, it failed. Both tests now pin the window at 30s, and the copying one reads what
+was said from a spy on `notify`. Under the 10ms window the fixed test kills that mutant, and all
+thirty-five mutants were killed again. Full suite on Windows with AGENT_WORKSPACE unset, run on the
+fix's commit: 10,079 passed and 88 skipped (10,167), in 4:25, with the same one warning.
+
 **Not changed.** `/copy`, which is still the way to an entry's source text, the whole conversation,
 and `--file`. Shift+drag, which most terminals still honour. What ctrl+c means: a press that copies
 never arms and never quits. How the reader scrolls: the wheel and the scrollbar, since no key

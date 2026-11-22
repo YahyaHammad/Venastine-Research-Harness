@@ -658,13 +658,24 @@ class TestADragSelectsWhatIsDrawn:
 
 class TestCtrlCCopiesASelection:
     """Under the rule ctrl+c already had: it copies when there is something
-    to copy, and starts a quit when there is not."""
+    to copy, and starts a quit when there is not.
+
+    Both windows these tests look through close on WALL-CLOCK timers: the
+    arm after `QUIT_CONFIRM_S` (2.0s) and the toast after its 4s. Batch
+    157 measured a loaded run's `pilot.pause()` at about a second, and
+    this file's first CI run read the arm after it had closed, on both
+    Linux jobs. So the arm's window is pinned, as every quit test in
+    test_tui.py pins it, and what was said is read from `notify` rather
+    than from the toasts, which drop an expired one. Unpinned, `not armed`
+    below also passes for a press that armed and then expired."""
 
     @pytest.mark.asyncio
     async def test_it_copies_the_selection_and_does_not_arm_a_quit(self, mocker):
+        mocker.patch("tui.app.QUIT_CONFIRM_S", 30)
         app = _app()
         async with app.run_test(size=(80, 30)) as pilot:
             copied = mocker.patch.object(type(app), "copy_to_clipboard")
+            notified = mocker.spy(app, "notify")
             view = app._transcript
             view.reset()
             for index in range(3):
@@ -676,14 +687,16 @@ class TestCtrlCCopiesASelection:
             await pilot.press("ctrl+c")
             await pilot.pause()
             armed = app._quit_armed
-            said = [str(note.message) for note in app._notifications]
 
+        said = [str(call.args[0]) for call in notified.call_args_list
+                if call.args]
         copied.assert_called_once_with("beta gamma 0\nalpha beta")
         assert not armed, "a press that copied also armed a quit"
         assert any("Sent 23 chars to the clipboard" in note for note in said)
 
     @pytest.mark.asyncio
     async def test_with_nothing_selected_it_still_starts_a_quit(self, mocker):
+        mocker.patch("tui.app.QUIT_CONFIRM_S", 30)
         app = _app()
         async with app.run_test(size=(80, 30)) as pilot:
             copied = mocker.patch.object(type(app), "copy_to_clipboard")
