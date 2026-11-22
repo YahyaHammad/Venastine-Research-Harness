@@ -32934,3 +32934,130 @@ hour later: no release run, no CI on `main`, no check suite on the merge commit.
 showed no incident. So `main` still carries #299's branch version, and this branch's version is based
 on 0.3.22. If #299's release commit lands on `main` before this merges, `package.json` and
 `pyproject.toml` will conflict on the version line.
+## Batch 281 -- a reader who scrolls up stays there, and the transcript can be selected (ROADMAP_v3 §103, SV1-SV4) (2026-11-22)
+
+**Asked.** Take another section from one of the two open roadmaps. The owner chose §103 from
+`ROADMAP_v3_researcher_feedback.md`: the transcript pulled a reader who had scrolled up back to the
+bottom while a reply streamed, and its text could not be selected and copied with ctrl+c.
+
+**Checked first.** Both halves of the proposal's measurement held on `main` (`ad37f16`, 0.3.23).
+- A reader scrolled to row 5 of a 60-row transcript was at row 44 of 44 after five streamed rows,
+  45 of 45 after one system line, and 47 of 47 after one line of thinking. `RichLog.write` scrolls
+  to the end after every write while `auto_scroll` is on, and it always was.
+- The run and session viewers repaint by emptying the pane and drawing it again whenever a live run
+  or session writes, so each new entry took a scrolled-up reader there to the bottom too.
+- The owner asked to double-check the selection half, since the project had established that
+  textual cannot select, which is why `/copy` exists. What the record says: `/copy` was built at
+  textual 1.0.0, which had no selection. At the 8.2.8 pin move `ARCHITECTURE.md` recorded that
+  selection arrived in 2.0.0, that `RichLog` implements none of it, and that making the transcript
+  selectable was its own batch. Measured, the same drag over three rows of the real app: `''` on
+  `main`, and the dragged text with about thirty lines added to `Transcript` (row offsets, the
+  text under a selection, the highlight). So both readings were right: the stock transcript cannot
+  select, and the framework under it can.
+
+**Settled with the owner.** Four questions, each answered with the recommended option:
+- SV1: following resumes at the bottom, or when anything is submitted at the prompt.
+- SV1: the bottom border counts the new lines below a scrolled-up reader, and says nothing until
+  output arrives.
+- SV2: a selection copies the rows as drawn, not rejoined paragraphs or whole entries' source.
+- SV4 (new): both halves apply to all four transcript panes, not only the conversation.
+SV3, and the rest of SV1 and SV2, are the proposal's.
+
+**Built.**
+- `tui/widgets.py`, `Transcript`:
+  - `auto_scroll` is off for good and every write passes `scroll_end=False`, so RichLog never
+    scrolls.
+  - `watch_scroll_y` sets `following` from the position on every scroll. A write made while
+    following queues `_end_if_following`, which asks again when it runs: RichLog's own deferred
+    scroll would take back a reader who scrolled up in the frame between a write and its scroll.
+  - `keeping_place()` fences a redraw that empties the pane and fills it again (a viewer's poll, a
+    retraction, `/theme`). A `reset()` outside it is a new pane, which follows, so the refill
+    takes a scrolled-up reader to the bottom; inside it the reset is a repaint. `reflow()` keeps
+    its fraction, read against the flag.
+  - The border's note, `new_lines_marker`: the new rows still below the view, so it falls as the
+    reader scrolls toward them, less what a retraction took back.
+  - `render_line` adds the `offset` metadata the screen maps a pointer through, in content rows,
+    and draws the selection, cut by character because the screen's positions count characters. A
+    row past the end of the content maps to the end of the last row, so a drag that ends under a
+    short transcript selects to its end rather than the whole container. `get_selection` returns
+    the rows as drawn with their padding trimmed.
+  - A redraw keeps a selection whose rows it drew again unchanged and clears one it changed, one
+    rule for every redraw.
+- `tui/app.py`: a submit calls `follow()`; `_copy_selection` copies the screen's selection after
+  the focused widget's, and says what it sent in a toast; the viewers' polls, and a session
+  finishing, repaint inside `keeping_place`; `/help`, and `/copy`'s docstring.
+
+**Three things removed because nothing could tell they were there.**
+- `watch_scroll_y` was first fenced during a redraw, so the clamp to 0 that `clear()` was assumed
+  to cause would not read as the reader moving. Tracing each guard for the mutation list showed
+  every redraw puts the reader's answer back when it is done; the fence went before the pass ran.
+- `keeping_place` restored the reader's row after the redraw, and a mutant removing that survived.
+  Measured: `clear()` does not move `scroll_y` within the call, and the position is clamped only at
+  the next refresh, by when the rows are back. A reader at row 30 was at row 30 after a `clear()`
+  and sixty rows drawn again, and `watch_scroll_y` never ran. So the defect in the viewers was never
+  the emptied pane: it was the `reset()`, which starts a new pane following, so the refill queued a
+  scroll to the end. The restore went, and both docstrings now say that.
+- `render_line` first mapped the rows under a short transcript to the end of its last row, so that
+  a drag ending there would select to the end. A mutant removing that survived too: the screen
+  already reads a release past the content as its end. It went, and the test stayed.
+
+A third survivor was a test gap. The wide-character test's row is one segment starting at 0, where
+cells and characters agree, so a highlight cut by cells passed it. A bold word after CJK text is a
+second segment, three characters and six cells in, and that test now catches the cut.
+
+**Tests.**
+- `tests/test_transcript_place_and_selection.py`, 40 tests:
+  - SV1: the measured defect and every writer; one row up; the race between a write and its
+    queued scroll; a pane that gets shorter; sending, and an empty Enter; the marker's wording,
+    count, fall and clearing;
+  - SV4: a retraction, `/theme` and a repaint inside `keeping_place` keep the place; a reset
+    starts at the bottom, from the very top, where nothing else would say so;
+  - SV2: the drag as drawn, in a scrolled pane, by character over wide text and after it, and
+    into the space below; padding; a link's ctrl+click; ctrl+c both ways; the selection across
+    each kind of redraw;
+  - SV3: `/help`.
+- `tests/test_session_display.py`: the session viewer's poll and finish repaint inside
+  `keeping_place`, and opening it does not. Its stand-in pane gained the method.
+- `tests/test_agent_navigation.py`: a live run's viewer keeps a scrolled-up reader through a poll,
+  and its border counts what arrived.
+- `tests/test_session_tui.py`: the submit handler's stand-in transcript gained `follow`. The first
+  full run on the commit failed that file's four `TestTheSubmitHandler` tests without it, a file the
+  TUI files run while building had not included.
+
+The first mutation pass had thirty-six mutants and left three alive: the two lines above that did
+nothing a test could see, and the test gap above. With those lines gone and the test added, the list
+was rewritten for the code as it stands. All thirty-five, one per line that carries a decision, were
+killed by a failed assertion.
+
+**Verified.** Full suite on Windows with AGENT_WORKSPACE unset, run on the commit: 10,079 passed and 88 skipped (10,167), in 2:31. Its one warning is `test_installers.py`'s deliberately duplicated name in a hostile archive, in code this batch does not touch. The first full run, on the commit before the stand-in fix above, failed `test_session_tui.py`'s four submit-handler tests. ruff is clean. bandit 1.9.4 reports 47 live findings and none new against
+the baseline, and `bandit-count-check.py` finds none of the 62 (file, test) pairs grown. gitleaks
+8.30.1 with CI's config finds nothing in an export of the tracked and new files, scanned from inside
+the export so that `.gitleaksignore`'s pins match. No requirements file changed, so pip-audit has
+nothing new to check.
+
+**CI on PR #301 found one more.** Both Linux `pytest` jobs failed one test of 10,132,
+`TestCtrlCCopiesASelection::test_with_nothing_selected_it_still_starts_a_quit`, and nothing else.
+It read the quit arm after the arm's 2.0s wall-clock window had closed: batch 157's second cause of
+a TUI flake. Shrinking `QUIT_CONFIRM_S` to 10ms failed it here at the same line, and at 2.0s it
+passed. Every quit test in `test_tui.py` pins that window; this file's two did not. The copying test
+had the same defect twice, and both halves were hidden. Its `not armed` also passes for a press that
+armed and then expired: under the 10ms window the mutant "a copy also arms the quit" survived it.
+And its toast check read `app._notifications`, which drops an expired toast as it is read: with
+every toast expired, it failed. Both tests now pin the window at 30s, and the copying one reads what
+was said from a spy on `notify`. Under the 10ms window the fixed test kills that mutant, and all
+thirty-five mutants were killed again. Full suite on Windows with AGENT_WORKSPACE unset, run on the
+fix's commit: 10,079 passed and 88 skipped (10,167), in 4:25, with the same one warning.
+
+**Not changed.** `/copy`, which is still the way to an entry's source text, the whole conversation,
+and `--file`. Shift+drag, which most terminals still honour. What ctrl+c means: a press that copies
+never arms and never quits. How the reader scrolls: the wheel and the scrollbar, since no key
+scrolls the transcript from the prompt.
+
+**Still open** (§103's gap register): a session viewer past its tail bound keeps a reader's row
+while the text under it moves; a wrapped paragraph is copied with its wrap breaks, by the owner's
+choice; no key scrolls the transcript from the prompt; the wiki's user guide may still say the
+transcript cannot be selected.
+
+**Batch 280's release note, settled.** PR #300's merge started its workflows, and `release.yml`
+released 0.3.23 (`ad37f16`), counting up from `v0.3.22`. So 0.3.23 carries PR #299's changes as well
+as #300's, and the events GitHub lost were that one merge's alone.

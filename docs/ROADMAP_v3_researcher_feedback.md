@@ -5,7 +5,8 @@ researcher gave in a chat thread on 2026-11-18 and 2026-11-19 after running the 
 OpenAI-compatible provider, plus the replies in the same thread. The researcher, the provider and its
 models are not named, and the researcher's words are paraphrased rather than quoted: the thread was a
 private conversation and this repository is public. Keep it that way in any edit. Except §101,
-which was accepted and built in batch 277 and now lives in `ROADMAP_v3.md`, nothing here is built
+§103 and §105, which were accepted and built (batches 277, 281 and 280) and now live
+in `ROADMAP_v3.md`, nothing here is built
 and **no decision below is locked**: every Design Decisions table is a proposal for the
 owner to accept, change or refuse, in the convention the three roadmaps already use. A section the owner
 accepts keeps its number; one refused is recorded as refused rather than renumbered, so `§N` keeps one
@@ -37,7 +38,7 @@ append-only, and a deviation is an owner decision in `DEVLOG.md`.
 
 - **§101. Flags a full-screen launch dropped: `--effort` and `--thread` under `--tui`** - **(BUILT in batch 277: now `ROADMAP_v3.md` §101, LF1-LF4)** (`run_tui()` receives the provider, the model and nothing else, so `--tui --effort low` runs at the remembered or shipped `high` and the sidebar says `high`; the same is true of `--thread`, which `relaunch_argv` itself writes after a `/config` restart and the relaunched TUI then ignores. The project refuses `--tui` with a query because "silently dropped" is not honest; these two are the same defect, unrefused)
 - **§102. A model call that never answers is reported before half an hour has passed** - **(NOT BUILT: proposed 2026-11-20)** (the OpenAI-compatible and Anthropic clients keep the SDK's own two retries under the harness's two, at the SDK's 600 s read timeout. Measured: one harness attempt is three requests, so a stalled endpoint costs up to nine requests and about ninety minutes, the first WARNING arrives after about thirty, and every abandoned request is a 499 in the provider's log -- the 499 the researcher saw in the provider's log and never in the harness)
-- **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(NOT BUILT: proposed 2026-11-20)** (measured: a reader scrolled to row 5 of 40 is at the bottom again after five streamed rows, because `RichLog.auto_scroll` follows every write. Text selection is not a ceiling of the pinned textual: 8.2.8 calls `get_selection` on a `RichLog` subclass, and a twelve-line prototype returned the dragged text. `/help` still says "not supported by this Textual version", written when the pin was 1.0.0)
+- **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(BUILT in batch 281: now `ROADMAP_v3.md` §103, SV1-SV4)** (measured: a reader scrolled to row 5 of 40 is at the bottom again after five streamed rows, because `RichLog.auto_scroll` follows every write. Text selection is not a ceiling of the pinned textual: 8.2.8 calls `get_selection` on a `RichLog` subclass, and a twelve-line prototype returned the dragged text. `/help` still says "not supported by this Textual version", written when the pin was 1.0.0)
 - **§104. A JSON pass cut off by the output ceiling is split, not corrected** - **(NOT BUILT: proposed 2026-11-20)** (a reply that ended on `finish_reason: length` is marked `complete` when it has text, so a Pass 3a answer cut at the 16,000-token ceiling -- which bounds thinking and text together on some providers -- is sent the "did not parse" corrective and asked for the same answer again, at the same size, three times. The researcher's failure was an unterminated string at character 36,142 of a one-call answer for 63 claims)
 - **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280: now `ROADMAP_v3.md` §105, XR1-XR4)** (D2's fallback overwrites the tier with UNVERIFIED whatever 6b scored, so a partly grounded claim scoring 0.45 (LOW) is published with the label of a claim nothing supports, and its `score_breakdown` -- which B10 says lets a reader recompute the tier -- still says 0.45. The researcher's run went from 37 LOW to 37 UNVERIFIED this way, and they read it correctly as the retries running out; the thread told them otherwise)
 
@@ -138,48 +139,12 @@ going.
 
 ## §103. A reader who scrolls up stays where they scrolled, and the transcript can be selected
 
-**Proposed 2026-11-20, from the researcher's report.** Scrolling up does not hold while a reply is
-still streaming, and transcript text cannot be highlighted and copied with ctrl+c. The thread notes
-the scrolling had been reported twice before.
-
-**Measured (Appendix A, B7), scrolling.** `Transcript` is a `RichLog`, whose `auto_scroll` scrolls to
-the end on every write. Driven with the real widget under the pinned textual 8.2.8: 60 rows written,
-the reader scrolled to `y = 5` of 40, five rows streamed through `stream_delta` -- `y = 47` of 47.
-The reader is returned to the bottom on every committed row.
-
-**Measured (B5, B6), selection.** `/help` says "Text selection is not supported by this Textual
-version", and `_cmd_copy`'s docstring gives the reason: "the pinned textual (1.0.0) has NO text
-selection -- App.ALLOW_SELECT and RichLog.allow_select arrived in 3.x". The pin is now 8.2.8.
-`App.ALLOW_SELECT` is true there. Plain `RichLog` still returns `None` from `get_selection`, so the
-behaviour the user sees is unchanged; but a subclass that overrides `get_selection` to read its own
-lines is called by the screen's selection machinery, and a twelve-line prototype returned the dragged
-text through `screen.get_selected_text()`. The ceiling the docstring describes is gone; what remains is
-work.
-
-**Proposal.**
-
-- **Follow only at the bottom.** `auto_scroll` is true while the reader is at the bottom and false
-  from the moment they scroll up; it turns true again when they return there. A one-line marker in the
-  border -- `▼ new output` -- while it is off.
-- **Selection on `Transcript`.** `get_selection` over the rendered lines, mapped through the scroll
-  offset, and the selection drawn in `render_line`. Copy with the terminal's own key or `ctrl+c`.
-- `/help` and `_cmd_copy`'s docstring say what is now true.
-
-**Drawbacks.** `render_line` has to draw a highlight over strips it does not currently restyle, which
-is the costly half. A selection across a streaming span has to survive `retract` (batch 113), which
-rewrites rows; the rule is that a retraction clears a selection that touches it. Mouse capture changes
-what shift+drag does in some terminals, so the native fallback should stay documented.
-
-**Alignment.** §26 built `/copy` because selection was impossible; this does not remove `/copy`,
-whose `--file` route is the one that provably works over OSC 52.
-
-### Design Decisions Record — §103 (proposed)
-
-| id | decision |
-|---|---|
-| **SV1** | **The transcript follows new output only while the reader is at the bottom**, and says when there is output below |
-| **SV2** | **The transcript supports mouse selection**, with a retraction clearing a selection it touches |
-| **SV3** | **`/help` and `/copy`'s record stop citing textual 1.0.0** |
+**Accepted and built in batch 281 (2026-11-22), and recorded as `ROADMAP_v3.md` §103
+(SV1-SV4).** The owner chose that a transcript follows again at the bottom or on any submit, and that
+its border counts the new lines below a scrolled-up reader (SV1); that a selection copies the rows as
+drawn (SV2); and that both apply to all four transcript panes (SV4, added at the owner's question).
+The record holds the decisions and their ids; this proposal's text is in the history of the commit
+that added this document.
 
 ---
 

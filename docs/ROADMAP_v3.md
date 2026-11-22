@@ -49,6 +49,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§99. A pass being corrected is seen while it runs** - **(BUILT in batch 270)** (a JSON pass's corrective retry, and a prose pass's no-text one, reached the model through `continue_conversation`, which drains its own loop: the owner's resumed Pass 6b spent 25 minutes and 14 model calls correcting one answer with its tool count frozen and its row gone from the panel, and looked hung. A retry now goes through the pass's own entry point, so its tool calls, its row and its character total show as the attempt's do, its reason is saved and shown the moment the parse fails, and its fetched pages reach the corpus; SR1-SR6)
 - **§100. A subagent that runs while its parent works** - **(BUILT in batch 271)** (a spawn blocked its parent until the child answered, and NA9's parallelism existed only within one reply, so the main agent could not delegate and keep working; SS10 had deferred background subagents since §49. `spawn_subagent` takes `background: true`, which returns at once and runs the child as a session of kind `subagent` (ids `a1`, `a2`, ...) that shares the session cap, the post-turn wait, kill and quit, and wakes the parent with its answer; it asks for approval as a blocking child does, escape leaves it running, the CLI's reader gives a question the terminal, and `shell_sessions`, `shell_output` and `shell_kill` ship on; BG1-BG10)
 - **§101. Flags a full-screen launch dropped: `--effort`, `--thread` and `--ref` under `--tui`** - **(BUILT in batch 277; LF5 in batch 278)** (`run_tui()` received the provider and model and nothing else, so `--tui --effort low` ran at the shipped `high` with `high` in the sidebar, the `--thread` a `/config` restart writes was ignored by the TUI it relaunched, and `--ref` attached nothing. All three reach the TUI now: the flag's effort outranks `tui.effort`, the thread opens at mount through `switch_to_thread`, the references attach through `/ref`'s writer and a restart does not attach them twice; and a census read from the parser gives every flag one answer under `--tui`. Batch 278 refuses `--tui` with a data command such as `--memories`, which ran while `--tui` went unused, and names the slash command; LF1-LF5)
+- **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(BUILT in batch 281)** (every write scrolled the transcript to the bottom, because `RichLog.auto_scroll` follows every write: a reader at row 5 was at the bottom again after five streamed rows, and the run and session viewers, which repaint whole, did the same on every new entry. A drag selected nothing, because `RichLog` implements none of the selection the pinned textual's screen supports. A transcript now follows only while its reader is at the bottom, follows again there or on any submit, and counts in its border what arrived below them; all four panes keep a scrolled-up reader's place through a repaint; and a drag selects the rows as drawn, copied with ctrl+c; SV1-SV4)
 - **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280)** (D2 overwrote the tier of every claim that ran out of revision rounds with UNVERIFIED, so a partly grounded claim scoring 0.45 (LOW) was published as one nothing supports beside a breakdown still saying 0.45. D2 keeps the tier 6b scored and records `loop_exhausted`; a flagged claim names its largest deduction; an exhausted claim publishes the revision 6b scored with what it was first stated as beside it; and every shell's report ends with a code-rendered "Where the evidence is thin" section, built after the review; XR1-XR4)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
@@ -3177,6 +3178,107 @@ outweighs "no source", and a test now covers that case.
 - **The wiki's user guide** (a separate repository) may still describe D2's UNVERIFIED fallback.
 - **A "retry honesty" figure** (the owner's notes, outside this repository) can now be computed from
   `loop_exhausted`; it is not built.
+
+---
+
+## §103. A reader who scrolls up stays where they scrolled, and the transcript can be selected
+
+**Proposed 2026-11-20 in `ROADMAP_v3_researcher_feedback.md`, accepted by the owner and built in
+batch 281 (2026-11-22).** The researcher reported two things about the TUI. Scrolling up did not
+hold while a reply was still streaming, which had been reported twice before. And transcript text
+could not be highlighted and copied with ctrl+c. The proposal's §103 is this section; the
+feedback document now points here.
+
+### What the code did (main `ad37f16`, 0.3.23)
+
+- **Every write scrolled to the bottom.** `Transcript` is a `RichLog`, and `RichLog.write` scrolls
+  to the end after every write while `auto_scroll` is on, which it always was. Measured with the
+  real app under the pinned textual 8.2.8, a reader scrolled to row 5 of a 60-row transcript:
+
+  | what was written below them | where they were afterwards |
+  |---|---|
+  | five streamed rows | row 44 of 44 |
+  | one system line | row 45 of 45 |
+  | one line of thinking | row 47 of 47 |
+
+- **The viewers did it on every poll.** The run, session and call viewers are the same widget. A
+  live run's viewer and a live session's repaint by emptying the pane and drawing it again whenever
+  something new arrives, so each new entry took a reader who had scrolled up back to the bottom.
+- **A drag selected nothing.** Textual's screen has selected text since 2.0.0, and
+  `ARCHITECTURE.md` recorded at the 8.2.8 pin move that `RichLog` implements none of it: no
+  `offset` metadata on its rows for the screen to map a pointer through, and no text for a
+  selection. Measured, the same drag over three rows of the real app: `''` on `main`, and the
+  dragged text from about thirty lines added to `Transcript`. `/help` still said "Text selection
+  is not supported by this Textual version", and `/copy`'s docstring said the pin was 1.0.0.
+
+### Decisions (SV1-SV4)
+
+| # | Decision |
+|---|---|
+| **SV1** | **A transcript follows new output only while its reader is at the bottom.** It stops the moment they scroll up, by even one row, and follows again when they scroll back to the bottom **or submit anything at the prompt** (owner): a message, a command, or a message refused because a turn is running. An empty Enter moves nothing. While they are scrolled up and output has arrived below them, the pane's bottom border says `▼ 12 new lines below` (owner: a count, and nothing until output arrives, since the scrollbar already shows the position). The count is of the new rows still below the view, so it falls as the reader scrolls toward them, and it clears at the bottom |
+| **SV2** | **The transcript supports mouse selection, and copies the rows as drawn** (owner, over rejoining wrapped lines or copying whole entries' source). Wrapped lines keep their breaks, labels and borders come with them, and trailing padding is trimmed. ctrl+c copies a selection under the rule ctrl+c already had: it copies when there is something to copy and starts a quit when there is not. It says what it sent in a toast, for `/copy`'s reason: OSC 52 cannot be confirmed. A redraw keeps a selection whose rows it draws again unchanged and clears one it changed. So a retraction clears a selection over the rows it took back (the proposal's rule) and keeps one above them, a viewer's repaint keeps it, and a new width clears it |
+| **SV3** | **`/help` and `/copy`'s record stop citing textual 1.0.0.** `/help` names the drag, ctrl+c, shift+drag for the terminal's own selection, and `/copy` for a whole answer or the conversation. `/copy` stays |
+| **SV4** | **Both apply to all four transcript panes** (owner): the conversation and the run, session and call viewers. A viewer's repaint keeps a scrolled-up reader at their row and counts what it added; opening a viewer starts at the bottom |
+
+SV1's resume rule and marker, SV2's copied text and SV4's scope are the owner's choices. The rest
+of SV2, and SV3, are the proposal's, as written. SV4 is new: the proposal said "the transcript", and
+the owner was asked whether that meant all four panes.
+
+### What §103 deliberately does not change
+
+- **`/copy`.** It is still the way to copy an entry's source text or the whole conversation without
+  scrolling to it, and `--file` is still the route that provably works when a terminal drops OSC 52.
+- **Shift+drag.** Most terminals still select natively past the app's mouse capture, and `/help`
+  still says so.
+- **What ctrl+c means.** A press that copies never arms and never quits. Only what counts as
+  "something to copy" grew, by the screen's selection.
+- **How the reader scrolls.** The wheel and the scrollbar, as before. The prompt holds focus, and no
+  key scrolls the transcript from there.
+
+### Built (batch 281)
+
+- **`tui/widgets.py`**, `Transcript`:
+  - `RichLog.auto_scroll` is off for good, and every write passes `scroll_end=False`.
+  - `following` and `follow()`; `watch_scroll_y`, so every scroll decides whether the pane
+    follows.
+  - `_schedule_end`, whose queued scroll asks whether the pane still follows when it runs. A
+    reader who scrolls up in the frame between a write and its scroll is not taken back.
+  - `keeping_place()`, the fence for redraws that empty the pane and fill it again: a viewer's
+    repaint, a retraction, `/theme`. `reflow()` keeps its fraction, now read against the flag.
+  - The border's note, `new_lines_marker`.
+  - `render_line`, which adds the offsets and draws the selection (`_highlight_span`, cut by
+    character, not cell), and `get_selection`.
+- **`tui/app.py`**:
+  - a submit calls `follow()`;
+  - `_copy_selection` copies the screen's selection after the focused widget's;
+  - the thread and session viewers' polls, and a session finishing, repaint inside
+    `keeping_place`;
+  - `/help`, and `/copy`'s docstring (SV3).
+
+Tests: `tests/test_transcript_place_and_selection.py`, 40 tests:
+- SV1: the measured defect and every writer; one row up; the race between a write and its scroll;
+  a pane that gets shorter; sending; the marker's wording, count, fall and clearing;
+- SV4: redraws that keep the place, and a reset that does not;
+- SV2: the drag as drawn, in a scrolled pane, by character over wide text and after it, and into
+  the space below the content; padding; a link's ctrl+click; ctrl+c both ways; the selection across
+  each kind of redraw;
+- SV3: `/help`.
+
+`tests/test_session_display.py` has three more (the session viewer's poll and finish are fenced, its
+opening is not), and `tests/test_agent_navigation.py` one (a live run's viewer keeps a scrolled-up
+reader through a poll and counts what arrived). The mutation result is in `DEVLOG.md`.
+
+### Gap register
+
+- **A session viewer past its tail bound** draws only the newest output, so its first rows change
+  as the session writes. A reader scrolled up there keeps their row while the text under it moves,
+  and a selection there is cleared by the repaint.
+- **A wrapped paragraph is copied with the breaks it was wrapped at** (SV2's choice). `/copy` gives
+  its source text.
+- **No key scrolls the transcript from the prompt.** Not new, but SV1 makes scrolling up matter
+  more.
+- **The wiki's user guide** (a separate repository) may still say the transcript cannot be
+  selected.
 
 ---
 

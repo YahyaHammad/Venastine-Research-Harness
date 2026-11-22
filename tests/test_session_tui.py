@@ -862,6 +862,9 @@ def _submit_app():
     app._history = MagicMock()
     app.refresh_bindings = MagicMock()
     app.run_agent_turn = MagicMock()
+    # ROADMAP_v3 §103 (SV1): a submit takes the transcript back to the
+    # bottom, so the stand-in needs the method the handler calls.
+    app._transcript_widget.follow = MagicMock()
     return app
 
 
