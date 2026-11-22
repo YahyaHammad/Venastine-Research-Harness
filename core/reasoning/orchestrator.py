@@ -232,6 +232,11 @@ class _Streamed:
     def __init__(self) -> None:
         self.chars = 0
         self.announced = 0
+        # ROADMAP_v3 §108 (PW1). Thinking, counted as its own figure so
+        # `chars` keeps meaning output (O5's concern), with its own mark so
+        # a pass that only thinks still announces itself.
+        self.thinking = 0
+        self.thinking_announced = 0
 
 
 def _translate(pass_id: str, stream, corpus=None, streamed=None):
@@ -264,17 +269,19 @@ def _translate(pass_id: str, stream, corpus=None, streamed=None):
                                 streaming pass output into a transcript
                                 buries the report under it. Only the volume
                                 escapes, never the content.
-      thinking_delta            §38 (O5). Not translated AND not counted
-                                into pass_activity's running total, so
-                                `chars` keeps meaning one thing -- output
-                                streamed so far -- rather than quietly
-                                becoming two instruments the way batch 27
-                                item 9 describes for the token figures. The
-                                cost is stated rather than hidden: a pass
-                                that thinks for minutes before writing
-                                anything shows no activity, which is the
-                                shape §26 built pass_activity to cure. Flip
-                                it here if that turns up in a real run.
+      thinking_delta            §38 (O5). Not translated, and since
+                                ROADMAP_v3 §108 (PW1) COUNTED, as
+                                pass_activity's own `thinking` figure. This
+                                said "flip it here if that turns up in a
+                                real run", and it did: a researcher's pass
+                                thought for minutes and showed nothing.
+                                Measured in batch 282, a pass that streamed
+                                40,000 characters of thinking and 3,000 of
+                                text announced 2,000. Its own figure, not
+                                added into `chars`, so `chars` still means
+                                output streamed and does not become two
+                                instruments, the way batch 27 item 9
+                                describes for the token figures.
       retract                   batch 113. A retraction tells a surface
                                 that DREW model text to take it back, and
                                 this one never drew any -- `chars` is the
@@ -329,10 +336,15 @@ def _translate(pass_id: str, stream, corpus=None, streamed=None):
 
         if event.token_delta:
             total.chars += len(event.token_delta)
-            if total.chars - total.announced >= _ACTIVITY_CHARS:
-                total.announced = total.chars
-                yield PipelineEvent(kind="pass_activity", pass_id=pass_id,
-                                    chars=total.chars)
+        if event.thinking_delta:
+            total.thinking += len(event.thinking_delta)
+        if (total.chars - total.announced >= _ACTIVITY_CHARS
+                or total.thinking - total.thinking_announced
+                >= _ACTIVITY_CHARS):
+            total.announced = total.chars
+            total.thinking_announced = total.thinking
+            yield PipelineEvent(kind="pass_activity", pass_id=pass_id,
+                                chars=total.chars, thinking=total.thinking)
         if event.notice:
             # ROADMAP_v3 §95 (RO8). Labelled by what the notice IS: the loop
             # emits a reasoning-only notice inside a pass too, and the trace

@@ -5,8 +5,8 @@ researcher gave in a chat thread on 2026-11-18 and 2026-11-19 after running the 
 OpenAI-compatible provider, plus the replies in the same thread. The researcher, the provider and its
 models are not named, and the researcher's words are paraphrased rather than quoted: the thread was a
 private conversation and this repository is public. Keep it that way in any edit. Except §101,
-§103 and §105, which were accepted and built (batches 277, 281 and 280) and now live
-in `ROADMAP_v3.md`, nothing here is built
+§103, §105 and §108's PW1-PW4, which were accepted and built (batches 277, 281, 280 and
+282) and now live in `ROADMAP_v3.md`, nothing here is built
 and **no decision below is locked**: every Design Decisions table is a proposal for the
 owner to accept, change or refuse, in the convention the three roadmaps already use. A section the owner
 accepts keeps its number; one refused is recorded as refused rather than renumbered, so `§N` keeps one
@@ -49,7 +49,7 @@ append-only, and a deviation is an owner decision in `DEVLOG.md`.
 
 **Visibility — a run whose inside cannot be seen**
 
-- **§108. A research pass you can watch** - **(NOT BUILT: proposed 2026-11-20)** (`_translate` counts no thinking into `pass_activity` and says to "flip it here if that turns up in a real run": it has. A pass's view polls the archive, which holds only finished steps, so a pass thinking for ten minutes shows nothing; finished passes and subagents leave the panel as shell sessions did before batch 258; and no figure says what a run or a pass has spent. Measured: streaming a pass into the viewer through the existing append path costs 0.47 ms of CPU per token, about 1% of a core at the 20 tok/s that provider served)
+- **§108. A research pass you can watch** - **(PW1-PW4 BUILT in batch 282: now `ROADMAP_v3.md` §108, with the owner's PW6 and PW7; PW5 below is still proposed)** (`_translate` counted no thinking into `pass_activity`, a pass's view read the archive, which holds finished steps only, finished passes and subagents left the panel, and no figure said what a run or a pass had spent)
 - **§109. A launch you can read before it runs** - **(NOT BUILT: proposed 2026-11-20)** (the researcher had another model build a launcher so they could see exactly what a launch does: the command, what each setting does, permissions now against as shipped, and a safety check. The harness has the facts and no view of them. Also covers the defaults question the thread raised -- measured, turning `read` on by default opens a path the input policy does not close -- and keys at rest)
 
 **Research quality — what the researcher actually came for**
@@ -337,75 +337,18 @@ to OpenAlex; §112 replaces those with a tool that does use it.
 
 ## §108. A research pass you can watch
 
-**Proposed 2026-11-20, from the researcher's sharpest UX complaint.** Runs are hard to find, and
-nothing says how active a run is or what the agent is doing at a given moment: the panel showed pass 2
-with a rising count while the pass's own view showed no text, and the passes do not stream the thinking
-the researcher most wanted to read. They showed the monitor they built for their own tool -- processes,
-durations, memory, and the moment a rule is violated -- and asked for any feedback at all on what is
-going on.
+**PW1-PW4 accepted and built in batch 282 (2026-11-22), and recorded as `ROADMAP_v3.md` §108.**
+The owner chose that every run the viewer opens streams its step in progress, not research
+passes only (PW2); that a running pass row carries every figure (PW3); and that each research
+row opens its pass while the agent panel keeps finished subagents (PW4). They added a spinner on
+every running row of the sidebar, at four frames a second once its cost was measured (PW6), and a
+CLI line for a pass waiting on the model (PW7). The record holds the decisions and their ids;
+this proposal's text is in the history of the commit that added this document.
 
-**Read, not driven.**
-
-- `_translate` (orchestrator) drops `thinking_delta` and counts none of it into `pass_activity`, and
-  says why: "a pass that thinks for minutes before writing anything shows no activity ... Flip it here
-  if that turns up in a real run." This is that run.
-- A pass's read-only view polls the archive every second (`THREAD_VIEW_POLL_S = 1.0`). The archive holds
-  finished steps only, so a pass streaming its first answer, or thinking, shows nothing until a step
-  ends.
-- The agent panel shows live runs only ("the picker reads the live stack, which forgets a run the
-  moment it ends"); finished ones are reachable by ctrl+click in the transcript or the stored-run picker.
-  Batch 258 fixed exactly this for shell sessions by keeping the five most recent finished rows.
-- `/usage` (§97) reports a chat thread. A research run's passes are separate threads; no figure
-  aggregates a run or a pass. The researcher had to read the provider's dashboard.
-  *Since batch 279 (§97 UF6), the passes of a `/research` run started in the TUI are counted
-  in the `/usage` of the thread it was started from, by model, and the heading counts the
-  runs. A figure for one run or one pass, which PW5 proposes, is still not given.*
-
-**Measured (B8), the cost the thread worried about**: that rendering a pass live would redraw on the
-CPU many times a second, where the transcript now inserts a line. The transcript already streams by appending committed rows (`stream_delta`, batch 53's rules),
-never by rewriting. Driven headless with the real `Transcript`, 9,357 tokens:
-
-| strategy | CPU per token | at 20 tok/s | at 60 tok/s |
-|---|---|---|---|
-| `Transcript.stream_delta` (append, what the chat already does) | 0.47 ms | ~0.9% of a core | ~2.8% |
-| `Static.update(whole text)` (rewrite) | 0.92 ms on average, and growing with length | ~1.8% | ~5.5% |
-
-The direction of the concern is right, and the existing append path already avoids it. One viewed pass
-at a time costs about what one chat turn costs.
-
-**Proposal.**
-
-- **Thinking counts as activity**, as its own figure beside the output characters, so `chars` keeps
-  meaning one thing (O5's concern) and a thinking pass stops looking idle.
-- **A pass's view streams live** from a per-run, in-memory buffer of that pass's text and thinking deltas,
-  capped (e.g. the last 200,000 characters), read by the viewer's existing timer as SS14's session view
-  reads a session's buffer. Nothing enters the main transcript, so the report is not buried under JSON --
-  the reason `_translate` gives for not streaming -- and nothing enters any model's context, so D6 is
-  untouched. The archive stays the record.
-- **Liveness on every pass row**: elapsed, time since last byte, `waiting for first byte` (§102), tokens
-  in and out so far, and the current tool call.
-- **Finished passes and subagents stay in the panel**, the five most recent, marked as batch 258 marks
-  sessions.
-- **Run and pass totals** -- tokens in, out, thinking, cached; calls; wall time -- in the panel, in
-  `trace.md`, and through `/usage <run>`.
-
-**Drawbacks.** A buffer per live pass is memory, bounded by the cap. Streamed pass output is unredacted
-model text on screen, which is what the chat already shows; tool *results* stay out of it, as
-`_translate` keeps them out of the UI now. A live view of a JSON pass is raw JSON -- which is what the
-researcher asked for.
-
-**Alignment.** §26's reason for `pass_activity` ("fourteen fetch_url calls over several minutes looked
-exactly like one that had hung"), §99's visible retries, SS14 and batch 258's panel rule, §97's usage
-figures.
-
-### Design Decisions Record — §108 (proposed)
+**Still proposed, for batch 283:**
 
 | id | decision |
 |---|---|
-| **PW1** | **Thinking is counted as pass activity, as its own figure** |
-| **PW2** | **A pass's view streams live from a capped in-memory buffer**, never into the main transcript or any model context |
-| **PW3** | **Every pass row shows elapsed, time since last byte, tokens so far and the current tool** |
-| **PW4** | **The five most recent finished passes and subagents stay in the panel**, as SS14 amended keeps sessions |
 | **PW5** | **A run's and each pass's token, call and time totals are in the panel, `trace.md` and `/usage`** |
 
 ---

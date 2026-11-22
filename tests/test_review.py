@@ -1649,6 +1649,10 @@ class _FakeTuiApp:
         handler now calls. Silent here: what this file asserts is the
         review summary, and a timing line would be noise in it."""
 
+    def _sync_sidebar_timer(self):
+        """ROADMAP_v3 §108, `_write_turn_time`'s reason: the real handler
+        stops the sidebar's clock as a run finishes. Nothing ticks here."""
+
     def post_message(self, message):
         self.messages.append(message)
 
@@ -1684,6 +1688,8 @@ class _NullProgress:
     """§22's sidebar panel, stubbed -- these tests are about the worker's
     handoff, not about rendering."""
     def start_run(self, *a, **k): pass
+    # §108: the finished handler resolves a run's unresolved passes.
+    def run_ended(self, *a, **k): pass
 
 
 class TestTuiReviewLifecycle:

@@ -18,6 +18,7 @@ it for the secret redactors. The part of the rule that matters is intact:
 nothing here reads config, storage, a session or a tool.
 """
 
+import time
 import webbrowser
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ from textual.reactive import reactive
 from textual.strip import Strip
 from textual.widgets import ContentSwitcher, RichLog, Static, TextArea
 
+from core import live_runs
 from core.ansi import AnsiStripper
 from prompts.system_prompts import pass_label
 from tui import diffs, markdown, ravens, themes
@@ -201,6 +203,52 @@ MARK_FAILED = "☒"    # U+2612 BALLOT BOX WITH X
 # research panel. It borrows the transcript's own tool marker, so the
 # same glyph means "in flight" in both places.
 MARK_RUNNING = "▸"
+
+# ROADMAP_v3 §108, the owner's addition: a running row's mark SPINS, in
+# every panel that has running rows -- research passes, agent runs and
+# background sessions -- so "running" looks the same in all three and a
+# row that is still moving is told from one that has stopped by looking.
+# Six-dot braille, ONE CELL each under the pinned Rich (tests pin that, as
+# they pin the checkboxes'), drawn in place of MARK_RUNNING. With
+# `tui.animations` off a panel is never given a frame and draws
+# MARK_RUNNING, still.
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+#: Seconds per spinner frame. One timer drives all three panels (app.py),
+#: and only while one of them has a running row.
+#:
+#: FOUR FRAMES A SECOND, the owner's choice once it was measured (batch
+#: 282, the mounted app, three interleaved 8 s rounds): idle 1.8-2.0% of a
+#: core, ten frames a second 3.9-8.8%, four 1.8-2.0%. The ten a CLI
+#: spinner usually turns at cost up to seven points of a core for as long
+#: as anything ran, which is the competition with streaming ROADMAP_v2
+#: §16's animation rule exists to refuse; four costs nothing measurable.
+SPINNER_INTERVAL = 0.25
+
+
+def update_sized(widget, body: Text) -> None:
+    """`widget.update(body)`, laying the sidebar out again only when the
+    widget's size can have changed (ROADMAP_v3 §108).
+
+    MEASURED, with the spinner at ten frames a second: the sidebar's three
+    panels redrawn per tick cost 10.6% of a core against 2.2% idle, nearly
+    all of it Textual laying the sidebar out again after `update()`. A tick
+    changes a glyph and a figure, and almost never a line's width, so the
+    SHAPE -- every line's width in cells -- is compared and the layout is
+    asked for only when it moved. A line that wraps wraps the same way for
+    the same width, so the shape is the size."""
+    shape = tuple(cell_len(line) for line in body.plain.splitlines())
+    layout = shape != getattr(widget, "_drawn_shape", None)
+    widget._drawn_shape = shape
+    widget.update(as_content(body), layout=layout)
+
+
+def running_mark(frame) -> str:
+    """A running row's mark: the spinner's `frame`, or MARK_RUNNING for
+    None, which is what a panel holds with animations off."""
+    if frame is None:
+        return MARK_RUNNING
+    return SPINNER_FRAMES[int(frame) % len(SPINNER_FRAMES)]
 
 # Also not a checklist state. A zero-LLM stage (Pass 5, gate D1) is
 # done the moment it is announced because it made no model call, so it
@@ -892,6 +940,11 @@ class AgentRow:
     # LINEAGE THE PANEL INVENTED. Wrong rather than missing, which is the
     # harder kind to notice.
     parent_id: object = None
+    # ROADMAP_v3 §108 (PW4). `running` for a row on the stack; `done` or
+    # `failed` for a finished subagent the panel keeps under it, as the
+    # session panel keeps finished sessions. `done` is a run that returned
+    # an answer; `failed` one that raised.
+    status: str = "running"
 
 
 def lineage_rows(rows) -> list:
@@ -1066,6 +1119,10 @@ class AgentPanel(Static):
         self._agent = None
         self._stack: list = []
         self._root = None
+        # §108 (PW4): finished subagents, newest first, already capped.
+        self._finished: list = []
+        # §108: the spinner frame, or None for the still mark.
+        self._frame = None
         # Explicit, for TodoPanel's reason: a widget that renders nothing
         # yet must not be a visible empty box before its first update.
         self.display = False
@@ -1077,7 +1134,8 @@ class AgentPanel(Static):
             return {}
         return themes.styles_for(app)
 
-    def show(self, agent_name, stack, root_thread=None) -> None:
+    def show(self, agent_name, stack, root_thread=None,
+             finished=()) -> None:
         """Draw the active agent and the spans currently open under it.
 
         `agent_name` is None when no /agent switch is active. `stack` is a
@@ -1085,11 +1143,26 @@ class AgentPanel(Static):
         conversation the root row stands for, or None before there is
         one -- a session that has not had a turn yet has no thread, and
         the panel must not be what creates one.
+
+        `finished` (ROADMAP_v3 §108, PW4) is the subagents that have ended,
+        newest first and already capped, each AgentRow carrying its
+        `status`. They are drawn under the running tree, one level in,
+        marked as the session panel marks sessions, and open on a click
+        like any row. A run used to leave the panel the moment it ended, so
+        which subagents had finished, and how, could not be seen at all.
         """
         self._agent = agent_name
         self._stack = list(stack)
         self._root = root_thread
+        self._finished = list(finished)
         self._redraw()
+
+    def tick(self, frame) -> None:
+        """The spinner moved (§108). Redrawn only while a row is running:
+        a still panel is not repainted ten times a second."""
+        self._frame = frame
+        if self._stack:
+            self._redraw()
 
     def restyle(self) -> None:
         """Re-render under the current theme (#183), like ResearchProgress."""
@@ -1147,9 +1220,10 @@ class AgentPanel(Static):
             self.post_message(ThreadSelected(thread_id))
 
     def _redraw(self) -> None:
-        if self._agent is None and not self._stack:
+        if self._agent is None and not self._stack and not self._finished:
             self.display = False
             self.update("")
+            self._drawn_shape = None
             return
 
         styles = self._styles()
@@ -1188,8 +1262,21 @@ class AgentPanel(Static):
             # than as a run inside this one.
             pad = " " * (self.INDENT * level)
             room = self.WIDTH - len(pad) - 2      # the marker and its space
-            body.append(f"{pad}{MARK_RUNNING} {self._fit(row.name, room)}\n",
-                        self._armed(styles.get("tool", ""), row.thread_id))
+            body.append(
+                f"{pad}{running_mark(self._frame)} "
+                f"{self._fit(row.name, room)}\n",
+                self._armed(styles.get("tool", ""), row.thread_id))
+        # §108 (PW4). Under the running tree, ONE LEVEL IN and in the order
+        # they ended: a finished run's parent may be finished too, or still
+        # running above, and drawing it in a lineage it no longer has a
+        # place in would invent one. The marks are SessionPanel's.
+        for row in self._finished:
+            mark, role = SessionPanel.STATUS.get(
+                row.status, SessionPanel.STATUS["done"])
+            pad = " " * self.INDENT
+            room = self.WIDTH - len(pad) - 2
+            body.append(f"{pad}{mark} {self._fit(row.name, room)}\n",
+                        self._armed(styles.get(role, ""), row.thread_id))
         # Batch 55's reason -- a row this widget already sized must not be
         # re-wrapped by the Static underneath it, and a miscalculation
         # should clip visibly rather than reflow invisibly -- but the rule
@@ -1199,7 +1286,7 @@ class AgentPanel(Static):
         # moment the pin moved: silently, and on the widget least able to
         # afford a reflow. See `as_content`.
         self.display = True
-        self.update(as_content(body))
+        update_sized(self, body)
 
 class SessionPanel(Static):
     """What is running in the background, and what just finished (§49,
@@ -1250,9 +1337,21 @@ class SessionPanel(Static):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._rows: list = []
+        # §108: the spinner frame, or None for the still mark.
+        self._frame = None
         # TodoPanel's reason: a widget that renders nothing yet must not
         # be a visible empty box before its first update.
         self.display = False
+
+    def running(self) -> bool:
+        return any(row.get("status", "running") == "running"
+                   for row in self._rows)
+
+    def tick(self, frame) -> None:
+        """The spinner moved (§108); redrawn only while a row is running."""
+        self._frame = frame
+        if self.running():
+            self._redraw()
 
     def _styles(self) -> dict:
         try:
@@ -1295,6 +1394,7 @@ class SessionPanel(Static):
         if not self._rows:
             self.display = False
             self.update("")
+            self._drawn_shape = None
             return
 
         styles = self._styles()
@@ -1303,6 +1403,8 @@ class SessionPanel(Static):
         for row in self._rows:
             mark, role = self.STATUS.get(row.get("status", "running"),
                                          self.STATUS["running"])
+            if row.get("status", "running") == "running":
+                mark = running_mark(self._frame)
             outcome = row.get("outcome", "")
             room = self.WIDTH - 2
             if outcome:
@@ -1317,7 +1419,7 @@ class SessionPanel(Static):
         # AgentPanel's note: the nowrap/clip rule lives on the widget in
         # app.tcss, because `Content` carries neither flag.
         self.display = True
-        self.update(as_content(body))
+        update_sized(self, body)
 
 
 class ThreadCrumb(Static):
@@ -1436,14 +1538,26 @@ class ResearchProgress(Static):
     # keeps the newest row near the top of what it reveals.
     ROWS = 16
 
-    def __init__(self, **kwargs):
+    #: ROADMAP_v3 §108 (PW3). A running row's figures, two columns in so
+    #: they sit under the pass's name. MEASURED for the sidebar's 18 cells
+    #: with its scrollbar up: the owner's `12k · 40k thought` is 19 with
+    #: this indent at ordinary figures and more with large ones, so
+    #: written and thought are a line each.
+    DETAIL_INDENT = "  "
+    WIDTH = 18
+
+    def __init__(self, live=None, clock=None, **kwargs):
         super().__init__(**kwargs)
         self.display = False
+        # §108. Where a running pass's live figures come from, and the clock
+        # its elapsed time is read on; both injectable for the tests.
+        self._live = live if live is not None else live_runs.runs.read
+        self._clock = clock if clock is not None else time.monotonic
+        self._frame = None
         self.reset()
 
     def reset(self) -> None:
-        # [pass_id, done?, failed?, code_stage?, tool_calls, chars]
-        self._passes: list = []
+        self._passes: list = []          # _PassRow, in the order they began
         self._tiers: dict = {}           # claim_id -> tier
         self._claims = 0
         self._retries = 0
@@ -1484,8 +1598,64 @@ class ResearchProgress(Static):
         self._redraw()
 
     def pass_started(self, pass_id: str) -> None:
-        self._passes.append([pass_id, False, False, False, 0, 0])
+        self._passes.append(_PassRow(pass_id, started=self._clock()))
         self._redraw()
+
+    def bind_thread(self, pass_id: str, thread_id) -> None:
+        """The running pass `pass_id` writes `thread_id` (ROADMAP_v3 §108).
+
+        Learned from the agent span the pass opens, which is bound the
+        moment its thread exists -- before its first model call, when no
+        pipeline event could carry it. The MOST RECENT row with this label,
+        and only while it has no thread: passes with one label run one
+        after another, and the snapshot that binds a pass is posted before
+        its first call, so it reaches the app before the event that ends
+        the pass. (Asking that the row also be unresolved, as
+        `pass_completed` does, was a guard no ordering could reach; the
+        mutation pass found it and it went.) A row keeps its thread once
+        the pass ends, which is what makes a finished pass openable (PW4)."""
+        for entry in reversed(self._passes):
+            if entry.pass_id == pass_id:
+                if entry.thread_id is None and thread_id is not None:
+                    entry.thread_id = str(thread_id)
+                    self._redraw()
+                return
+
+    def running(self) -> bool:
+        """Whether any pass is running, so its figures need a clock."""
+        return any(not entry.done for entry in self._passes)
+
+    def run_ended(self) -> None:
+        """The run is over (ROADMAP_v3 §108). A pass still unresolved is
+        one the run failed or was abandoned in, and resolves as failed, as
+        E14 resolves a skipped candidate: a row whose clock went on
+        counting would describe a pass that is no longer running. A run
+        that completed has none, and this changes nothing."""
+        changed = False
+        for entry in self._passes:
+            if not entry.done:
+                entry.done = True
+                entry.failed = True
+                changed = True
+        if changed:
+            self._redraw()
+
+    def tick(self, frame) -> None:
+        """The sidebar's clock moved (§108): elapsed and waiting figures
+        change with nothing else happening, and the spinner with them.
+        A panel with nothing running is not redrawn."""
+        self._frame = frame
+        if self.running():
+            self._redraw()
+
+    def on_click(self, event) -> None:
+        """Open the pass this row is about, running or finished (§108,
+        PW4). A plain click, for AgentPanel's reason. A pass whose thread
+        is not known yet, a code stage and the tallies are the same
+        silence."""
+        thread_id = _clicked_thread(self, event)
+        if thread_id:
+            self.post_message(ThreadSelected(thread_id))
 
     def pass_completed(self, pass_id: str, *, ok: bool) -> None:
         """`ok` is REQUIRED and keyword-only (#115/E14): a caller that
@@ -1499,9 +1669,9 @@ class ResearchProgress(Static):
         mode's overlapping Pass 1 rows because candidates start and
         finish sequentially."""
         for entry in reversed(self._passes):
-            if entry[0] == pass_id and not entry[1]:
-                entry[1] = True
-                entry[2] = not ok
+            if entry.pass_id == pass_id and not entry.done:
+                entry.done = True
+                entry.failed = not ok
                 break
         self._redraw()
 
@@ -1509,7 +1679,7 @@ class ResearchProgress(Static):
         """A zero-LLM stage (§26). Recorded as already done, because it
         was: it made no model call, so it has no observable running
         state."""
-        self._passes.append([pass_id, True, False, True, 0, 0])
+        self._passes.append(_PassRow(pass_id, done=True, is_stage=True))
         self._redraw()
 
     def restyle(self) -> None:
@@ -1526,18 +1696,21 @@ class ResearchProgress(Static):
         kind. The count is what proves a quiet pass is working."""
         entry = self._current(pass_id)
         if entry is not None:
-            entry[4] += 1
+            entry.tools += 1
             self._redraw()
 
-    def activity(self, pass_id: str, chars: int) -> None:
+    def activity(self, pass_id: str, chars: int, thinking=None) -> None:
+        """`pass_activity`'s totals: output and, since §108 (PW1), thinking,
+        each its own figure."""
         entry = self._current(pass_id)
         if entry is not None:
-            entry[5] = chars or 0
+            entry.chars = chars or 0
+            entry.thinking = thinking or 0
             self._redraw()
 
     def _current(self, pass_id: str):
         for entry in reversed(self._passes):
-            if entry[0] == pass_id and not entry[1]:
+            if entry.pass_id == pass_id and not entry.done:
                 return entry
         return None
 
@@ -1567,10 +1740,11 @@ class ResearchProgress(Static):
         styles = self._styles()
         body = Text()
         body.append("research\n\n")
-        for pass_id, done, failed, is_stage, tools, chars in self._passes[-self.ROWS:]:
-            if is_stage:
+        now = self._clock()
+        for entry in self._passes[-self.ROWS:]:
+            if entry.is_stage:
                 marker, role = MARK_STAGE, "pass_done"
-            elif failed:
+            elif entry.failed:
                 # #115/E14. A row that ended badly must not share a
                 # glyph with one that finished. This used to be the
                 # transcript's own ✗; since batch 41 it is the ballot
@@ -1578,18 +1752,19 @@ class ResearchProgress(Static):
                 # puts the three pass outcomes in one visual family.
                 marker, role = MARK_FAILED, "error"
             else:
-                marker, role = (MARK_DONE, "pass_done") if done \
-                    else (MARK_RUNNING, "pass")
-            body.append(f"{marker} {pass_label(pass_id)}\n", styles.get(role, ""))
-            if not done:
-                detail = []
-                if tools:
-                    detail.append(f"{tools} tool{'s' if tools > 1 else ''}")
-                if chars:
-                    detail.append(f"{chars // 1000}k")
-                if detail:
-                    body.append(f"    {' · '.join(detail)}\n",
-                                styles.get("tool", ""))
+                marker, role = (MARK_DONE, "pass_done") if entry.done \
+                    else (running_mark(self._frame), "pass")
+            # §108 (PW4). Armed with the pass's thread once it is known, so
+            # a click opens the pass, running or finished. A stage has no
+            # thread and stays unarmed.
+            body.append(f"{marker} {pass_label(entry.pass_id)}\n",
+                        armed_style(styles.get(role, ""), entry.thread_id))
+            if not entry.done:
+                for line in self._details(entry, now):
+                    body.append(
+                        f"{self.DETAIL_INDENT}"
+                        f"{AgentPanel._fit(line, self.WIDTH - len(self.DETAIL_INDENT))}\n",
+                        styles.get("tool", ""))
         if self._claims:
             body.append(f"\n{self._claims} claim(s)\n")
         for tier, label in self.TIERS:
@@ -1598,7 +1773,93 @@ class ResearchProgress(Static):
                 body.append(f"  {label} {count}\n", styles.get(tier, ""))
         if self._retries:
             body.append(f"{self._retries} revision(s)\n")
-        self.update(as_content(body))
+        update_sized(self, body)
+
+    def _details(self, entry, now) -> list:
+        """A running pass's figures, a line each (ROADMAP_v3 §108, PW3):
+
+            6m40s · 3 tools      how long it has run, and its tool calls
+            waiting 1m05s        what it is doing, and for how long
+            12k written          output streamed (`pass_activity`)
+            40k thought          thinking streamed (PW1)
+            41k in · 9k out      the provider's token counts so far
+
+        The elapsed time and the figures come from this panel's events; the
+        state line and the tokens from the pass's live record, the only
+        place they exist while a call is out. A line with nothing to say is
+        left out: no thread yet, no tokens until a call has returned."""
+        lines = []
+        head = [live_runs.duration(now - entry.started)]
+        if entry.tools:
+            head.append(f"{entry.tools} tool{'s' if entry.tools > 1 else ''}")
+        lines.append(" · ".join(head))
+        snap = None
+        if entry.thread_id is not None:
+            try:
+                snap = self._live(entry.thread_id)
+            except Exception:  # noqa: BLE001 -- a figure is not worth a crash
+                snap = None
+        if snap is not None and snap.live:
+            state = _state_line(snap)
+            if state:
+                lines.append(state)
+        if entry.chars:
+            lines.append(f"{short_count(entry.chars)} written")
+        if entry.thinking:
+            lines.append(f"{short_count(entry.thinking)} thought")
+        if snap is not None:
+            tokens = []
+            if snap.tokens_in is not None:
+                tokens.append(f"{short_count(snap.tokens_in)} in")
+            if snap.tokens_out is not None:
+                tokens.append(f"{short_count(snap.tokens_out)} out")
+            if tokens:
+                lines.append(" · ".join(tokens))
+        return lines
+
+
+def _state_line(snap) -> str:
+    """What a live run is doing, for a pass row (ROADMAP_v3 §108, PW3):
+    `waiting 1m05s` while a call is out with no byte of it yet,
+    `last byte 2s` while it streams, `fetch_url 12s` while a tool runs
+    (`fetch_url +2 12s` for a group). Empty for a run that has ended."""
+    took = live_runs.duration(snap.phase_for)
+    if snap.phase == live_runs.WAITING:
+        return f"waiting {took}"
+    if snap.phase == live_runs.STREAMING:
+        return f"last byte {took}"
+    if snap.phase == live_runs.TOOLS and snap.tools:
+        # The count is kept and the first name gives way, so a group of
+        # three never reads as one tool.
+        extra = len(snap.tools) - 1
+        more = f" +{extra}" if extra else ""
+        room = (ResearchProgress.WIDTH - len(ResearchProgress.DETAIL_INDENT)
+                - len(took) - 1 - len(more))
+        return f"{AgentPanel._fit(snap.tools[0], room)}{more} {took}"
+    return ""
+
+
+class _PassRow:
+    """One row of the research panel. Mutable: the panel is its only
+    writer, on the UI thread.
+
+    It was a six-item list read by position until §108 gave it a thread,
+    a start time and a thinking figure; nine positions would have been
+    nine chances to read the wrong one."""
+
+    __slots__ = ("pass_id", "done", "failed", "is_stage", "tools", "chars",
+                 "thinking", "thread_id", "started")
+
+    def __init__(self, pass_id, *, done=False, is_stage=False, started=0.0):
+        self.pass_id = pass_id
+        self.done = done
+        self.failed = False
+        self.is_stage = is_stage
+        self.tools = 0
+        self.chars = 0
+        self.thinking = 0
+        self.thread_id = None
+        self.started = started
 
 
 class SlashSuggest(Static):

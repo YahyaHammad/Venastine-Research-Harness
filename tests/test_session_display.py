@@ -50,7 +50,14 @@ from tui.app import (
     VenastineApp,
     _panel_rows,
 )
-from tui.widgets import CallSelected, SessionPanel, SessionSelected, Transcript
+from tui.widgets import (
+    MARK_RUNNING,
+    SPINNER_FRAMES,
+    CallSelected,
+    SessionPanel,
+    SessionSelected,
+    Transcript,
+)
 
 THREAD = "tui-thread"
 
@@ -585,7 +592,11 @@ class TestTheFinishedRows:
             await pilot.pause()
             _start(manager, command="npm ci")
             assert await settle(pilot, lambda: app._session_panel.display)
-            assert _drawn(app._session_panel)[2].startswith("▸ s1")
+            # ROADMAP_v3 §108: a running row's mark spins in a mounted app,
+            # so it is the still mark or a frame, whichever the tick left.
+            first = _drawn(app._session_panel)[2]
+            assert first[0] in MARK_RUNNING + SPINNER_FRAMES
+            assert first[2:].startswith("s1")
 
             session_starter.started[-1]["process"].exit(0)
             assert await settle(

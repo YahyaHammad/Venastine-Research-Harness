@@ -33061,3 +33061,117 @@ transcript cannot be selected.
 **Batch 280's release note, settled.** PR #300's merge started its workflows, and `release.yml`
 released 0.3.23 (`ad37f16`), counting up from `v0.3.22`. So 0.3.23 carries PR #299's changes as well
 as #300's, and the events GitHub lost were that one merge's alone.
+
+## Batch 282 -- a research pass you can watch, and every run's view streams its step in progress (ROADMAP_v3 §108, PW1-PW4, PW6, PW7) (2026-11-22)
+
+**Asked.** Take another roadmap item, after PR #301 merged and released 0.3.24. The owner chose
+§108 from `ROADMAP_v3_researcher_feedback.md`, the researcher's sharpest complaint about the TUI: a
+run whose inside could not be seen.
+
+**Checked first.** Measured on `main` (`6e965e5`, 0.3.24), on the real loop with only the model
+scripted and the suite's fake storage. A pass streamed 40,000 characters of thinking and then 3,000
+of text:
+- `pass_activity` fired once, reading 2,000. Thinking was counted nowhere: `_translate` left it out
+  on purpose (§38 O5) and said to flip it if a real run needed it.
+- Read from inside the scripted stream, mid-thinking and mid-text, the pass's thread held one row,
+  its task. The viewer reads that thread and nothing else, so it showed the task alone until the
+  call ended. D20 persists a step once its call returns.
+- A finished research row carried no thread: 0 armed spans. A pass's thread has no parent link (§47),
+  so ctrl+g's stored-run tree never lists it, and its agent-panel row leaves when it ends. A finished
+  pass could not be opened from the TUI at all.
+Read, and not driven: a finished subagent left the agent panel the moment it ended, as sessions did
+before batch 258, and the CLI printed nothing while a pass waited on the model, because the
+pipeline is blocked in the read.
+
+**Settled with the owner.** Two rounds, every recommended option, and two additions of their own:
+- Slicing: PW1-PW4 now and PW5, the run and pass totals, in batch 283.
+- PW2: the live view for every run the viewer opens, not research passes only.
+- PW3: every figure on a running pass row.
+- PW4: every research row opens its pass, running or finished; the agent panel keeps the five most
+  recent finished subagents. The proposal had five finished passes in the agent panel, which would
+  have dropped a run's earlier passes, Pass 1's draft among them.
+- PW6, the owner's addition: a spinner on running rows, which they asked for in their answer to
+  the slicing question. A second round put it on every running row of the sidebar. Its rate was
+  asked a third time, once measured (below).
+- PW7: the CLI's activity line gains thinking, and a pass waiting a minute on the model says so,
+  then every five minutes.
+
+**Built.**
+- `core/live_runs.py` (new): the per-thread live record. The step in progress's text and thinking
+  are deques of chunks, the last 200,000 characters of each kept. The record also holds the phase
+  (waiting, streaming, tools, ended), when it began or the last byte came, the running tools, and
+  the provider's token counts. An ended run keeps its figures among the last 32, so §99's corrective
+  retry, a second run on the same thread, carries on counting.
+- `core/loop.py`: `_run` opens the record for every run but the conversation's own and ends it
+  however the run ends. `_run_steps` writes at a call going out, each delta, a retraction, a step
+  persisted with its usage, and a tool group starting and settling. `LoopEvent` gained nothing (P1).
+- `core/agent_activity.py`: `exit(span, ok)`, False for a body that raised or was closed.
+- `core/reasoning/orchestrator.py`, `events.py`: `_Streamed` counts thinking, and `pass_activity`
+  carries it beside `chars`, each announcing on its own 2,000.
+- `main.py`: `_activity_line` (`.. 12k chars · 40k thought`) and `_ModelWait`, a ticker thread that
+  reads the running pass's record every 5 s.
+- `tui/widgets.py`: the spinner (`SPINNER_FRAMES`, `running_mark`), `update_sized`, the
+  `_PassRow` research rows with a thread, a start and a thinking figure, `_details` and
+  `_state_line`, `bind_thread`, `run_ended`, the click, and `AgentPanel`'s finished rows.
+- `tui/app.py`: the sink keeps the finished subagents and `AgentStackChanged` carries them; a pass
+  span binds its research row; one sidebar clock; the viewer's `_draw_live_step`, its poll, and a
+  last read as a run ends.
+
+**Two things found on the way.**
+- **The viewer stopped one step short of every run.** A run writes its last step and then closes
+  its span, and the span closing is what stops the poll, so the tick before it could be up to a
+  second earlier. With the step in progress drawn live, that would have left the view on an
+  unfinished copy of a step the archive already had. The poll now reads once more as it stops;
+  without that read, the test's last entry never reaches the view.
+- **The spinner's first cost was 10.6% of a core.** Mounted app, 10 s windows: idle 2.2%, ten
+  frames a second 10.6%, four 7.3%, two and a half 4.5%. Nearly all of it was Textual laying the
+  sidebar out again after every `update()`, though a tick only changes a glyph and a figure.
+  `update_sized` asks for the layout only when a line's width changed. Interleaved after that, three
+  8 s rounds: idle 1.2-1.8%, ten frames a second 4.9-8.8% with the skip and 7.2-10.7% without. With
+  the skip at each rate: idle 1.8-2.0%, ten frames 3.9-8.8%, four 1.8-2.0%, two and a half 2.5-2.7%.
+  The owner chose four frames a second, which costs nothing measurable.
+
+**Changed in the tests.** `test_streaming_loop.py`'s O5 pin, that a thinking-only pass produced no
+activity, now pins PW1's rule: one event with `chars=0` and its own `thinking`.
+`test_streamed_retry.py` read research rows by position and now reads them by name.
+`test_session_display.py`'s pilot test accepts a spinner frame as a running mark. Three test
+sinks' `exit` take `ok`. `tests/BREAKING_CHANGES.md` has a row for each.
+
+**Verified.**
+- Full suite on Windows with AGENT_WORKSPACE unset, run on the commit: 10,149 passed and 88 skipped (10,237), in 2:53. Its one warning is a
+  deliberately duplicated name in a hostile test archive, in code this change does not touch.
+- The first full run, on the working tree, failed one test of 10,144:
+  `test_review.py`'s `_FakeTuiApp` drives `on_research_finished` through the real unbound handler
+  and had no `_sync_sidebar_timer`. The double grew it, and its progress panel grew `run_ended`, as
+  it grew `_write_turn_time` in batch 61.
+- 79 deliberate breaks of the new code, one per line that carries a decision. The first pass left
+  five alive:
+  - three were real test gaps, and a test now kills each: a retry's wait timed from the failed call
+    (nothing told the record a call had gone out); a tool group still named between settling and
+    the next call; a step retracted with no new entry in the archive (two rows, one test);
+  - the fifth was a guard no ordering could reach. `bind_thread` asked that the row be unresolved,
+    but the snapshot that binds a pass is posted before its first call and the app handles
+    messages in order. The guard went, and its row now breaks the newest-row rule instead.
+  All 79 are killed, each by a failed assertion.
+- ruff is clean. bandit 1.9.4 found one new issue at first, B112 (try, except, continue) in the
+  clock's loop, rewritten as `_answers_yes`; after that, nothing outside the baseline. gitleaks
+  8.30.1 with CI's config finds nothing in an export of the tree.
+- No workflow or requirements file is in the diff.
+
+**CI on PR #302 found one more.** Both `bandit` jobs failed, and nothing else did: `scripts/bandit-count-check.py`
+reported `tui/app.py B110 3 -> 4`. The fourth try/except/pass was this batch's guard around
+`run_ended()` in `on_research_finished`. The local bandit pass compared findings by (file, test,
+message), which is exactly the unit the baseline absorbs a second occurrence under, so it could not
+see it; the count check, run here, reproduces the line. The guard went: the handler runs on a mounted
+app, where the panel is held rather than queried, and nothing else in it is guarded. The count
+check then reports none grew, and mutant 68, re-pointed at the unguarded call, is still killed by
+`test_a_failed_run_stops_its_rows_and_the_clock`. Full suite on Windows with AGENT_WORKSPACE unset,
+run on the fix's commit: 10,149 passed and 88 skipped (10,237), in 2:58, with the same one warning.
+
+**Batch 281's release, settled.** PR #301 merged as `6abaeea`, and `release.yml` released 0.3.24
+(`6e965e5`, tag `v0.3.24`).
+
+**Not done** (§108's gap register). PW5 is batch 283. The live view draws a step's
+thinking, then its text, and polls once a second. A stopped subagent reads `☑`. The research panel
+still shows its last 16 rows. The CLI's waiting line is for passes only. The wiki may need the
+sidebar's new figures.

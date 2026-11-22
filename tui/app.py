@@ -56,7 +56,14 @@ import config_update
 import storage
 from agents import tui_commands as agent_commands
 from agents.tui_commands import register_agent_commands
-from core import compaction, config_loader, session_wake, shell_sessions, usage_view
+from core import (
+    compaction,
+    config_loader,
+    live_runs,
+    session_wake,
+    shell_sessions,
+    usage_view,
+)
 from core import connect as model_connect
 from core.agent_activity import AgentActivity
 from core.approval import RunAuthorization
@@ -124,6 +131,7 @@ from tui.screens import (
 from tui.widgets import (
     ANIMATION_INTERVAL,
     CONVERSATION_ROLES,
+    SPINNER_INTERVAL,
     THREAD_VIEW_POLL_S,
     AgentPanel,
     AgentRow,
@@ -499,11 +507,16 @@ class AgentStackChanged(Message):
     observe; a snapshot cannot disagree with itself.
     """
 
-    def __init__(self, stack) -> None:
+    def __init__(self, stack, finished=()) -> None:
         super().__init__()
         # AgentRow records since §47, not (name, depth) tuples: a row
         # has to name a RUN for a click on it to mean anything.
         self.stack = list(stack)
+        # ROADMAP_v3 §108 (PW4). The subagents that have ended, newest
+        # first, each with its `status`. In the same message for the same
+        # reason as the stack: a row leaves one list and joins the other
+        # in one snapshot, never in two.
+        self.finished = list(finished)
 
 
 class SessionRowsChanged(Message):
@@ -599,6 +612,11 @@ class TuiActivity(AgentActivity):
     def __init__(self, app) -> None:
         self._app = app
         self._stack: list = []
+        # ROADMAP_v3 §108 (PW4). Subagents that ended, newest first, capped
+        # at what the panel shows. Kept here, beside the stack they leave,
+        # because `exit` is the only place that knows both the row and how
+        # its run ended.
+        self._finished: list = []
         # Guards the three mutators against each other. Plain Lock, not
         # RLock: none of them calls another, and `_post` is deliberately
         # outside the held region.
@@ -614,10 +632,10 @@ class TuiActivity(AgentActivity):
                          # since batch 67; this is the one hop that was
                          # missing between the two.
                          parent_id=span.parent_id))
-            snapshot = list(self._stack)
-        self._post(snapshot)
+            snapshot, finished = list(self._stack), list(self._finished)
+        self._post(snapshot, finished)
 
-    def exit(self, span) -> None:
+    def exit(self, span, ok=True) -> None:
         # BY ID since §47, and that retires a workaround rather than
         # changing a policy. This used to remove the LAST entry matching
         # (name, depth), because two spans can legitimately share both
@@ -629,11 +647,22 @@ class TuiActivity(AgentActivity):
         # Slice 8 is what makes the by-id removal load-bearing rather than
         # merely correct: two runs of one agent open as PEERS, either able
         # to finish first, is the ordinary case now.
+        #
+        # §108 (PW4). A SUBAGENT's row is kept, marked by how its run
+        # ended: one a tool call started, which is what `call_id` says.
+        # A research pass has a row of its own in the research panel that
+        # opens it, and the harness's runs -- compaction, the reviewer --
+        # are not what anyone asked to see finish.
         with self._lock:
+            gone = [row for row in self._stack if row.span_id == span.id]
             self._stack = [row for row in self._stack
                            if row.span_id != span.id]
-            snapshot = list(self._stack)
-        self._post(snapshot)
+            if gone and gone[0].call_id is not None:
+                ended = replace(gone[0], status="done" if ok else "failed")
+                self._finished = ([ended] + self._finished)[
+                    :PANEL_FINISHED_SHOWN]
+            snapshot, finished = list(self._stack), list(self._finished)
+        self._post(snapshot, finished)
 
     def bind(self, span_id, thread_id) -> None:
         """That run's thread exists; give its row an address (§47).
@@ -653,10 +682,10 @@ class TuiActivity(AgentActivity):
                 else row
                 for row in self._stack
             ]
-            snapshot = list(self._stack)
-        self._post(snapshot)
+            snapshot, finished = list(self._stack), list(self._finished)
+        self._post(snapshot, finished)
 
-    def _post(self, snapshot: list) -> None:
+    def _post(self, snapshot: list, finished=()) -> None:
         """Hand the UI thread one snapshot. Called outside the lock.
 
         Outside deliberately: `post_message` reaches Textual's own
@@ -664,7 +693,7 @@ class TuiActivity(AgentActivity):
         subsystem's call is how a lock ordering nobody wrote down comes
         into existence.
         """
-        self._app.post_message(AgentStackChanged(snapshot))
+        self._app.post_message(AgentStackChanged(snapshot, finished))
 
 
 def _redacted_command(row) -> str:
@@ -689,6 +718,17 @@ def _redacted_command(row) -> str:
 #: manager keeps twenty (`_FINISHED_KEPT`), so this is a view of what it
 #: holds and never a reason for it to hold more.
 PANEL_FINISHED_SHOWN = 5
+
+
+def _answers_yes(question) -> bool:
+    """Whether `question()` answers True -- and False when asking raises,
+    which a panel does before it is mounted and while it is torn down
+    (ROADMAP_v3 §108, the sidebar's clock). `is True`, so a stand-in that
+    answers with a mock is not taken for a panel with a running row."""
+    try:
+        return question() is True
+    except Exception:  # noqa: BLE001 -- not mounted yet, or torn down
+        return False
 
 
 def _panel_outcome(row) -> tuple[str, str]:
@@ -1163,6 +1203,15 @@ class VenastineApp(App):
         # /thinking off) or adds something (the empty-run placeholder), and
         # a repaint on every tick fights the reader's scroll position.
         self._viewed_entries = 0
+        # ROADMAP_v3 §108 (PW2). What the viewer drew of the viewed run's
+        # step in progress, from its live record: (step, text end,
+        # thinking end), or None when nothing of it is drawn.
+        self._viewed_live = None
+        # §108. The sidebar's one clock: the spinner, and a running pass's
+        # elapsed and waiting figures. Running only while a panel has a
+        # running row.
+        self._sidebar_timer = None
+        self._sidebar_frame = 0
         # §47. Spawn call id -> the thread that call created, as TEXT
         # both sides, because it arrives from style metadata.
         #
@@ -1271,6 +1320,9 @@ class VenastineApp(App):
         # UI thread, in on_agent_stack_changed; the sink that feeds it
         # keeps its own copy on the worker side. One writer each.
         self._agent_stack: list = []
+        # §108 (PW4). The finished subagents the panel keeps, as the sink
+        # last posted them.
+        self._agent_finished: list = []
         self._activity = TuiActivity(self)
         # §49 (SS14). The session manager's sink. Registered at
         # mount and dropped at unmount, because it is PROCESS-wide
@@ -2640,7 +2692,9 @@ class VenastineApp(App):
         # only source that survives a restart. Contained in the helper, so
         # a run whose children cannot be read still opens.
         self._learn_spawn_threads(resolved)
-        self._paint_thread_view(entries)
+        # §108: the thread named, because `_viewing` is set only after
+        # the paint and the live step is read by it.
+        self._paint_thread_view(entries, thread=resolved)
         self._viewing = resolved
         self._crumb.show(self._thread_chain(resolved))
         self._pane.current = "thread-view"
@@ -2972,8 +3026,16 @@ class VenastineApp(App):
         elif not wanted and self._view_timer is not None:
             self._view_timer.stop()
             self._view_timer = None
+            # ROADMAP_v3 §108. ONE LAST READ as the run ends. A run writes
+            # its last step and THEN closes its span, and the tick before
+            # that close can be up to a second earlier, so the view used to
+            # stop one step short -- and, with the step in progress drawn
+            # live, on an unfinished copy of the step the archive now has.
+            if viewing is not None and session_id is None:
+                self._poll_thread_view()
 
-    def _paint_thread_view(self, entries, keep_place: bool = False) -> None:
+    def _paint_thread_view(self, entries, keep_place: bool = False,
+                           thread=None) -> None:
         """Draw a viewed run, and remember how much of it was drawn.
 
         ONE write path for the two callers -- opening a run and the poll
@@ -2996,8 +3058,53 @@ class VenastineApp(App):
         # took them to the bottom, because this empties the pane first.
         with view.keeping_place() if keep_place else nullcontext():
             self._repaint_thread_view(view, entries)
+            # §108 (PW2). Then the step in progress, from the start.
+            self._viewed_live = None
+            self._draw_live_step(
+                view, thread if thread is not None else self._viewing_thread)
         # WHAT THE ARCHIVE HELD, not what the widget drew. See the poll.
         self._viewed_entries = len(entries)
+
+    def _draw_live_step(self, view, viewing) -> None:
+        """Draw what the viewed run's step in progress has streamed since
+        the last draw (ROADMAP_v3 §108, PW2).
+
+        THE ARCHIVE HOLDS FINISHED STEPS ONLY, so a pass thinking for ten
+        minutes, or a subagent writing its first answer, showed nothing
+        here until the call ended. Measured in batch 282: 43,000 characters
+        streamed and the view's source held the task alone. The rest comes
+        from the run's live record (`core/live_runs.py`), in memory and
+        written by the loop, and is APPENDED through the transcript's own
+        streaming path -- the cost the proposal measured at 0.47 ms of CPU
+        per token, where a rewrite costs twice that and grows.
+
+        Thinking first, then text, each where the last draw stopped;
+        thinking is skipped with `/thinking` off, as the archive's own is.
+        A step that has moved on since the last draw -- persisted,
+        retracted, or a new attempt -- is left to the poll, which repaints
+        from the archive and draws the new one from its start.
+        """
+        if viewing is None:
+            return
+        drawn = self._viewed_live
+        snap = live_runs.runs.read(
+            viewing,
+            text_from=drawn[1] if drawn else 0,
+            thinking_from=drawn[2] if drawn else 0)
+        if snap is None or not snap.live:
+            return
+        if drawn is not None and drawn[0] != snap.step:
+            return
+        if drawn is None and (snap.text_start or snap.thinking_start):
+            dropped = max(snap.text_start, snap.thinking_start)
+            view.write_system(
+                f"[{dropped:,} earlier characters of this step are not kept "
+                f"here; the whole step is read back once it ends]")
+        if snap.thinking and self._show_thinking:
+            view.thinking_delta(snap.thinking)
+        if snap.text:
+            view.stream_delta(snap.text)
+        self._viewed_live = (snap.step, snap.text_total, snap.thinking_total)
 
     def _repaint_thread_view(self, view, entries) -> None:
         """`_paint_thread_view`'s drawing, which may be fenced by
@@ -3087,8 +3194,17 @@ class VenastineApp(App):
         if viewing is None:
             return
         try:
+            # §108 (PW2). The live record is read BEFORE the archive: a step
+            # is persisted and then retired from the record, so a step that
+            # lands between the two reads shows up as a new entry and is
+            # repainted from the archive, never as a gap.
+            snap = live_runs.runs.read(viewing)
             entries = replay_entries(viewing)
-            if len(entries) == self._viewed_entries:
+            drawn = self._viewed_live
+            moved = (snap is not None and drawn is not None
+                     and snap.step != drawn[0])
+            if len(entries) == self._viewed_entries and not moved:
+                self._draw_live_step(self._thread_view, viewing)
                 return
             self._paint_thread_view(entries, keep_place=True)
         except Exception:                                   # noqa: BLE001
@@ -3987,6 +4103,15 @@ class VenastineApp(App):
     def on_agent_stack_changed(self, message: AgentStackChanged) -> None:
         """The sink spoke. Runs on the UI thread."""
         self._agent_stack = message.stack
+        self._agent_finished = list(getattr(message, "finished", ()))
+        # ROADMAP_v3 §108. A research pass opens a span no tool call
+        # started, named for the pass, and binds it the moment its thread
+        # exists -- before its first model call, when no pipeline event can
+        # say so. That is how its research row learns the thread it opens
+        # and reads its live figures from.
+        for row in message.stack:
+            if row.call_id is None and row.thread_id is not None:
+                self._research_progress.bind_thread(row.name, row.thread_id)
         # §47. A running child's thread reaches the transcript's spawn
         # LINE through here: the span knows which call started it and
         # `bind` gave it a thread, so the pairing exists before the
@@ -3997,6 +4122,7 @@ class VenastineApp(App):
             if row.call_id and row.thread_id is not None:
                 self._spawn_threads[str(row.call_id)] = str(row.thread_id)
         self.refresh_agent_panel()
+        self._sync_sidebar_timer()
         # §47. This is the ONLY signal that a viewed run has finished --
         # a child's own events are drained internally, so its span
         # closing is what the shell learns. Without this the poll would
@@ -4047,6 +4173,56 @@ class VenastineApp(App):
             key=lambda row: row.finished_mono or 0.0,
             reverse=True)[:PANEL_FINISHED_SHOWN]
         self._session_panel.show(_panel_rows(live) + _panel_rows(finished))
+        self._sync_sidebar_timer()
+
+    def _sync_sidebar_timer(self) -> None:
+        """Run the sidebar's clock exactly while a panel has a running row
+        (ROADMAP_v3 §108).
+
+        ONE TIMER FOR THREE PANELS, so the research, agent and session
+        rows spin in step and a sidebar with nothing running costs nothing:
+        ThinkingIndicator's rule that a tick against nothing is the idle
+        redraw loop `pause_animation` exists to avoid. At the spinner's
+        rate while `tui.animations` is on; once a second while it is off,
+        for the research panel's elapsed and waiting figures alone.
+        """
+        wanted = any(_answers_yes(running) for running in (
+            lambda: self._research_progress.running(),
+            lambda: bool(self._agent_stack),
+            lambda: self._session_panel.running()))
+        # `getattr`, because a test may build this app without __init__ and
+        # drive one of the panels' writers directly.
+        timer = getattr(self, "_sidebar_timer", None)
+        if wanted and timer is None:
+            interval = (SPINNER_INTERVAL if getattr(self, "_animations", True)
+                        else 1.0)
+            try:
+                self._sidebar_timer = self.set_interval(
+                    interval, self._tick_sidebar)
+            except Exception:  # noqa: BLE001 -- no running app to time on
+                logger.debug("Could not start the sidebar clock.",
+                             exc_info=True)
+        elif not wanted and timer is not None:
+            timer.stop()
+            self._sidebar_timer = None
+
+    def _tick_sidebar(self) -> None:
+        """One tick of the sidebar's clock. Best-effort, for the view
+        poll's reason: a timer can fire while a modal is up or the app is
+        being torn down."""
+        self._sidebar_frame = getattr(self, "_sidebar_frame", 0) + 1
+        frame = (self._sidebar_frame if getattr(self, "_animations", True)
+                 else None)
+        try:
+            self._research_progress.tick(frame)
+            if frame is not None:
+                panel = self.query("#agent-panel").first(AgentPanel) \
+                    if self.query("#agent-panel") else None
+                if panel is not None:
+                    panel.tick(frame)
+                self._session_panel.tick(frame)
+        except Exception:                                   # noqa: BLE001
+            logger.debug("Could not tick the sidebar.", exc_info=True)
 
     @property
     def _session_panel(self) -> SessionPanel:
@@ -4091,7 +4267,8 @@ class VenastineApp(App):
         # reason this reads the field. None before the first turn, which
         # draws a root row that is simply not armed.
         root = getattr(self._memory, "thread_id", None)
-        panel.show(name, self._agent_stack, root)
+        panel.show(name, self._agent_stack, root,
+                   finished=getattr(self, "_agent_finished", ()))
 
     def restyle_sidebar(self) -> None:
         """Re-render the Rich-styled sidebar widgets after a /theme
@@ -5513,7 +5690,10 @@ class VenastineApp(App):
             # Panel only. This is a running total that changes constantly;
             # in an append-only transcript it would be a column of
             # near-identical lines.
-            panel.activity(event.pass_id, event.chars)
+            #
+            # §108 (PW1): thinking too, as its own figure.
+            panel.activity(event.pass_id, event.chars,
+                           getattr(event, "thinking", None))
         elif event.kind == "trace_line":
             # Same format the end-of-run dump used, so a run reads the
             # same whether you watched it or scrolled back to it.
@@ -5537,11 +5717,23 @@ class VenastineApp(App):
             # §98. Kept for _write_resume_hint, and not drawn: a completed
             # run prints its id at the end, and a failed one in the hint.
             self._research_run_id = event.text
+        if event.kind in ("pass_start", "pass_complete", "stage"):
+            # §108. A pass starting or ending starts or stops the clock.
+            self._sync_sidebar_timer()
 
     def on_research_finished(self, message: ResearchFinished) -> None:
         self._busy = False
         self._write_turn_time()
         self._raven.state = ravens.IDLE
+        # ROADMAP_v3 §108. A run that failed or was abandoned left the pass
+        # it was in unresolved, and a row whose clock goes on counting
+        # describes a run that is over. A completed run has none left.
+        # UNGUARDED, as the raven above is: the handler runs on a mounted
+        # app, where the panel is held rather than queried. (A guard here
+        # was a fourth try/except/pass in this file, which the bandit count
+        # check refuses.)
+        self._research_progress.run_ended()
+        self._sync_sidebar_timer()
         if getattr(message, "abandoned", False):
             # #105. A deliberate quit is not a pipeline failure: say what
             # actually happened to the run. §22's wording -- abandoned,

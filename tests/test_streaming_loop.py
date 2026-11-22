@@ -736,13 +736,15 @@ def test_thinking_deltas_are_forwarded_as_their_own_event(mocker):
     assert [e.token_delta for e in events if e.token_delta is not None] == ["42."]
 
 
-def test_a_thinking_delta_does_not_reach_the_pipeline_as_activity(mocker):
-    """§38 O5, asserted where the decision lives rather than in prose.
+def test_a_thinking_delta_reaches_the_pipeline_as_its_own_figure(mocker):
+    """§38 O5 as ROADMAP_v3 §108 (PW1) amends it, asserted where the
+    decision lives rather than in prose.
 
-    _translate reads token_delta to build pass_activity's running total.
-    Thinking is excluded so `chars` keeps meaning one thing -- output
-    streamed so far -- and this pins that a thinking-only pass produces no
-    activity events rather than producing misleading ones.
+    This pinned that a thinking-only pass produced NO activity event, so
+    `chars` kept meaning output -- and a pass that thought for minutes
+    looked idle, which a researcher then saw. Thinking is counted now, as
+    its own figure: the half of O5 that keeps `chars` meaning output
+    streamed is kept, and asserted.
     """
     from core.reasoning.orchestrator import _translate
 
@@ -751,4 +753,5 @@ def test_a_thinking_delta_does_not_reach_the_pipeline_as_activity(mocker):
         return make_model_response(text="", tool_calls=None)
 
     events = list(_translate("pass_1", loop_stream()))
-    assert [e for e in events if e.kind == "pass_activity"] == []
+    activity = [e for e in events if e.kind == "pass_activity"]
+    assert [(e.chars, e.thinking) for e in activity] == [(0, 5000)]
