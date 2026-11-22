@@ -804,8 +804,24 @@ def test_pipeline_trace_contains_expected_lines_in_order(mocker):
     # run-level prefixes below. A stray line still fails.
     expected_run_level_starts = ["Source scoring:"]
 
+    # ROADMAP_v3 §108 (PW5): each LLM pass's run ends with its figures and
+    # the run with its total. Told apart by `usage_view.is_usage_line`, the
+    # reader the reviewer uses, and held to exactly one per LLM pass run
+    # and a total last -- so a stray line of THAT kind still fails too.
+    from core import usage_view
+    figures = [line for line in run.trace if usage_view.is_usage_line(line)]
+    assert [line.split(" used ")[0] for line in figures[:-1]] == [
+        "Pass 0", "Pass 1", "Pass 2", "Pass 3a", "Pass 3b", "Pass 3c",
+        "Pass 4", "Final synthesis"], figures
+    # The double replaces the loop, which is where a call is recorded, so
+    # every figure here is a pass that made no call it could count.
+    assert figures[-1].startswith("Run total: no model calls, ")
+    assert run.trace[-1] == figures[-1]
+
     actual_starts, run_level = [], []
     for line in run.trace:
+        if usage_view.is_usage_line(line):
+            continue
         matched = next((p for p in expected_pass_starts if line.startswith(p)), None)
         if matched is not None:
             # "Final synthesis complete." has no colon, so that entry is

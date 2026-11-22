@@ -3683,6 +3683,7 @@ def _modal_cases():
         SessionKillScreen,
         SubagentSignoffScreen,
         ThreadPickerScreen,
+        UsageRunPickerScreen,
     )
 
     claim = {"id": "c001", "claim": "Water boils at 100C.",
@@ -3717,6 +3718,9 @@ def _modal_cases():
          "#thread-dialog"),
         # ROADMAP_v3 §98. The thread picker's dialog and CSS, one level up.
         ("resume-run-picker", lambda: ResumeRunPickerScreen([], ""),
+         "#thread-dialog"),
+        # ROADMAP_v3 §108 (PW5). The same dialog, for `/usage --run`.
+        ("usage-run-picker", lambda: UsageRunPickerScreen([], ""),
          "#thread-dialog"),
         ("agent-picker", lambda: AgentPickerScreen([]),
          "#agent-picker-dialog"),

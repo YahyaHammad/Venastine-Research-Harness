@@ -773,11 +773,59 @@ def _cmd_network(session: ChatSession, args: str) -> None:
 def _cmd_usage(session: ChatSession, args: str) -> None:
     """ROADMAP_v3 §97 (UF4, UF6, UF7). The TUI's /usage, line for line:
     both print `core.usage_view.report_lines`. Empty until something has
-    run on this thread here, which is the span the TUI's ledger covers."""
-    same = (session.thread_id is not None
-            and session.usage_thread == session.thread_id)
-    for line in report_lines(session.usage if same else None):
+    run on this thread here, which is the span the TUI's ledger covers.
+
+    ROADMAP_v3 §108 (PW5): `--run <id>` prints one stored research run's
+    totals, as the TUI does, and a bare `--run` lists the stored runs to
+    name one from -- the CLI's picker, as a bare `--resume` lists runs."""
+    try:
+        wanted = usage_view.parse_args(args)
+    except ValueError as e:
+        _out(f"{e}.")
+        return
+    if wanted is None:
+        same = (session.thread_id is not None
+                and session.usage_thread == session.thread_id)
+        for line in report_lines(session.usage if same else None):
+            _out(line)
+        return
+    from core.reasoning.pipeline_storage import (
+        list_pipeline_runs,
+        load_pipeline_run,
+    )
+    from core.reasoning.resume import RunNotFound, find_stored_run
+    if wanted is usage_view.RUN_PICKER:
+        for line in usage_run_list_lines(list_pipeline_runs()):
+            _out(line)
+        return
+    try:
+        record = load_pipeline_run(find_stored_run(wanted))
+    except RunNotFound as e:
+        _out(f"/usage --run: {e}.")
+        return
+    for line in usage_view.run_report_lines(record):
         _out(line)
+
+
+def usage_run_list_lines(runs) -> list:
+    """What a bare `/usage --run` prints (§108 PW5): the stored runs,
+    newest first, by the eight characters `--run` takes."""
+    if not runs:
+        return ["No research run stored yet."]
+    lines = ["Research runs, newest first:"]
+    for row in runs:
+        status = ("running, or stopped" if row.get("status") == "running"
+                  else str(row.get("status")))
+        started = row.get("started_at")
+        when = (started.strftime("%Y-%m-%d %H:%M")
+                if hasattr(started, "strftime") else str(started or ""))
+        query = " ".join(str(row.get("user_query") or "").split())
+        if len(query) > 60:
+            query = query[:59] + "…"
+        lines.append(f"  {str(row.get('id'))[:8]}  {when}  {status}")
+        lines.append(f"            {query}")
+    lines.append("Show one with: /usage --run <id>")
+    return lines
 
 
 def _cmd_forget(session: ChatSession, args: str) -> None:

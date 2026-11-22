@@ -5,8 +5,8 @@ researcher gave in a chat thread on 2026-11-18 and 2026-11-19 after running the 
 OpenAI-compatible provider, plus the replies in the same thread. The researcher, the provider and its
 models are not named, and the researcher's words are paraphrased rather than quoted: the thread was a
 private conversation and this repository is public. Keep it that way in any edit. Except §101,
-§103, §105 and §108's PW1-PW4, which were accepted and built (batches 277, 281, 280 and
-282) and now live in `ROADMAP_v3.md`, nothing here is built
+§103, §105 and §108, which were accepted and built (batches 277, 281, 280, and 282 and
+283) and now live in `ROADMAP_v3.md`, nothing here is built
 and **no decision below is locked**: every Design Decisions table is a proposal for the
 owner to accept, change or refuse, in the convention the three roadmaps already use. A section the owner
 accepts keeps its number; one refused is recorded as refused rather than renumbered, so `§N` keeps one
@@ -49,7 +49,7 @@ append-only, and a deviation is an owner decision in `DEVLOG.md`.
 
 **Visibility — a run whose inside cannot be seen**
 
-- **§108. A research pass you can watch** - **(PW1-PW4 BUILT in batch 282: now `ROADMAP_v3.md` §108, with the owner's PW6 and PW7; PW5 below is still proposed)** (`_translate` counted no thinking into `pass_activity`, a pass's view read the archive, which holds finished steps only, finished passes and subagents left the panel, and no figure said what a run or a pass had spent)
+- **§108. A research pass you can watch** - **(BUILT in batches 282 and 283: now `ROADMAP_v3.md` §108, with the owner's PW6 and PW7)** (`_translate` counted no thinking into `pass_activity`, a pass's view read the archive, which holds finished steps only, finished passes and subagents left the panel, and no figure said what a run or a pass had spent)
 - **§109. A launch you can read before it runs** - **(NOT BUILT: proposed 2026-11-20)** (the researcher had another model build a launcher so they could see exactly what a launch does: the command, what each setting does, permissions now against as shipped, and a safety check. The harness has the facts and no view of them. Also covers the defaults question the thread raised -- measured, turning `read` on by default opens a path the input policy does not close -- and keys at rest)
 
 **Research quality — what the researcher actually came for**
@@ -337,19 +337,17 @@ to OpenAlex; §112 replaces those with a tool that does use it.
 
 ## §108. A research pass you can watch
 
-**PW1-PW4 accepted and built in batch 282 (2026-11-22), and recorded as `ROADMAP_v3.md` §108.**
+**Accepted and built in batches 282 (PW1-PW4) and 283 (PW5), 2026-11-22, and recorded as
+`ROADMAP_v3.md` §108.**
 The owner chose that every run the viewer opens streams its step in progress, not research
 passes only (PW2); that a running pass row carries every figure (PW3); and that each research
 row opens its pass while the agent panel keeps finished subagents (PW4). They added a spinner on
 every running row of the sidebar, at four frames a second once its cost was measured (PW6), and a
-CLI line for a pass waiting on the model (PW7). The record holds the decisions and their ids;
-this proposal's text is in the history of the commit that added this document.
-
-**Still proposed, for batch 283:**
-
-| id | decision |
-|---|---|
-| **PW5** | **A run's and each pass's token, call and time totals are in the panel, `trace.md` and `/usage`** |
+CLI line for a pass waiting on the model (PW7). For PW5 they chose that the totals are stored on
+the run's record, shown at the foot of the research panel and as a trace line per pass, and read
+with `/usage --run <id>` or its picker, in the form `/research --resume` already has. The record
+holds the decisions and their ids; this proposal's text is in the history of the commit that
+added this document.
 
 ---
 

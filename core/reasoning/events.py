@@ -105,6 +105,11 @@ PIPELINE_EVENT_KINDS = (
                         # then fails or is abandoned: the exception that
                         # ends a failed run carries no reference back to
                         # it, and run_complete is never reached.
+    # --- ROADMAP_v3 §108 (PW5) ----------------------------------------
+    "usage",            # usage -- the run's totals as stored, whenever a
+                        # checkpoint finds them changed: after each pass,
+                        # and first thing on a resume. The panel's foot
+                        # reads it; the trace lines say the same in words.
 )
 
 # There is deliberately NO "step" kind. §26 set out to report which model
@@ -155,6 +160,10 @@ class PipelineEvent:
     # ROADMAP_v3 §108 (PW1). The same, for the pass's thinking: its own
     # figure beside `chars`, never added into it.
     thinking: Optional[int] = None
+    # ROADMAP_v3 §108 (PW5). The run's totals on a `usage` event, in the
+    # stored dict form (`usage_view.RunUsage.to_dict`), so a shell reads
+    # what the record holds rather than a second shape.
+    usage: Optional[dict] = None
     # PipelineRun on the terminal event. Typed Any to keep this module
     # importable from anywhere without dragging base.py in behind it --
     # the same reason LoopEvent.final_response is Any.

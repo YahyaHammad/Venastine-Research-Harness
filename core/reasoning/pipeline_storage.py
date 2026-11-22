@@ -47,17 +47,18 @@ logger = logging.getLogger(__name__)
 class PipelineRunRecord(SQLModel, table=True):
     """One row per stream_deep_research_pipeline() invocation. `status` is
     'running' from creation until the wrapping try/except in the
-    orchestrator flips it to 'complete' or 'failed'. The SEVEN data columns
+    orchestrator flips it to 'complete' or 'failed'. The EIGHT data columns
     carry the run's structured output (or the partial state available at
     failure time) so an operator can inspect what happened without a
     separate trace log.
 
-    SEVEN, not the four this paragraph said until batch 154: T2 added
-    pass_threads_json, E13 added candidates_json and §98 resume_json, and
-    the first two batches found none of the enumerations written about
-    them. The count is pinned by
+    EIGHT, not the four this paragraph said until batch 154: T2 added
+    pass_threads_json, E13 added candidates_json, §98 resume_json and
+    ROADMAP_v3 §108 usage_json, and the first two batches found none of
+    the enumerations written about them. The count is pinned by
     test_the_documented_record_shape_matches_what_load_returns, which
-    reads it out of the prose rather than out of a second list here."""
+    reads it out of ARCHITECTURE.md's prose rather than out of a second
+    list here."""
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     user_query: str = Field(index=True)
@@ -90,6 +91,13 @@ class PipelineRunRecord(SQLModel, table=True):
     # a stage's work half applied. "{}" on every run recorded before §98,
     # which core/reasoning/resume.py reads from the trace instead (RS9).
     resume_json: str = "{}"
+    # ROADMAP_v3 §108 (PW5): the run's calls, tokens and wall time, by pass
+    # and then by model, as `usage_view.RunUsage.to_dict` writes them.
+    # Checkpointed with the other data columns, the failure path included,
+    # so a failed or abandoned run keeps what it had spent -- the runs whose
+    # cost a person most wants to know. "{}" on every run recorded before
+    # §108, which `/usage --run` reports as not recorded.
+    usage_json: str = "{}"
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: Optional[datetime] = None
 
@@ -116,7 +124,7 @@ def update_pipeline_run(
     status: Optional[str] = None,
 ) -> None:
     """Updates an existing row's data columns (claims / trace /
-    coverage_gaps / pass_threads / candidates / final_report) from the
+    coverage_gaps / pass_threads / candidates / final_report / usage) from the
     live PipelineRun, and -- only when `status` is given -- flips status
     and sets finished_at on a terminal transition. Raises ValueError if run_id doesn't exist (the
     record was never created or was deleted), which is a real bug, not an
@@ -164,6 +172,8 @@ def update_pipeline_run(
             for entry in getattr(run, "candidates", []) or []
         ])
         record.final_report = run.final_report
+        # §108 (PW5). getattr for `candidates`' reason above.
+        record.usage_json = json.dumps(getattr(run, "usage", None) or {})
         session.add(record)
         session.commit()
 
@@ -280,7 +290,33 @@ def load_pipeline_run(run_id: UUID) -> dict:
             # §98 (RS2). The same floor as its two siblings: a NULL is SQL
             # nobody here wrote, and json.loads(None) would raise on it.
             "resume": json.loads(record.resume_json or "{}"),
+            # §108 (PW5), with resume's floor for resume's reason.
+            "usage": json.loads(record.usage_json or "{}"),
         }
+
+
+def list_pipeline_runs(limit: int = 50) -> list[dict]:
+    """Every stored run, newest first, as plain dicts: id, user_query,
+    status, started_at and finished_at -- what a picker shows (ROADMAP_v3
+    §108, PW5: `/usage --run`). Any status, unlike `list_resumable_runs`,
+    because a finished run's totals are as worth reading as a failed one's.
+    Bounded by `limit` for that function's reason."""
+    with Session(engine) as session:
+        statement = (
+            select(PipelineRunRecord)
+            .order_by(PipelineRunRecord.started_at.desc())
+            .limit(limit)
+        )
+        return [
+            {
+                "id": record.id,
+                "user_query": record.user_query,
+                "status": record.status,
+                "started_at": record.started_at,
+                "finished_at": record.finished_at,
+            }
+            for record in session.exec(statement).all()
+        ]
 
 
 # ---------------------------------------------------------------------------

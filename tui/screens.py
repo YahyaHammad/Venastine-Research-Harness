@@ -73,6 +73,7 @@ from textual.widgets import (
 )
 from textual.widgets.selection_list import Selection
 
+from core import ansi
 from core.claims_view import claims_header, render_claims
 from core.replay import thread_row
 
@@ -1208,35 +1209,51 @@ def resume_run_row(run: dict) -> str:
     return f"{str(run.get('id'))[:8]}  {when}  {status}  {where}\n  {query}"
 
 
-class ResumeRunPickerScreen(ModalScreen[object]):
-    """Pick a failed or abandoned research run to resume (ROADMAP_v3 §98).
-    Dismisses with the run's id, or None to cancel.
+def usage_run_row(run: dict) -> str:
+    """One research run in `/usage --run`'s picker (ROADMAP_v3 §108, PW5):
+    `resume_run_row`'s first three columns and its query, for any status."""
+    status = ("running, or stopped" if run.get("status") == "running"
+              else str(run.get("status")))
+    started = run.get("started_at")
+    when = (started.strftime("%Y-%m-%d %H:%M")
+            if hasattr(started, "strftime") else str(started or ""))
+    query = " ".join(ansi.for_display(str(run.get("user_query") or "")).split())
+    if len(query) > 70:
+        query = query[:69] + "…"
+    return f"{str(run.get('id'))[:8]}  {when}  {status}\n  {query}"
+
+
+class _RunPicker:
+    """What both research-run pickers share: pick a stored run, dismiss
+    with its id, or None to cancel. A mixin rather than a base screen, so
+    the modal table in test_tui.py has a row for each screen a person can
+    see and none for this.
 
     The thread picker's shape and its CSS, because it is the same decision
-    one level up -- which earlier piece of work to carry on -- and a second
-    look for it would be a second thing to keep styled. A run this build
-    cannot resume is still listed, with the reason, so a person looking
-    for it learns why rather than wondering where it went; choosing it gets
-    the same reason as an error.
+    one level up -- which earlier piece of work to look at again -- and a
+    second look for it would be a second thing to keep styled.
     """
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    TITLE_TEXT = ""
+    EMPTY_TEXT = ""
 
     def __init__(self, runs: list[dict], note: str = ""):
         super().__init__()
         self._runs = runs
         self._note = note
 
+    def row(self, run: dict) -> str:
+        raise NotImplementedError
+
     def compose(self) -> ComposeResult:
-        items = [ListItem(Label(Text(resume_run_row(r)))) for r in self._runs]
-        children = [Label("Resume which research run?", id="thread-title")]
+        items = [ListItem(Label(Text(self.row(r)))) for r in self._runs]
+        children = [Label(Text(self.TITLE_TEXT), id="thread-title")]
         if self._note:
             children.append(Static(Text(self._note), id="thread-note"))
         if items:
             children.append(ListView(*items, id="thread-list"))
         else:
-            children.append(Static("No failed or abandoned research run to "
-                                   "resume.", id="thread-empty"))
+            children.append(Static(Text(self.EMPTY_TEXT), id="thread-empty"))
         yield Vertical(*children, id="thread-dialog")
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
@@ -1248,6 +1265,35 @@ class ResumeRunPickerScreen(ModalScreen[object]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class ResumeRunPickerScreen(_RunPicker, ModalScreen[object]):
+    """Pick a failed or abandoned research run to resume (ROADMAP_v3 §98).
+
+    A run this build cannot resume is still listed, with the reason, so a
+    person looking for it learns why rather than wondering where it went;
+    choosing it gets the same reason as an error.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+    TITLE_TEXT = "Resume which research run?"
+    EMPTY_TEXT = "No failed or abandoned research run to resume."
+
+    def row(self, run: dict) -> str:
+        return resume_run_row(run)
+
+
+class UsageRunPickerScreen(_RunPicker, ModalScreen[object]):
+    """Pick a stored research run for `/usage --run` (ROADMAP_v3 §108,
+    PW5): every status, since a finished run's totals are as worth
+    reading as a failed one's."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+    TITLE_TEXT = "Show the totals of which research run?"
+    EMPTY_TEXT = "No research run stored yet."
+
+    def row(self, run: dict) -> str:
+        return usage_run_row(run)
 
 
 class SecretScreen(ModalScreen[object]):

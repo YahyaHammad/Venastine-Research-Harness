@@ -127,6 +127,7 @@ from tui.screens import (
     SessionKillScreen,
     SubagentSignoffScreen,
     ThreadPickerScreen,
+    UsageRunPickerScreen,
 )
 from tui.widgets import (
     ANIMATION_INTERVAL,
@@ -5717,6 +5718,10 @@ class VenastineApp(App):
             # §98. Kept for _write_resume_hint, and not drawn: a completed
             # run prints its id at the end, and a failed one in the hint.
             self._research_run_id = event.text
+        elif event.kind == "usage":
+            # §108 (PW5). Panel only: the trace line each pass ended with
+            # has said the same in the transcript.
+            panel.usage(event.usage)
         if event.kind in ("pass_start", "pass_complete", "stage"):
             # §108. A pass starting or ending starts or stops the clock.
             self._sync_sidebar_timer()
@@ -6910,9 +6915,64 @@ def _cmd_usage(app: VenastineApp, args: str) -> None:
     too, over the app's ledger. Its "this thread" section is the span
     the usage line's `billed` covers. Reads no memory, so asking writes
     no thread row.
+
+    ROADMAP_v3 §108 (PW5): `--run <id>` is one stored research run's
+    totals, each pass and then the run, and a bare `--run` opens a picker
+    of stored runs first, as `/research --resume` does. The record is read
+    on the UI thread, in a command handler, so a failure is written rather
+    than raised -- `_pick_run_to_resume`'s rule, for its reason.
     """
-    for line in usage_view.report_lines(app._usage):
+    try:
+        wanted = usage_view.parse_args(args)
+    except ValueError as e:
+        app._transcript.write_error(f"{e}.")
+        return
+    if wanted is None:
+        for line in usage_view.report_lines(app._usage):
+            app._transcript.write_system(line)
+        return
+    if wanted is usage_view.RUN_PICKER:
+        _pick_run_for_usage(app)
+        return
+    from core.reasoning.resume import RunNotFound, find_stored_run
+    try:
+        run_id = find_stored_run(wanted)
+    except RunNotFound as e:
+        app._transcript.write_error(f"/usage --run: {e}.")
+        return
+    except Exception as e:  # noqa: BLE001 -- see the docstring
+        app._transcript.write_error(f"Could not list research runs: {e}")
+        return
+    _write_run_usage(app, run_id)
+
+
+def _write_run_usage(app: VenastineApp, run_id) -> None:
+    """One stored run's totals into the transcript (§108 PW5)."""
+    from core.reasoning.pipeline_storage import load_pipeline_run
+    try:
+        record = load_pipeline_run(run_id)
+    except Exception as e:  # noqa: BLE001 -- see _cmd_usage's docstring
+        app._transcript.write_error(f"Could not read research run: {e}")
+        return
+    for line in usage_view.run_report_lines(record):
         app._transcript.write_system(line)
+
+
+def _pick_run_for_usage(app: VenastineApp) -> None:
+    """The picker behind a bare `/usage --run` (ROADMAP_v3 §108, PW5):
+    every stored run, newest first, finished or not."""
+    from core.reasoning.pipeline_storage import list_pipeline_runs
+    try:
+        runs = list_pipeline_runs()
+    except Exception as e:  # noqa: BLE001 -- see _cmd_usage's docstring
+        app._transcript.write_error(f"Could not list research runs: {e}")
+        return
+
+    def chosen(run_id) -> None:
+        if run_id is not None:
+            _write_run_usage(app, run_id)
+
+    app.push_screen(UsageRunPickerScreen(runs), chosen)
 
 
 def _cmd_trigger(app: VenastineApp, args: str) -> None:

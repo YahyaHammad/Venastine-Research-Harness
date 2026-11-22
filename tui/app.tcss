@@ -462,9 +462,11 @@ Button:focus {
 
 /* ROADMAP_v3 §98's run picker shares the thread picker's dialog, so it
    shares the rule that centres it -- the sweep in test_tui.py measured it
-   at the screen's left edge without. */
+   at the screen's left edge without. §108's `/usage --run` picker is the
+   same dialog again, and the same sweep found it at the edge too. */
 ThreadPickerScreen,
-ResumeRunPickerScreen {
+ResumeRunPickerScreen,
+UsageRunPickerScreen {
     align: center middle;
 }
 

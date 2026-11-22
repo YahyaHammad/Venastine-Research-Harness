@@ -50,6 +50,7 @@ from core.reasoning.base import Claim, PipelineRun
 from core.reasoning.json_retry import parse_json_response
 from core.reasoning.pipeline_storage import (
     RESUMABLE_STATUSES,
+    list_pipeline_runs,
     list_resumable_runs,
     load_pipeline_run,
 )
@@ -437,6 +438,10 @@ def _run_from(record: dict) -> PipelineRun:
     run.trace = list(record.get("trace") or [])
     run.pass_threads = [e for e in record.get("pass_threads") or []
                         if isinstance(e, dict)]
+    # ROADMAP_v3 §108 (PW5): what the run had spent, which the resume adds
+    # to rather than starting again from nothing.
+    usage = record.get("usage")
+    run.usage = dict(usage) if isinstance(usage, dict) else {}
     return run
 
 
@@ -523,35 +528,60 @@ def resumable_runs(limit: int = 50) -> list:
     return rows
 
 
+class RunNotFound(Exception):
+    """`find_stored_run` was given text that names no one stored run, with
+    what to type instead (ROADMAP_v3 §108, PW5)."""
+
+
+def _match_run(text: str, runs, nothing: str, error) -> UUID:
+    """The run `text` names: a whole id, with or without dashes, or the
+    start of one among `runs()` (eight characters are plenty). A prefix
+    that names no run, or several, raises `error`; `nothing` is what the
+    runs searched are, for the message. `runs` is called only for a
+    prefix, so a whole id reads no database."""
+    key = (text or "").strip().lower().replace("-", "")
+    if not key:
+        raise error("no run id given")
+    if len(key) == 32:
+        uid = _as_uuid(key)
+        if uid is None:
+            raise error(f"{text!r} is not a run id")
+        return uid
+    if any(ch not in "0123456789abcdef" for ch in key):
+        raise error(f"{text!r} is not a run id")
+    if len(key) < 4:
+        raise error("type at least four characters of the run id")
+    matches = [r["id"] for r in runs()
+               if _as_uuid(r["id"]).hex.startswith(key)]
+    if not matches:
+        raise error(f"no {nothing} starts with {text!r}")
+    if len(matches) > 1:
+        raise error(f"{text!r} matches {len(matches)} runs; type more of the "
+                    f"id")
+    return _as_uuid(matches[0])
+
+
 def find_run(text: str, runs=None) -> UUID:
     """The run `text` names: a whole id, with or without dashes, or the
     start of one among the resumable runs (eight characters are plenty). A
     prefix that names no run, or several, is refused with what to type."""
-    key = (text or "").strip().lower().replace("-", "")
-    if not key:
-        raise ResumeRefused("no run id given")
-    if len(key) == 32:
-        uid = _as_uuid(key)
-        if uid is None:
-            raise ResumeRefused(f"{text!r} is not a run id")
-        return uid
-    if any(ch not in "0123456789abcdef" for ch in key):
-        raise ResumeRefused(f"{text!r} is not a run id")
-    if len(key) < 4:
-        raise ResumeRefused("type at least four characters of the run id")
-    runs = resumable_runs(limit=200) if runs is None else runs
-    matches = [r["id"] for r in runs if _as_uuid(r["id"]).hex.startswith(key)]
-    if not matches:
-        raise ResumeRefused(f"no failed or abandoned run starts with {text!r}")
-    if len(matches) > 1:
-        raise ResumeRefused(f"{text!r} matches {len(matches)} runs; type more "
-                            f"of the id")
-    return _as_uuid(matches[0])
+    def listed():
+        return resumable_runs(limit=200) if runs is None else runs
+    return _match_run(text, listed, "failed or abandoned run", ResumeRefused)
+
+
+def find_stored_run(text: str, runs=None) -> UUID:
+    """`find_run` over every stored run, whatever its status, for
+    `/usage --run` (ROADMAP_v3 §108, PW5). Raises RunNotFound."""
+    def listed():
+        return list_pipeline_runs(limit=200) if runs is None else runs
+    return _match_run(text, listed, "research run", RunNotFound)
 
 
 __all__ = [
-    "RESUME_VERSION", "ResumePoint", "ResumeRefused", "describe",
-    "describe_stage", "find_run", "last_answer", "legacy_stage", "position",
-    "prepare", "rebuild_corpus", "resumable_runs", "snapshot", "thread_tail",
+    "RESUME_VERSION", "ResumePoint", "ResumeRefused", "RunNotFound",
+    "describe", "describe_stage", "find_run", "find_stored_run",
+    "last_answer", "legacy_stage", "position", "prepare", "rebuild_corpus",
+    "resumable_runs", "snapshot", "thread_tail",
 ]
 
