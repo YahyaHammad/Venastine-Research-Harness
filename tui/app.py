@@ -5728,10 +5728,11 @@ class VenastineApp(App):
         # ROADMAP_v3 §108. A run that failed or was abandoned left the pass
         # it was in unresolved, and a row whose clock goes on counting
         # describes a run that is over. A completed run has none left.
-        try:
-            self._research_progress.run_ended()
-        except Exception:  # noqa: BLE001 -- not mounted
-            pass
+        # UNGUARDED, as the raven above is: the handler runs on a mounted
+        # app, where the panel is held rather than queried. (A guard here
+        # was a fourth try/except/pass in this file, which the bandit count
+        # check refuses.)
+        self._research_progress.run_ended()
         self._sync_sidebar_timer()
         if getattr(message, "abandoned", False):
             # #105. A deliberate quit is not a pipeline failure: say what

@@ -33158,6 +33158,16 @@ sinks' `exit` take `ok`. `tests/BREAKING_CHANGES.md` has a row for each.
   8.30.1 with CI's config finds nothing in an export of the tree.
 - No workflow or requirements file is in the diff.
 
+**CI on PR #302 found one more.** Both `bandit` jobs failed, and nothing else did: `scripts/bandit-count-check.py`
+reported `tui/app.py B110 3 -> 4`. The fourth try/except/pass was this batch's guard around
+`run_ended()` in `on_research_finished`. The local bandit pass compared findings by (file, test,
+message), which is exactly the unit the baseline absorbs a second occurrence under, so it could not
+see it; the count check, run here, reproduces the line. The guard went: the handler runs on a mounted
+app, where the panel is held rather than queried, and nothing else in it is guarded. The count
+check then reports none grew, and mutant 68, re-pointed at the unguarded call, is still killed by
+`test_a_failed_run_stops_its_rows_and_the_clock`. Full suite on Windows with AGENT_WORKSPACE unset,
+run on the fix's commit: 10,149 passed and 88 skipped (10,237), in 2:58, with the same one warning.
+
 **Batch 281's release, settled.** PR #301 merged as `6abaeea`, and `release.yml` released 0.3.24
 (`6e965e5`, tag `v0.3.24`).
 
