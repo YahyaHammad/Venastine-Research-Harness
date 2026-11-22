@@ -249,7 +249,7 @@ class _Spans(AgentActivity):
         self.names[span.id] = span.name
         self.order.append(("enter", span.name))
 
-    def exit(self, span):
+    def exit(self, span, ok=True):
         self.order.append(("exit", span.name))
 
     def bind(self, span_id, thread_id):
@@ -405,7 +405,7 @@ class TestBothShellsShowIt:
             assert await settle(pilot, lambda: any(
                 "Pass 3a" in t for t in lines(app)))
             shown = lines(app)
-            panel = {entry[0]: entry for entry
+            panel = {entry.pass_id: entry for entry
                      in app._research_progress._passes}
 
         reason = next(i for i, t in enumerate(shown)
@@ -413,4 +413,4 @@ class TestBothShellsShowIt:
         fetch = next(i for i, t in enumerate(shown)
                      if "▸ fetch_url" in t and RETRY_URL in t)
         assert reason < fetch
-        assert panel["Pass 2"][4] == 1, "the retry's fetch is not counted"
+        assert panel["Pass 2"].tools == 1, "the retry's fetch is not counted"

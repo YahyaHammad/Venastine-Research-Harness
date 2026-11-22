@@ -143,8 +143,12 @@ class AgentActivity:
     def enter(self, span: AgentSpan) -> None:
         """A run began. Called on whatever thread the run is on."""
 
-    def exit(self, span: AgentSpan) -> None:
-        """That run ended -- successfully or not."""
+    def exit(self, span: AgentSpan, ok: bool = True) -> None:
+        """That run ended. `ok` says how (ROADMAP_v3 §108): True for a run
+        that returned, False for one that raised -- a failure, or a
+        generator closed part way, which is how a run is abandoned. The
+        agent panel marks a finished subagent by it, as the session panel
+        marks a session by its exit."""
 
     def bind(self, span_id: str, thread_id) -> None:
         """That run's conversation thread exists, and this is its id.
@@ -198,12 +202,17 @@ class AgentActivity:
             self.enter(span)
         except Exception:                       # noqa: BLE001 -- contained
             logger.exception("agent activity sink raised on enter")
+        # §108. Set only once the body has finished without raising: an
+        # exception thrown in at the `yield` -- a GeneratorExit included --
+        # skips the assignment and reaches the `finally` with it False.
+        ok = False
         try:
             yield span
+            ok = True
         finally:
             _CURRENT.reset(token)
             try:
-                self.exit(span)
+                self.exit(span, ok=ok)
             except Exception:                   # noqa: BLE001 -- contained
                 logger.exception("agent activity sink raised on exit")
 

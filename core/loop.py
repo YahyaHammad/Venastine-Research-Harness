@@ -44,7 +44,13 @@ from uuid import UUID
 
 import config
 import prompts.system_prompts as system_prompts
-from core import agent_activity, interaction, provider_errors, usage_view
+from core import (
+    agent_activity,
+    interaction,
+    live_runs,
+    provider_errors,
+    usage_view,
+)
 from core.cancel import is_cancelled
 from core.client import (
     ModelResponse,
@@ -1794,7 +1800,14 @@ class RunAgentLoop:
         failure is warned and swallowed.
         """
         try:
-            return (yield from RunAgentLoop._run_steps(memory, *args, **kwargs))
+            # ROADMAP_v3 §108 (PW2, PW3). What the run is doing while it
+            # does it, for a viewer and the sidebar: the archive holds
+            # finished steps only. Every run but the conversation's own,
+            # whose stream is the transcript; ended however the run ends,
+            # a closed generator included.
+            with live_runs.runs.watching(memory, exclude=(THREAD_KIND_CHAT,)):
+                return (yield from RunAgentLoop._run_steps(
+                    memory, *args, **kwargs))
         except Exception as error:
             try:
                 # THE DURABLE SINK, so the vocabulary matters most
@@ -1984,6 +1997,10 @@ class RunAgentLoop:
                     ", ".join(hidden),
                 )
         total_tokens_used = 0
+        # ROADMAP_v3 §108. This run's live record, opened by `_run`; the
+        # null handle for the conversation's own run and for a caller that
+        # reaches here without `_run`.
+        watch = live_runs.runs.watch(memory)
         # #4: the size instrument, kept strictly beside the spend meter.
         # turn_baseline_input is the FIRST call's prompt -- the thread as
         # this turn inherited it, which this turn did not add. Every later
@@ -2077,6 +2094,8 @@ class RunAgentLoop:
             while True:
                 shown = False
                 partial = []
+                # §108 (PW3): a call is out and nothing of it has arrived.
+                watch.call_started()
                 try:
                     for token in call_model_stream(
                         client, provider_name, model, memory.messages,
@@ -2100,9 +2119,11 @@ class RunAgentLoop:
                         if token.text_delta:
                             shown = True
                             partial.append(token.text_delta)
+                            watch.delta(text=token.text_delta)
                             yield LoopEvent(token_delta=token.text_delta)
                         if token.thinking_delta:
                             shown = True
+                            watch.delta(thinking=token.thinking_delta)
                             yield LoopEvent(thinking_delta=token.thinking_delta)
                     break
                 except Exception as e:  # noqa: BLE001 -- re-raised unless it qualifies
@@ -2130,6 +2151,7 @@ class RunAgentLoop:
                         # Only when something was drawn. An attempt that
                         # streamed nothing has nothing to take back, and
                         # the warning above is already the record of it.
+                        watch.retract()
                         yield LoopEvent(retract={
                             "text": "the answer was interrupted (%s); "
                                     "retrying, attempt %d of %d"
@@ -2189,6 +2211,10 @@ class RunAgentLoop:
 
             # D20: persist EVERY assistant turn BEFORE any branching.
             memory.add_assistant_message(response)
+            # §108. The archive has this step now, so the live record's
+            # copy of it is over; its usage is counted for the sidebar.
+            watch.step_done(response.usage,
+                            getattr(response, "usage_unreported", ()))
             response.granted_calls = granted_calls
             response.notices = notices
             # §21: the provider's own count of everything it was just
@@ -2255,6 +2281,9 @@ class RunAgentLoop:
                     yield LoopEvent(tool_call_start={
                         "id": call.id, "name": call.name, "input": call.input,
                     })
+                # §108 (PW3): the group is running, from here to its
+                # results, which arrive together below.
+                watch.tools_started([call.name for call in group])
 
                 if len(group) == 1:
                     # No siblings, no gate, no thread. Byte-identical to the
@@ -2279,6 +2308,7 @@ class RunAgentLoop:
                 announced = [event for call, outcome in settled
                              for event in _settle_one(call, outcome, memory,
                                                       granted_calls, notices)]
+                watch.tools_done()
                 yield from announced
 
             # The mid-turn valve (M3). A single turn can add far more than

@@ -51,6 +51,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§101. Flags a full-screen launch dropped: `--effort`, `--thread` and `--ref` under `--tui`** - **(BUILT in batch 277; LF5 in batch 278)** (`run_tui()` received the provider and model and nothing else, so `--tui --effort low` ran at the shipped `high` with `high` in the sidebar, the `--thread` a `/config` restart writes was ignored by the TUI it relaunched, and `--ref` attached nothing. All three reach the TUI now: the flag's effort outranks `tui.effort`, the thread opens at mount through `switch_to_thread`, the references attach through `/ref`'s writer and a restart does not attach them twice; and a census read from the parser gives every flag one answer under `--tui`. Batch 278 refuses `--tui` with a data command such as `--memories`, which ran while `--tui` went unused, and names the slash command; LF1-LF5)
 - **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(BUILT in batch 281)** (every write scrolled the transcript to the bottom, because `RichLog.auto_scroll` follows every write: a reader at row 5 was at the bottom again after five streamed rows, and the run and session viewers, which repaint whole, did the same on every new entry. A drag selected nothing, because `RichLog` implements none of the selection the pinned textual's screen supports. A transcript now follows only while its reader is at the bottom, follows again there or on any submit, and counts in its border what arrived below them; all four panes keep a scrolled-up reader's place through a repaint; and a drag selects the rows as drawn, copied with ctrl+c; SV1-SV4)
 - **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280)** (D2 overwrote the tier of every claim that ran out of revision rounds with UNVERIFIED, so a partly grounded claim scoring 0.45 (LOW) was published as one nothing supports beside a breakdown still saying 0.45. D2 keeps the tier 6b scored and records `loop_exhausted`; a flagged claim names its largest deduction; an exhausted claim publishes the revision 6b scored with what it was first stated as beside it; and every shell's report ends with a code-rendered "Where the evidence is thin" section, built after the review; XR1-XR4)
+- **§108. A research pass you can watch** - **(PW1-PW4 BUILT in batch 282; PW5 is batch 283)** (a pass that streamed 40,000 characters of thinking and 3,000 of text announced 2,000 and its view, which reads the archive, showed its task alone until the call ended; a finished pass could not be opened from the TUI at all. Thinking is activity, every run's view streams the step in progress from a live record the loop writes, a running pass row says how long, what and how much, research rows open their pass, finished subagents stay in the agent panel, running rows spin, and the CLI says when a pass has waited a minute on the model)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -3070,6 +3071,112 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §108. A research pass you can watch
+
+**Proposed 2026-11-20 in `ROADMAP_v3_researcher_feedback.md` and accepted by the owner. PW1-PW4 were
+built in batch 282 (2026-11-22), with two additions of the owner's (PW6, PW7); PW5 is batch 283.**
+The researcher's sharpest complaint about the TUI: nothing said how active a run was or what it was
+doing, the panel showed a pass with a rising count while the pass's own view showed no text, and the
+thinking they most wanted to read was never shown. The proposal's §108 is this section; the feedback
+document now points here.
+
+### What the code did (main `6e965e5`, 0.3.24)
+
+Measured on the real loop with only the model scripted, and the suite's fake storage. A pass streamed
+40,000 characters of thinking and then 3,000 of text:
+
+| what a watcher could see | while it streamed |
+|---|---|
+| `pass_activity` events | one, reading 2,000: thinking was counted nowhere |
+| the pass's thread, all its viewer reads | one row, the pass's task, until the call ended |
+| a finished research row | no thread to open: 0 armed spans |
+
+- **Thinking was not activity.** `_translate` left it out of `pass_activity` on purpose (§38 O5), and
+  said to "flip it here if that turns up in a real run". It did.
+- **A view reads the archive, which holds finished steps.** D20 persists an assistant turn once its
+  call returns, so a pass thinking for ten minutes, or a subagent writing its first answer, showed
+  nothing in its view. Background subagents had the same gap.
+- **A finished pass could not be opened from the TUI.** Its agent-panel row left when it ended, its
+  research row was armed with nothing, and a pass's thread has no parent link (§47, "a pass is a
+  child of the RUN"), so ctrl+g's stored-run tree never lists it.
+- **A finished subagent left the agent panel the moment it ended**, which batch 258 had already fixed
+  for shell sessions.
+- **The CLI counted output only**, and printed nothing while a pass waited on the model, because the
+  pipeline is blocked in the read and the loop over its events has nothing to print.
+
+### Decisions (PW1-PW4, PW6, PW7)
+
+| # | Decision |
+|---|---|
+| **PW1** | **Thinking is pass activity, as its own figure.** `pass_activity` carries `thinking` beside `chars`; each announces once it has grown 2,000 characters since its last announcement, and the event carries both totals. `chars` stays output only. Both shells show it. This amends §38 O5's "not counted" half; its other half, that `chars` means output streamed, stands |
+| **PW2** | **The view of every run streams the step in progress** (owner: every run the viewer opens, not research passes only). The loop writes a per-run record in memory, `core/live_runs.py`, for every run but the conversation's own, whose stream is the transcript: the step's text and thinking, when its last byte came, the tools running, and the provider's token counts. The viewer reads it on its poll and appends what is new through the transcript's own streaming path; a step that lands, is retracted or starts again is repainted from the archive. It never enters the main transcript or any model's context, so D6 and `agent_activity`'s lifecycle-only rule are unchanged. A step keeps its last 200,000 characters of each, and the view says how many came before them. As a run ends the view reads once more |
+| **PW3** | **A running pass row says how long, what, and how much** (owner: all the figures on the row). Under the pass's name: `6m40s · 3 tools`; the state, `waiting 1m05s` while a call is out with no byte of it yet, `fetch_url 12s` while a tool runs (`+2` for a group), `last byte 2s` while it streams; `12k written`; `40k thought`; `41k in · 9k out`. The elapsed time and the figures come from the panel's events, the state and the tokens from the pass's live record. Measured for the sidebar's 18 cells: the owner's `12k · 40k thought` was 19 at this indent with ordinary figures, so written and thought take a line each. A run that fails or is abandoned resolves the pass it was in as failed, so no row counts on for a pass that is over |
+| **PW4** | **Every research row opens its pass, running or finished** (owner, over the proposal's five passes kept in the agent panel, which would drop a run's earlier passes). **The agent panel keeps the five most recent finished subagents** under the running ones, marked `☑` for a run that returned and `☒` for one that raised, and they open on a click, as batch 258 keeps sessions. A research pass and a harness run (compaction, the reviewer) are not kept there. `AgentActivity.exit` says how the run ended |
+| **PW5** | **Not built: batch 283.** A run's and each pass's token, call and time totals in the panel, `trace.md` and `/usage <run>`, from the per-run counts PW3 now keeps |
+| **PW6** | **Every running row of the sidebar spins** (owner's addition): research passes, agent runs and background sessions cycle the six-dot braille spinner `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` in place of `▸`, so running looks the same in all three. **Four frames a second** (owner, once measured: in the mounted app ten frames a second cost 3.9-8.8% of a core against 1.8-2.0% idle; four, 1.8-2.0%). The still `▸` with `tui.animations` off. One timer for the three panels, running only while one of them has a running row; a tick lays the sidebar out again only when a line's width changed |
+| **PW7** | **The CLI says when a pass has waited on the model** (owner). Its activity line gains the thinking figure (`.. 12k chars · 40k thought`), and a pass that has gone a minute with nothing arriving from the model prints `.. waiting 1m00s for the model`, then again every five minutes. A ticker thread prints it, reading the pass's live record, since the pipeline itself is blocked in the read. A long tool call prints nothing new: its `>` line already said what is running |
+
+PW1, PW2's design, PW3's lines and PW4's subagent half are the proposal's. PW2's scope, PW3's layout,
+PW4's research-row half, PW6 and PW7 are the owner's choices; PW6 and PW7 are new.
+
+### What §108 deliberately does not change
+
+- **`LoopEvent`.** It has seven fields and a test fails at an eighth (P1), so there is still no step
+  event. The state line comes from moments the loop writes into the live record, not from events.
+- **D6.** What crosses back to a parent is still one distilled answer. The live record is read by
+  display code only, as a session's output buffer is (SS14).
+- **The archive is the record.** A live step is drawn until the archive has it, then replaced by it.
+- **The main transcript.** A pass's text still never enters it: seven of the ten passes write JSON,
+  `_translate`'s reason.
+- **`pass_activity`'s throttle**, 2,000 characters.
+
+### Built (batch 282)
+
+- **`core/live_runs.py`** (new): `Registry`, the process's `runs`, and `duration()`. A step's text is
+  a deque of chunks, so a delta costs an append rather than a copy of everything before it.
+- **`core/loop.py`**: `_run` opens the record (`watching`, the conversation excluded) and ends it
+  however the run ends; `_run_steps` writes at a call going out, each delta, a retraction, a step
+  persisted (with its usage), and a tool group starting and settling.
+- **`core/agent_activity.py`**: `exit(span, ok)`; `span()` passes False for a body that raised or
+  was closed.
+- **`core/reasoning/orchestrator.py`** and **`events.py`**: `_Streamed` counts thinking, and
+  `pass_activity` carries `thinking` (PW1).
+- **`main.py`**: `_activity_line` and `_ModelWait`, the ticker (PW7).
+- **`tui/widgets.py`**: `SPINNER_FRAMES`, `running_mark`, `update_sized`; `ResearchProgress` rows
+  are `_PassRow` objects with a thread, a start and a thinking figure, bound by `bind_thread`, armed,
+  clickable, ticked, and resolved by `run_ended`; `AgentPanel` draws `finished`; all three panels
+  `tick`.
+- **`tui/app.py`**: `TuiActivity` keeps the finished subagents and `AgentStackChanged` carries them;
+  a pass span binds its research row; `_sync_sidebar_timer` and `_tick_sidebar`; the viewer's
+  `_draw_live_step`, its poll, and the last read as a run ends.
+
+Tests: `tests/test_watching_a_pass.py`. The live record's phases, counts, offsets, cap, retirement
+and revival; the real loop writing it from inside the scripted stream, for a pass's thinking and
+text, a tool group and the gap after it, a retracted attempt, a retry's wait, a subagent, and the
+conversation left out; PW1's figures,
+the measured shape and a corrective retry; the CLI's line and waiter; the pass row by case and at the
+width; finished rows; the spinner's cells and frames; the sink's five; and in the mounted app the
+binding, a click on a finished pass, the clock and the events that drive it, a growing panel laid out
+again, a failed run, and the live view's append, repaint, a step retracted between its reads,
+thinking toggle, cap note and last read. The mutation result is in `DEVLOG.md`.
+
+### Gap register
+
+- **PW5**, the totals, is batch 283.
+- **The live view draws a step's thinking and then its text**, each where the last poll stopped. A
+  step that interleaves them is drawn grouped until it lands, when the archive's order replaces it.
+- **The view polls once a second**, so streamed text arrives a second at a time, and a stream's
+  last part-row is held until it completes, as in the chat.
+- **`☑` is a subagent that returned**, a stopped (§61) or step-limited one included; `☒` is one
+  that raised.
+- **The research panel still shows the last 16 rows** (§26's window), so the earliest passes of a
+  long run scroll out of the panel and cannot be clicked there.
+- **The CLI's waiting line is for research passes.** A CLI chat turn waiting on the model prints
+  nothing until it answers.
+- **The wiki's user guide** (a separate repository) does not describe the sidebar's new figures.
+
 ---
 
 ## §105. A claim that ran out of rounds keeps the tier it earned

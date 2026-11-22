@@ -73,7 +73,7 @@ class Recorder(AgentActivity):
     def enter(self, span):
         self.events.append(("enter", span.name, span.depth))
 
-    def exit(self, span):
+    def exit(self, span, ok=True):
         self.events.append(("exit", span.name, span.depth))
 
     def bind(self, span_id, thread_id):
@@ -131,7 +131,7 @@ class TestTheSpanClosesWhateverHappens:
             def enter(self, span):
                 raise ValueError("widget exploded")
 
-            def exit(self, span):
+            def exit(self, span, ok=True):
                 raise ValueError("widget exploded again")
 
         ran = []

@@ -25,6 +25,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from uuid import UUID
 
@@ -53,7 +54,13 @@ from cli_commands import (
     print_memories,
     run_command,
 )
-from core import ansi, config_loader, shell_sessions, workspace_trust
+from core import (
+    ansi,
+    config_loader,
+    live_runs,
+    shell_sessions,
+    workspace_trust,
+)
 from core.cancel import CancelToken
 from core.loop import (
     DEFAULT_PROVIDER,
@@ -2467,6 +2474,96 @@ def _pick_tools_to_grant(offered) -> set:
     return granted
 
 
+def _activity_figure(n, unit: str) -> str:
+    """One of the activity line's figures: `12k chars`, `640 chars`."""
+    return (f"{n // 1000}k {unit}" if n >= 1000 else f"{n} {unit}")
+
+
+def _activity_line(event) -> str:
+    """What `pass_activity` prints: output, then thinking, each only when
+    there is some (ROADMAP_v3 §108, PW1)."""
+    parts = []
+    if event.chars:
+        parts.append(_activity_figure(event.chars, "chars"))
+    if getattr(event, "thinking", None):
+        parts.append(_activity_figure(event.thinking, "thought"))
+    return "     .. " + " \u00b7 ".join(parts or ["0 chars"])
+
+
+class _ModelWait:
+    """Says how long a research pass has waited on the model (ROADMAP_v3
+    §108, the owner's choice for the CLI).
+
+    A THREAD, because nothing else can speak then. While a call is out the
+    pipeline is blocked in the read, so the loop over its events prints
+    nothing until a byte arrives; the panel's `waiting 1m05s` has no event
+    to hang on. This reads the pass's live record (`core/live_runs.py`)
+    every `POLL_S`, and prints once the pass has gone `FIRST_S` with
+    nothing arriving and again every `EVERY_S` after, so an hour's stall is
+    a dozen lines and not seven hundred.
+
+    WAITING ON THE MODEL ONLY: a call with no byte yet, or a stream whose
+    last byte was that long ago. A tool that runs long already printed its
+    `>` line, and says nothing new by being slow.
+
+    `check()` is the whole decision and is called directly by the tests;
+    the thread only calls it on a timer.
+    """
+
+    POLL_S = 5.0
+    FIRST_S = 60.0
+    EVERY_S = 300.0
+
+    def __init__(self, registry=None, out=None, kind=None) -> None:
+        self._registry = registry if registry is not None else live_runs.runs
+        self._out = out if out is not None else (
+            lambda line: print(line, flush=True))
+        self._kind = (kind if kind is not None
+                      else storage.THREAD_KIND_RESEARCH_PASS)
+        self._stop = threading.Event()
+        self._thread = None
+        # The stall being reported: (thread, step, phase), where it began,
+        # and how many lines it has had.
+        self._episode = None
+        self._began = None
+        self._lines = 0
+
+    def check(self) -> None:
+        snap = self._registry.latest(self._kind)
+        if snap is None or snap.phase not in (live_runs.WAITING,
+                                              live_runs.STREAMING):
+            self._episode = None
+            return
+        began = snap.read_at - snap.phase_for
+        episode = (snap.thread_id, snap.step, snap.phase)
+        if (episode != self._episode or self._began is None
+                or abs(began - self._began) > 1.0):
+            self._episode, self._began, self._lines = episode, began, 0
+        due = self.FIRST_S + self._lines * self.EVERY_S
+        if snap.phase_for >= due:
+            self._lines += 1
+            self._out(f"     .. waiting {live_runs.duration(snap.phase_for)}"
+                      f" for the model")
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.POLL_S):
+            try:
+                self.check()
+            except Exception:  # noqa: BLE001 -- display must not end a run
+                logger.warning("Could not check the pass's wait.",
+                               exc_info=True)
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._loop, name="venastine-model-wait", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.POLL_S + 1)
+
+
 def run_research(
     query: str,
     provider_name: str,
@@ -2522,6 +2619,9 @@ def run_research(
           f"Effort: {effort or 'auto'}\n")
 
     run = None
+    # ROADMAP_v3 §108. Stopped in the `finally` below, however the run ends.
+    waiting = _ModelWait()
+    waiting.start()
     try:
         for event in stream_deep_research_pipeline(
             user_query=query, model=model, provider_name=provider_name,
@@ -2573,7 +2673,10 @@ def run_research(
                 # final synthesis -- this is the only sign of life
                 # between the start line and the end line, and those are
                 # the two longest passes in the run.
-                print(f"     .. {event.chars // 1000}k chars", flush=True)
+                #
+                # §108 (PW1): with the pass's thinking beside it, its own
+                # figure, so a pass that only thinks is not silent.
+                print(_activity_line(event), flush=True)
             elif event.kind == "trace_line":
                 print(f"- {ansi.for_display(event.text)}", flush=True)
             elif event.kind == "run_started":
@@ -2604,6 +2707,8 @@ def run_research(
             print("If any partial results were persisted, they can be "
                   "inspected via the database.")
         raise SystemExit(1)
+    finally:
+        waiting.stop()
 
     output_dir = None
     try:

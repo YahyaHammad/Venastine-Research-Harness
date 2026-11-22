@@ -97,7 +97,8 @@ PIPELINE_EVENT_KINDS = (
                         # call sites while looking like a contract.
     "tool_call",        # pass_id + tool + text -- a pass invoked a tool
     "tool_result",      # pass_id + tool + ok (+ text when it failed)
-    "pass_activity",    # pass_id + chars -- output streamed so far, throttled
+    "pass_activity",    # pass_id + chars + thinking -- output and thinking
+                        # streamed so far, throttled (thinking: §108 PW1)
     # --- ROADMAP_v3 §98 -----------------------------------------------
     "run_started",      # text -- the run's id, first, before any pass. A
                         # shell needs it to say how to resume a run that
@@ -151,6 +152,9 @@ class PipelineEvent:
     # A total rather than a delta, so a consumer that drops an event (or
     # attaches late) still renders the right number.
     chars: Optional[int] = None
+    # ROADMAP_v3 §108 (PW1). The same, for the pass's thinking: its own
+    # figure beside `chars`, never added into it.
+    thinking: Optional[int] = None
     # PipelineRun on the terminal event. Typed Any to keep this module
     # importable from anywhere without dragging base.py in behind it --
     # the same reason LoopEvent.final_response is Any.
