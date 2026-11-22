@@ -166,8 +166,10 @@ _SPECS = (
                            "session", "[tokens|off]",
                 absent={CLI: _IN_THE_TUI}),
     # ROADMAP_v3 §97 (UF4): both shells, one report (`core/usage_view.py`).
-    CommandSpec("usage", "token counts the provider reported for this "
-                         "thread"),
+    # §108 (PW5): `--run` for a stored research run, the owner's form; the
+    # usage is `usage_view.ARGS`, which a test holds this to.
+    CommandSpec("usage", "token counts for this thread, or a research run",
+                "[--run [run-id]]"),
     CommandSpec("window", "override this model's context window for the "
                           "session", "[tokens|off]",
                 absent={CLI: _IN_THE_TUI}),

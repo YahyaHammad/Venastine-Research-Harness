@@ -216,6 +216,12 @@ class PipelineRun:
     # fetched pages reach output/<run_id>/sources/ and never the database.
     source_documents: list[dict] = field(default_factory=list)
     final_report: str = ""
+    # ROADMAP_v3 §108 (PW5): the run's calls, tokens and wall time, by pass
+    # and then by model -- `usage_view.RunUsage.to_dict`'s form, refreshed
+    # before every checkpoint. A dict for pass_threads' reason above; the
+    # live tally is the pipeline's, and this is what it stores. `{}` is a
+    # run whose totals were never kept.
+    usage: dict = field(default_factory=dict)
 
     def log(self, message: str) -> None:
         self.trace.append(message)

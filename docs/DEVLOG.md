@@ -33175,3 +33175,91 @@ run on the fix's commit: 10,149 passed and 88 skipped (10,237), in 2:58, with th
 thinking, then its text, and polls once a second. A stopped subagent reads `☑`. The research panel
 still shows its last 16 rows. The CLI's waiting line is for passes only. The wiki may need the
 sidebar's new figures.
+
+## Batch 283 -- a research run's and each pass's calls, tokens and time, kept and shown (ROADMAP_v3 §108, PW5) (2026-11-22)
+
+**Asked.** Take another roadmap item, after PR #302 merged and released 0.3.25. The owner chose
+§108's PW5, queued as this batch since 282: a run's and each pass's totals in the panel, `trace.md`
+and `/usage`.
+
+**Checked first.** Measured on `main` (`5cc37e7`, 0.3.25), on the real loop with only the model
+scripted, inside a shell's usage ledger, for a run of eleven calls:
+- `/usage` showed them as one "research passes · 1 run, 11 calls" block, summed over every pass.
+- The stored run record, its 16 trace lines and trace.md held no token, call or time figure.
+- A finished research row is its name alone.
+- `core/live_runs.py` had each pass thread's calls and tokens in and out, in memory, for the last 32
+  runs, and no cache rows: nothing a restart, a resume or a later reader could use.
+
+**Settled with the owner.** One round:
+- Storage: stored on the run's record, so a figure survives a restart and a resume adds to it.
+- The panel: the run's totals at its foot; finished rows stay one line. §97's UF7 holds, so a run
+  on two models shows each model's figures, never their sum.
+- The trace: a line per pass as it ends, printed by both shells, then the run's total.
+- `/usage --run <id>`, and a picker for a bare `--run`: the owner's own form, for consistency with
+  `/research --resume`, over the `/usage run [id]` I had offered.
+
+**Built.**
+- `core/usage_view.py`: `RunUsage`, a run's tally by pass label and then by (provider, model),
+  locked, with its stored dict form. `record` adds every call to the run being tallied as well as to
+  the shell's ledger, independently, so `--mode research` keeps its totals with no ledger.
+  `enter_run`, `enter_pass` and `leave` set and restore the ContextVar by value. The lines:
+  `pass_line`, `run_total_lines`, `run_report_lines`; `parse_args`; `is_usage_line`.
+- `core/reasoning/orchestrator.py`: `_Counted`, one run of one pass, settled once as finished,
+  failed or stopped, in both pass runners. `_Progress` refreshes `run.usage` before every write of
+  the record and announces a `usage` event when the figures changed. The pipeline carries a resumed
+  run's figures on, ends a finished or failed run with its total, shows a failed run's last lines
+  before the error, and stores an abandoned run's figures. The review counts under `Review`, its
+  time the reviewer's and not the consent walk's.
+- `core/reasoning/pipeline_storage.py`: `usage_json`, the eighth data column, and
+  `list_pipeline_runs`. `resume.py`: `_run_from` carries the figures; `find_stored_run`.
+- `core/reasoning/review.py`: the reviewer's trace leaves the figure lines out.
+- `tui/widgets.py`: the research panel's foot. `tui/screens.py`: `UsageRunPickerScreen`, through a
+  `_RunPicker` mixin it shares with the resume picker. `tui/app.py` and `cli_commands.py`:
+  `/usage --run`. `core/commands.py`: the usage text.
+
+**Three things found on the way.**
+- **The owner's preview line could not keep its colon.** `Pass 2: 1 call, 12s; ...` begins the way
+  a pass's RESULT line begins, and every reader of a trace by prefix took it for one. Eight tests
+  failed on it: each asks for "the line starting `Pass 3a:`". So does the resume of a run recorded
+  before §98, whose stage prefixes include `Pass 6b: `. It reads `Pass 2 used 1 call, 12s; ...`.
+- **The reviewer would have read the bill.** `_review_input` sends the whole trace to the review's
+  model. The figure lines are now left out of it, by `is_usage_line`.
+- **A shared run matcher read the database for a whole id.** Moving `find_run`'s matching into a
+  helper both finders use listed the runs before looking at what was typed;
+  `test_a_resume_passes_the_run_id_and_no_query` caught it, since the suite's fake storage cannot run
+  that query. The listing is a callable now, called for a prefix only, and a test pins it.
+
+**Changed in the tests.** `test_pipeline_storage.py`'s shape assertion has `usage`.
+`test_orchestrator.py`'s strict trace-order test accounts for the figure lines.
+`test_tui.py`'s modal table has a row for the new picker. `test_storage_e2e.py` gains the listing on
+real SQLite and asserts an old run reads `{}`. `tests/BREAKING_CHANGES.md` has a row for each change.
+
+**Verified.**
+- Full suite on Windows with AGENT_WORKSPACE unset, run on the commit: 10,238 passed and 88 skipped (10,326), in 3:03. Its one warning is the
+  deliberately duplicated name in a hostile test archive (`test_installers.py`), in code this change
+  does not touch.
+- The first full run, on the working tree, failed 11 of 10,237. Eight were the colon above, one
+  the modal table missing the new picker, one the picker's title and empty text not wrapped in
+  `Text`, which the markup gate refuses, and one `test_a_crlf_checkout_stays_crlf`, the known
+  local trap: `config.yaml` had come back CRLF in this worktree, and is LF again, as CI has it.
+  The second run failed only the three counts the docs state.
+- 78 deliberate breaks of the new code, one per line that carries a decision. The first pass left
+  three alive, each a test gap, and a test now kills each: a stored time given as a bool; a prose
+  pass's line read exactly (dropping its success settle made it say "before it was stopped");
+  and a prose pass that fails, since the failed-run case broke a JSON pass. All 78 are killed,
+  each by a failed assertion.
+- The foot in the mounted app at 100x30, read out of the screenshot, for one model and two:
+  `run 14m02s`, `12 calls`, `model-a`, `  132k in · 9k out`, `critic-model-with…`, `  1.2M in`,
+  `  90k out` -- nothing past the sidebar's 18 cells.
+- ruff is clean. bandit 1.9.4: nothing outside the baseline, and `scripts/bandit-count-check.py`
+  reports no (file, test) count grew. gitleaks 8.30.1 with CI's config finds nothing in an export
+  of the tree. pip-audit finds nothing in either requirements file.
+- No workflow or requirements file is in the diff.
+
+**Batch 282's release, settled.** PR #302 merged as `9ff7bb4`, and `release.yml` released 0.3.25
+(`5cc37e7`).
+
+**Not done** (§108's gap register). The panel's foot counts passes that have ended. A call made after
+the run's last checkpoint is in no stored figure. A hard kill keeps the last checkpoint's figures.
+The review's consent walk is in the run's time, not the review's. There is no thinking-token row.
+`/usage` itself still sums a thread's passes. The wiki does not describe the foot or `/usage --run`.

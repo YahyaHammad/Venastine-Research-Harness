@@ -2106,6 +2106,40 @@ def test_the_runs_a_resume_is_offered_on_real_sqlite(real_storage):
             _delete_run(run_id)
 
 
+def test_every_stored_run_is_listed_on_real_sqlite(real_storage):
+    """ROADMAP_v3 §108 (PW5). `list_pipeline_runs`, behind `/usage
+    --run`'s picker, orders by start, which the conftest's fake cannot:
+    every status, newest first, bounded by its limit. And a run's totals
+    survive a write and a read on the real column."""
+    from core.reasoning.base import PipelineRun
+
+    pipeline_storage = _real_pipeline_storage()
+    run = PipelineRun(user_query="listed")
+    run.usage = {"version": 1, "seconds": 5.0, "passes": [
+        {"pass": "Pass 0", "runs": 1, "seconds": 5.0, "models": [
+            {"provider": "P", "model": "m", "calls": 1,
+             "totals": {"input_tokens": 10}, "reported": {"input_tokens": 1}}
+        ]}]}
+    ids = []
+    try:
+        for status in ("complete", None, "failed"):
+            run_id = pipeline_storage.create_pipeline_run("listed")
+            ids.append(run_id)
+            pipeline_storage.update_pipeline_run(run_id, run, status=status)
+        listed = [r for r in pipeline_storage.list_pipeline_runs(limit=500)
+                  if r["id"] in ids]
+        assert [r["id"] for r in listed] == list(reversed(ids))
+        assert [r["status"] for r in listed] == ["failed", "running",
+                                                 "complete"]
+        assert set(listed[0]) == {"id", "user_query", "status", "started_at",
+                                  "finished_at"}
+        assert len(pipeline_storage.list_pipeline_runs(limit=1)) == 1
+        assert pipeline_storage.load_pipeline_run(ids[0])["usage"] == run.usage
+    finally:
+        for run_id in ids:
+            _delete_run(run_id)
+
+
 def test_a_run_older_than_its_newer_columns_reads_them_as_empty(
         real_storage, tmp_path, monkeypatch):
     """#258, and what measuring it found. `load_pipeline_run` reads the two
@@ -2186,6 +2220,9 @@ def test_a_run_older_than_its_newer_columns_reads_them_as_empty(
         for run_id in (old, by_hand):
             loaded = pipeline_storage.load_pipeline_run(run_id)
             assert (loaded["pass_threads"], loaded["candidates"]) == ([], [])
+            # ROADMAP_v3 §108 (PW5): a run older than its totals has none,
+            # which `/usage --run` says as "not recorded".
+            assert loaded["usage"] == {}
     finally:
         engine.dispose()
 

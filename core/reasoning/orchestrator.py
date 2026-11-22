@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 import config
 from core import pipeline_models, usage_view
@@ -114,6 +115,14 @@ MAX_RETRIES = config.MAX_PIPELINE_RETRIES
 
 _CLAIM_INPUT_FIELDS = {"id", "text", "type", "entities", "source_span", "asserted_by_candidates"}
 
+#: The clock a run's and a pass's wall time is read on (ROADMAP_v3 §108,
+#: PW5). Looked up at each read, so a test can move it.
+_clock = time.monotonic
+
+#: The review stage's label in the run's totals: the word its own trace
+#: lines begin with.
+REVIEW_LABEL = "Review"
+
 
 # ============================================================================
 # ---- Small helpers ----------------------------------------------------------
@@ -143,11 +152,53 @@ class _Progress:
     only inside a live generator has no business in a persisted row.
     """
 
-    def __init__(self, run: PipelineRun, emitted: int = 0) -> None:
+    def __init__(self, run: PipelineRun, emitted: int = 0,
+                 usage=None) -> None:
         self.run = run
         # A resumed run starts past the trace it already has (ROADMAP_v3
         # §98): those lines were shown when they happened.
         self._emitted = emitted
+        # ROADMAP_v3 §108 (PW5). The run's live tally, None for a caller
+        # that keeps none, and the clock its wall time is read from: this
+        # process's share, added to what the record already had.
+        self.usage = usage
+        self._began = _clock()
+        # The per-pass figures last announced, so a `usage` event goes out
+        # only when a pass has added to them, never for an empty run.
+        self._shown: list = []
+
+    def refresh_usage(self) -> None:
+        """Put the tally's figures on the run, as they stand now, for the
+        next write of the record to store."""
+        if self.usage is not None:
+            self.run.usage = self.usage.to_dict(
+                self.usage.base_seconds + (_clock() - self._began))
+
+    def log_totals(self) -> None:
+        """The trace lines a run ends with (§108 PW5): its calls and time,
+        then each model's figures."""
+        self.refresh_usage()
+        for line in usage_view.run_total_lines(self.run.usage):
+            self.run.log(line)
+
+    def save_usage(self) -> None:
+        """Store the figures of a run a shell abandoned, best-effort: it
+        reaches no `except Exception`, and the pass it stopped in had spent
+        something. A failure here is logged; the run is ending anyway."""
+        try:
+            self.refresh_usage()
+            update_pipeline_run(self.run.run_id, self.run)
+        except Exception:  # noqa: BLE001 -- see the docstring
+            logger.warning("Could not store the totals of abandoned run %s.",
+                           self.run.run_id, exc_info=True)
+
+    def emit(self):
+        """Every un-emitted line, with nothing persisted: for the failure
+        path, which has just persisted the run itself."""
+        while self._emitted < len(self.run.trace):
+            line = self.run.trace[self._emitted]
+            self._emitted += 1
+            yield PipelineEvent(kind="trace_line", text=line)
 
     def checkpoint(self, message: str | None = None, done: dict | None = None):
         """Log (optionally), PERSIST, then emit every un-emitted line.
@@ -172,13 +223,17 @@ class _Progress:
         """
         if message is not None:
             self.run.log(message)
+        self.refresh_usage()
         update_pipeline_run(self.run.run_id, self.run)
         if done is not None:
             self.save_point(done)
-        while self._emitted < len(self.run.trace):
-            line = self.run.trace[self._emitted]
-            self._emitted += 1
-            yield PipelineEvent(kind="trace_line", text=line)
+        yield from self.emit()
+        # §108 (PW5). After the lines, so a pass's own trace line, which
+        # says the same in words, is shown first.
+        passes = (self.run.usage or {}).get("passes") or []
+        if self.usage is not None and passes != self._shown:
+            self._shown = passes
+            yield PipelineEvent(kind="usage", usage=self.run.usage)
 
     def save_point(self, point: dict) -> None:
         """Save a resume point, warning rather than raising (ROADMAP_v3 §98,
@@ -215,6 +270,52 @@ _ACTIVITY_CHARS = 2000
 # aliased back to the old private one: an alias would leave two spellings
 # for one function, and a reader who greps the old name here should be sent
 # to where it now lives, not handed a local rebinding.
+
+
+class _Counted:
+    """One run of one pass, counted toward the run's totals (ROADMAP_v3
+    §108, PW5).
+
+    Made as the pass starts, which is when its calls begin to count under
+    its label -- every attempt, corrective retry, backstop compaction and
+    subagent, since each runs inside it. `settle` ends the count once: it
+    adds the run's wall time and writes the pass's trace line, the
+    owner's `Pass 2: 1 call, 12s; ...`. A pass driven where no run is
+    being tallied counts nothing and writes nothing.
+
+    `stop_clock` is for the review stage, whose consent walk waits on a
+    person: its calls still count under the label, its time does not."""
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self._began = _clock()
+        self._stopped = None
+        self._previous, self._this_run = usage_view.enter_pass(label)
+        self._open = True
+        self._settled = False
+
+    def stop_clock(self) -> None:
+        if self._stopped is None:
+            self._stopped = _clock()
+
+    def close(self) -> None:
+        """Stop counting under this label; the calls it saw stay counted."""
+        if self._open:
+            self._open = False
+            usage_view.leave(self._previous)
+
+    def settle(self, trace, how: str = "") -> None:
+        """Close the count and record it: `how` is "" for a pass that
+        finished, else what ended it ("failed", "was stopped")."""
+        self.close()
+        if self._settled or self._previous is None:
+            return
+        self._settled = True
+        seconds = (self._stopped or _clock()) - self._began
+        self._previous[0].ran(self.label, seconds)
+        if trace is not None:
+            trace.append(usage_view.pass_line(self.label, self._this_run,
+                                              seconds, how=how))
 
 
 class _Streamed:
@@ -639,6 +740,9 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
     streamed = _Streamed()
+    # ROADMAP_v3 §108 (PW5). Settled in each of the three ways a pass ends:
+    # finished, failed, or closed with the run a shell abandoned.
+    counted = _Counted(pass_id)
     try:
         response = None
         if resume_thread is not None:
@@ -670,13 +774,17 @@ def _run_pass(pass_id: str, pass_input: str, model: str, provider_name: str,
                 pass_id, r, authorization, trace),
             announce=checkpoint,
         )
+        counted.settle(trace)
     except Exception as exc:
         # E14/#115, UNIFORM: a fatal pass reports itself before its
         # exception propagates, so no shell is left holding a row that
         # only ever says "running" -- the same property the ensemble
         # skip path needs, reached from the one site both share.
+        counted.settle(trace, "failed")
         yield _pass_failed_event(pass_id, exc)
         raise
+    finally:
+        counted.settle(trace, "was stopped")
     yield PipelineEvent(kind="pass_complete", pass_id=pass_id, ok=True)
     return text
 
@@ -836,6 +944,8 @@ def _run_pass_with_json_retry(
     """
     yield PipelineEvent(kind="pass_start", pass_id=pass_id)
     streamed = _Streamed()
+    # ROADMAP_v3 §108 (PW5), as in `_run_pass`.
+    counted = _Counted(pass_id)
     try:
         response = None
         if resume_thread is not None:
@@ -880,12 +990,16 @@ def _run_pass_with_json_retry(
                 pass_id, payload, claim_ids=claim_ids, ensemble=ensemble),
             announce=checkpoint,
         )
+        counted.settle(trace)
     except Exception as exc:
         # E14/#115: same uniform failure report as _run_pass -- a JSON
         # pass that exhausts its retries is a pass that ended badly,
         # whatever the exception class.
+        counted.settle(trace, "failed")
         yield _pass_failed_event(pass_id, exc)
         raise
+    finally:
+        counted.settle(trace, "was stopped")
     yield PipelineEvent(kind="pass_complete", pass_id=pass_id, ok=True)
     return text
 
@@ -1142,9 +1256,19 @@ def _review_stage(run: PipelineRun, progress: _Progress, model: str,
 
     from core.reasoning import review as review_module
 
-    findings, thread_id = review_module.run_review(
-        run, model, provider_name, authorization, effort=effort,
-        activity=activity)
+    # ROADMAP_v3 §108 (PW5). The reviewer's calls and the refinements the
+    # consent walk makes count under "Review"; its time is the reviewer's
+    # alone, since the walk waits on a person. The re-synthesis below is
+    # Final synthesis again, counted as that.
+    counted = _Counted(REVIEW_LABEL)
+    try:
+        findings, thread_id = review_module.run_review(
+            run, model, provider_name, authorization, effort=effort,
+            activity=activity)
+    except Exception:
+        counted.settle(run.trace, "failed")
+        raise
+    counted.stop_clock()
     run.log(f"Review: {len(findings)} finding(s) raised.")
     # The findings' CONTENT is durable from this checkpoint on (review
     # r1-2): a kill during the consent walk used to leave only the count,
@@ -1157,12 +1281,19 @@ def _review_stage(run: PipelineRun, progress: _Progress, model: str,
                 + (f": {excerpt}" if excerpt else ""))
     yield from progress.checkpoint()
 
-    decisions = review_module.walk_consent(
-        findings, review, run, model=model, provider_name=provider_name,
-        thread_id=thread_id, authorization=authorization, effort=effort,
-        # §47's sink, for the refinement calls the walk can make. Every
-        # hop is a place it can be dropped, and this one was.
-        activity=activity)
+    try:
+        decisions = review_module.walk_consent(
+            findings, review, run, model=model, provider_name=provider_name,
+            thread_id=thread_id, authorization=authorization, effort=effort,
+            # §47's sink, for the refinement calls the walk can make. Every
+            # hop is a place it can be dropped, and this one was.
+            activity=activity)
+    except Exception:
+        counted.settle(run.trace, "failed")
+        raise
+    finally:
+        counted.close()
+    counted.settle(run.trace)
     run.subagent_reviews = decisions
     yield from progress.checkpoint()
 
@@ -1491,7 +1622,12 @@ def stream_deep_research_pipeline(
     critic_provider = critic["provider_name"] if critic else provider_name
     critic_model = critic["model"] if critic else model
 
-    progress = _Progress(run, emitted=point.trace_length if point else 0)
+    # ROADMAP_v3 §108 (PW5). The run's own tally, carried on from what its
+    # record holds when this is a resume, and entered below for as long as
+    # the run goes: every call any pass causes is recorded into it at the
+    # loop's one recording point.
+    progress = _Progress(run, emitted=point.trace_length if point else 0,
+                         usage=usage_view.RunUsage.from_dict(run.usage))
 
     # §98. What a resume point needs that is not on the run: how many
     # ensemble candidates the scores count out of, and which thread holds
@@ -1520,6 +1656,8 @@ def stream_deep_research_pipeline(
     if point is None:
         progress.save_point(mark(None))
 
+    # Entered here, with the try below as its only way out.
+    tallying = usage_view.enter_run(progress.usage)
     try:
         # --- §98: a resume says where it picks up, before anything runs ---
         yield PipelineEvent(kind="run_started", text=str(run.run_id))
@@ -1953,9 +2091,19 @@ def stream_deep_research_pipeline(
         run.final_report = thin_evidence.with_section(
             run.final_report, run.claims, confidence_weights)
 
+        # §108 (PW5): the run's total, last in its trace, shown like any
+        # other line before the run is announced.
+        progress.log_totals()
+        yield from progress.checkpoint()
         update_pipeline_run(run.run_id, run, status="complete")
         yield PipelineEvent(kind="run_complete", run=run)
         return
+    except GeneratorExit:
+        # §108 (PW5). A shell that quits closes the run here, where no
+        # `except Exception` reaches; the pass it stopped in has settled
+        # its count on the way out, and the record keeps it.
+        progress.save_usage()
+        raise
     except Exception:
         # Persist the partial state before the exception propagates. The
         # update is best-effort: if storage itself is what failed, we must
@@ -1967,12 +2115,21 @@ def stream_deep_research_pipeline(
         # `run`, and persistence already failed, so a trace entry would
         # never reach anywhere durable.
         try:
+            # §108 (PW5): a failed run's total too, after the failed
+            # pass's own line -- a failed run is the one whose cost is
+            # most worth knowing.
+            progress.log_totals()
             update_pipeline_run(run.run_id, run, status="failed")
         except Exception as persist_error:
             logger.error(
                 f"Failed to persist failure state for run {run.run_id}: {persist_error}"
             )
+        # The failed pass's line and the total, shown before the error
+        # ends the run: the record has them already.
+        yield from progress.emit()
         raise
+    finally:
+        usage_view.leave(tallying)
 
 
 def _pass2_input(run: PipelineRun, effective_n: int) -> str:

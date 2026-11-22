@@ -40,7 +40,7 @@ from textual.reactive import reactive
 from textual.strip import Strip
 from textual.widgets import ContentSwitcher, RichLog, Static, TextArea
 
-from core import live_runs
+from core import live_runs, usage_view
 from core.ansi import AnsiStripper
 from prompts.system_prompts import pass_label
 from tui import diffs, markdown, ravens, themes
@@ -1561,10 +1561,24 @@ class ResearchProgress(Static):
         self._tiers: dict = {}           # claim_id -> tier
         self._claims = 0
         self._retries = 0
+        # ROADMAP_v3 §108 (PW5): the run's totals as the last `usage` event
+        # carried them, when it arrived on this panel's clock, and whether
+        # the run is still going -- its time counts on until it ends.
+        self._usage = None
+        self._usage_at = None
+        self._live_run = False
 
     def start_run(self) -> None:
         self.reset()
+        self._live_run = True
         self.display = True
+        self._redraw()
+
+    def usage(self, figures) -> None:
+        """The run's totals, as stored after its latest pass (ROADMAP_v3
+        §108, PW5), for the foot."""
+        self._usage = figures if usage_view.readable(figures) else None
+        self._usage_at = self._clock()
         self._redraw()
 
     def clear_for_thread(self) -> None:
@@ -1630,8 +1644,10 @@ class ResearchProgress(Static):
         one the run failed or was abandoned in, and resolves as failed, as
         E14 resolves a skipped candidate: a row whose clock went on
         counting would describe a pass that is no longer running. A run
-        that completed has none, and this changes nothing."""
-        changed = False
+        that completed has none, and this changes nothing. The foot's time
+        stops where the run's last stored figure left it (PW5)."""
+        changed = self._live_run and self._usage is not None
+        self._live_run = False
         for entry in self._passes:
             if not entry.done:
                 entry.done = True
@@ -1773,7 +1789,56 @@ class ResearchProgress(Static):
                 body.append(f"  {label} {count}\n", styles.get(tier, ""))
         if self._retries:
             body.append(f"{self._retries} revision(s)\n")
+        foot = self._foot(now)
+        if foot:
+            body.append("\n")
+            for line in foot:
+                body.append(f"{line}\n")
         update_sized(self, body)
+
+    def _foot(self, now) -> list:
+        """The run's totals (ROADMAP_v3 §108, PW5, the owner's layout):
+
+            run 14m02s
+            11 calls
+            132k in · 9k out
+
+        and, for a run on two models or more, each model's name and its
+        own figures under it, since no figure adds two models (§97 UF7). A
+        model's name alone unless two providers serve one name. Figures
+        too wide for their indent take a line each rather than being cut.
+
+        The calls and tokens are those of the passes that have ENDED: a
+        running pass's own row says what it has spent so far. The time
+        counts on from the last figure while the run is going."""
+        if self._usage is None:
+            return []
+        calls, seconds, blocks = usage_view.run_totals(self._usage)
+        if self._live_run and self._usage_at is not None:
+            seconds += max(0.0, now - self._usage_at)
+        lines = [f"run {live_runs.duration(seconds)}",
+                 usage_view.calls_text(calls)]
+        if len(blocks) == 1:
+            return lines + self._token_lines(blocks[0][1], "")
+        names = [model for (_provider, model), _tally in blocks]
+        for (provider, model), tally in blocks:
+            name = (model if model and names.count(model) == 1
+                    else f"{provider} {model}".strip() or "model not named")
+            lines.append(AgentPanel._fit(name, self.WIDTH))
+            lines.extend(self._token_lines(tally, self.DETAIL_INDENT))
+        return lines
+
+    def _token_lines(self, tally, indent: str) -> list:
+        parts = [f"{short_count(tally.totals[key])} {label}"
+                 for key, label in (("input_tokens", "in"),
+                                    ("output_tokens", "out"))
+                 if tally.reported.get(key)]
+        if not parts:
+            return [f"{indent}tokens not reported"]
+        line = " · ".join(parts)
+        if len(indent) + cell_len(line) <= self.WIDTH:
+            return [f"{indent}{line}"]
+        return [f"{indent}{part}" for part in parts]
 
     def _details(self, entry, now) -> list:
         """A running pass's figures, a line each (ROADMAP_v3 §108, PW3):

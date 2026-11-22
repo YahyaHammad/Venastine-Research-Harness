@@ -51,7 +51,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§101. Flags a full-screen launch dropped: `--effort`, `--thread` and `--ref` under `--tui`** - **(BUILT in batch 277; LF5 in batch 278)** (`run_tui()` received the provider and model and nothing else, so `--tui --effort low` ran at the shipped `high` with `high` in the sidebar, the `--thread` a `/config` restart writes was ignored by the TUI it relaunched, and `--ref` attached nothing. All three reach the TUI now: the flag's effort outranks `tui.effort`, the thread opens at mount through `switch_to_thread`, the references attach through `/ref`'s writer and a restart does not attach them twice; and a census read from the parser gives every flag one answer under `--tui`. Batch 278 refuses `--tui` with a data command such as `--memories`, which ran while `--tui` went unused, and names the slash command; LF1-LF5)
 - **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(BUILT in batch 281)** (every write scrolled the transcript to the bottom, because `RichLog.auto_scroll` follows every write: a reader at row 5 was at the bottom again after five streamed rows, and the run and session viewers, which repaint whole, did the same on every new entry. A drag selected nothing, because `RichLog` implements none of the selection the pinned textual's screen supports. A transcript now follows only while its reader is at the bottom, follows again there or on any submit, and counts in its border what arrived below them; all four panes keep a scrolled-up reader's place through a repaint; and a drag selects the rows as drawn, copied with ctrl+c; SV1-SV4)
 - **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280)** (D2 overwrote the tier of every claim that ran out of revision rounds with UNVERIFIED, so a partly grounded claim scoring 0.45 (LOW) was published as one nothing supports beside a breakdown still saying 0.45. D2 keeps the tier 6b scored and records `loop_exhausted`; a flagged claim names its largest deduction; an exhausted claim publishes the revision 6b scored with what it was first stated as beside it; and every shell's report ends with a code-rendered "Where the evidence is thin" section, built after the review; XR1-XR4)
-- **§108. A research pass you can watch** - **(PW1-PW4 BUILT in batch 282; PW5 is batch 283)** (a pass that streamed 40,000 characters of thinking and 3,000 of text announced 2,000 and its view, which reads the archive, showed its task alone until the call ended; a finished pass could not be opened from the TUI at all. Thinking is activity, every run's view streams the step in progress from a live record the loop writes, a running pass row says how long, what and how much, research rows open their pass, finished subagents stay in the agent panel, running rows spin, and the CLI says when a pass has waited a minute on the model)
+- **§108. A research pass you can watch** - **(PW1-PW4, PW6 and PW7 BUILT in batch 282; PW5 in batch 283)** (a pass that streamed 40,000 characters of thinking and 3,000 of text announced 2,000 and its view, which reads the archive, showed its task alone until the call ended; a finished pass could not be opened from the TUI at all. Thinking is activity, every run's view streams the step in progress from a live record the loop writes, a running pass row says how long, what and how much, research rows open their pass, finished subagents stay in the agent panel, running rows spin, and the CLI says when a pass has waited a minute on the model. Batch 283: a run's and each pass's calls, tokens and time are stored on its record and shown in its trace, the panel's foot and `/usage --run`)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -3076,7 +3076,7 @@ leaked PID.
 ## §108. A research pass you can watch
 
 **Proposed 2026-11-20 in `ROADMAP_v3_researcher_feedback.md` and accepted by the owner. PW1-PW4 were
-built in batch 282 (2026-11-22), with two additions of the owner's (PW6, PW7); PW5 is batch 283.**
+built in batch 282 (2026-11-22), with two additions of the owner's (PW6, PW7); PW5 in batch 283, the same day.**
 The researcher's sharpest complaint about the TUI: nothing said how active a run was or what it was
 doing, the panel showed a pass with a rising count while the pass's own view showed no text, and the
 thinking they most wanted to read was never shown. The proposal's §108 is this section; the feedback
@@ -3106,7 +3106,7 @@ Measured on the real loop with only the model scripted, and the suite's fake sto
 - **The CLI counted output only**, and printed nothing while a pass waited on the model, because the
   pipeline is blocked in the read and the loop over its events has nothing to print.
 
-### Decisions (PW1-PW4, PW6, PW7)
+### Decisions (PW1-PW7)
 
 | # | Decision |
 |---|---|
@@ -3114,12 +3114,14 @@ Measured on the real loop with only the model scripted, and the suite's fake sto
 | **PW2** | **The view of every run streams the step in progress** (owner: every run the viewer opens, not research passes only). The loop writes a per-run record in memory, `core/live_runs.py`, for every run but the conversation's own, whose stream is the transcript: the step's text and thinking, when its last byte came, the tools running, and the provider's token counts. The viewer reads it on its poll and appends what is new through the transcript's own streaming path; a step that lands, is retracted or starts again is repainted from the archive. It never enters the main transcript or any model's context, so D6 and `agent_activity`'s lifecycle-only rule are unchanged. A step keeps its last 200,000 characters of each, and the view says how many came before them. As a run ends the view reads once more |
 | **PW3** | **A running pass row says how long, what, and how much** (owner: all the figures on the row). Under the pass's name: `6m40s · 3 tools`; the state, `waiting 1m05s` while a call is out with no byte of it yet, `fetch_url 12s` while a tool runs (`+2` for a group), `last byte 2s` while it streams; `12k written`; `40k thought`; `41k in · 9k out`. The elapsed time and the figures come from the panel's events, the state and the tokens from the pass's live record. Measured for the sidebar's 18 cells: the owner's `12k · 40k thought` was 19 at this indent with ordinary figures, so written and thought take a line each. A run that fails or is abandoned resolves the pass it was in as failed, so no row counts on for a pass that is over |
 | **PW4** | **Every research row opens its pass, running or finished** (owner, over the proposal's five passes kept in the agent panel, which would drop a run's earlier passes). **The agent panel keeps the five most recent finished subagents** under the running ones, marked `☑` for a run that returned and `☒` for one that raised, and they open on a click, as batch 258 keeps sessions. A research pass and a harness run (compaction, the reviewer) are not kept there. `AgentActivity.exit` says how the run ended |
-| **PW5** | **Not built: batch 283.** A run's and each pass's token, call and time totals in the panel, `trace.md` and `/usage <run>`, from the per-run counts PW3 now keeps |
+| **PW5** | **A run's and each pass's calls, tokens and wall time are kept by the run, stored on its record, and shown in the trace, the research panel and `/usage --run`** (built in batch 283). The owner chose each place. **Stored** on the run record, a new column `usage_json` checkpointed with the others, the failure path included, so a figure outlives the process that counted it. A resume adds to it. The time between a failure and its resume is not counted. A run stored before this batch says "not recorded". **The trace** gets a line as each pass ends, `Pass 2 used 1 call, 12s; ANTHROPIC model-a: 12,000 in (4,000 cache read), 800 out.`. A pass that failed or was stopped says so. The run ends with its total, a line per model when it used more than one. Both shells print the lines as they come, and trace.md has them. **The panel's foot**: `run 14m02s`, `11 calls`, `132k in · 9k out`, with each model's name and figures when the run used several. The calls and tokens are those of the passes that have ended; the time counts on. **`/usage --run <id>`** (the owner's form, matching `/research --resume`) prints each pass, then the run, as `/usage`'s four rows per model. A bare `/usage --run` opens a picker of every stored run in the TUI and lists them in the CLI. UF7 holds throughout: no figure adds two models |
 | **PW6** | **Every running row of the sidebar spins** (owner's addition): research passes, agent runs and background sessions cycle the six-dot braille spinner `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` in place of `▸`, so running looks the same in all three. **Four frames a second** (owner, once measured: in the mounted app ten frames a second cost 3.9-8.8% of a core against 1.8-2.0% idle; four, 1.8-2.0%). The still `▸` with `tui.animations` off. One timer for the three panels, running only while one of them has a running row; a tick lays the sidebar out again only when a line's width changed |
 | **PW7** | **The CLI says when a pass has waited on the model** (owner). Its activity line gains the thinking figure (`.. 12k chars · 40k thought`), and a pass that has gone a minute with nothing arriving from the model prints `.. waiting 1m00s for the model`, then again every five minutes. A ticker thread prints it, reading the pass's live record, since the pipeline itself is blocked in the read. A long tool call prints nothing new: its `>` line already said what is running |
 
 PW1, PW2's design, PW3's lines and PW4's subagent half are the proposal's. PW2's scope, PW3's layout,
-PW4's research-row half, PW6 and PW7 are the owner's choices; PW6 and PW7 are new.
+PW4's research-row half, PW6 and PW7 are the owner's choices; PW6 and PW7 are new. PW5's storage, its
+foot, its trace lines and the `/usage --run` form with a picker are the owner's (batch 283); its line
+reads `used` where the owner's preview had a colon, for the reason under Built (batch 283).
 
 ### What §108 deliberately does not change
 
@@ -3162,9 +3164,79 @@ binding, a click on a finished pass, the clock and the events that drive it, a g
 again, a failed run, and the live view's append, repaint, a step retracted between its reads,
 thinking toggle, cap note and last read. The mutation result is in `DEVLOG.md`.
 
+### PW5: what the code did (main `5cc37e7`, 0.3.25)
+
+Measured on the real loop with only the model scripted, inside a shell's usage ledger, for a run of
+eleven calls:
+
+| where a run's figures could be read | what it held |
+|---|---|
+| `/usage` | one "research passes · 1 run, 11 calls" block, summed over every pass |
+| the stored run record, its trace and trace.md | no token, call or time figure (16 trace lines) |
+| a finished research row | its name |
+| `core/live_runs.py` | each pass thread's calls and in/out, in memory, the last 32 runs, no cache rows |
+
+### Built (batch 283, PW5)
+
+- **`core/usage_view.py`**: `RunUsage`, a run's tally by pass label and then by (provider, model),
+  locked, with `to_dict`/`from_dict` for the stored form and `base_seconds` for a resume's earlier
+  part. `record` adds every call to the run being tallied as well as to the shell's ledger, the two
+  independent, so `--mode research` keeps its totals with no ledger. `enter_run`, `enter_pass` and
+  `leave` set and restore the ContextVar by value, not by token: the pipeline is a generator a
+  quitting shell can close from another context, where `ContextVar.reset` raises. A pass's children
+  take its label with the copied context (UF9's route). `pass_line`, `run_total_lines`,
+  `run_report_lines`, `parse_args` and `is_usage_line`.
+- **The line reads `Pass 2 used 1 call, 12s; …`**, where the owner's preview had `Pass 2: 1 call`.
+  Measured: a line that begins `Pass 2:` is the pass's result to every reader of a trace by prefix,
+  the resume of a run recorded before §98 among them (`Pass 6b: ` is one of its stage prefixes),
+  and the colon form broke eight tests that ask what a pass reported.
+- **`core/reasoning/orchestrator.py`**: `_Counted`, one run of one pass, made as `_run_pass` and
+  `_run_pass_with_json_retry` start and settled once, as finished, failed or stopped. `_Progress`
+  holds the run's tally, refreshes `run.usage` before every write of the record, and announces a
+  `usage` event when the per-pass figures changed. The pipeline enters the run's tally, carried on
+  from the record on a resume; ends a finished or failed run with its total; shows a failed run's
+  last lines before the error; and stores an abandoned run's figures on `GeneratorExit`. The review
+  stage counts under `Review`, with the reviewer's time only.
+- **`core/reasoning/pipeline_storage.py`**: `usage_json` (the eighth data column), written by
+  `update_pipeline_run`, read as `usage`, and `list_pipeline_runs` for the picker.
+  **`resume.py`**: `_run_from` carries the stored figures; `find_stored_run` and `RunNotFound`, over
+  `find_run`'s matcher, which lists runs only for a prefix.
+- **`core/reasoning/review.py`**: the reviewer's trace leaves the figure lines out.
+- **`core/reasoning/events.py`**: the `usage` kind and its field.
+- **`tui/widgets.py`**: the research panel's foot. **`tui/screens.py`**: `UsageRunPickerScreen`, the
+  resume picker's dialog through a shared `_RunPicker` mixin. **`tui/app.py`**: the `usage` event
+  reaches the panel, and `/usage --run` with its picker. **`cli_commands.py`**: `/usage --run` and
+  its listing. **`core/commands.py`**: `/usage [--run [run-id]]`.
+
+Tests: `tests/test_run_totals.py`. The tally's rules: the pass running, a run no shell counts, a
+call between passes, a child on another thread, a pass run twice, the stored form's round trip and
+every unreadable shape. The lines, exact: one model and two, unreported and partial rows, a pass
+that failed or was stopped, the run total, the report, a run stored before this batch, the query
+made safe, and which lines are figures. The pipeline on the real loop with a clock the scripted
+model moves: a line per pass and the total, the record against the trace and the events, one
+event per pass, a corrective retry, a failed run, an abandoned one, a resume adding to its run, and
+ensemble candidates on two models. The review's time. The record, the whole id that reads no
+database, and the prefix. The foot, exact, at the width. Both shells' `/usage --run`, the picker
+and its cancel, and the CLI ignoring the event. On real SQLite, in `test_storage_e2e.py`: every
+status listed newest first, the limit, and an old run reading `{}`. The mutation result is in
+`DEVLOG.md`.
+
 ### Gap register
 
-- **PW5**, the totals, is batch 283.
+- **The panel's foot counts the passes that have ended.** A running pass's calls and tokens are on
+  its own row (PW3) until it ends; the foot's time counts on.
+- **A call made after a run's last checkpoint is in no stored figure**: a background subagent a pass
+  started that is still running when the run ends.
+- **A hard kill keeps the figures of the last checkpoint.** A quit closes the run and stores the pass
+  it stopped in; a killed process reaches no handler.
+- **The review's time is the reviewer's.** Its consent walk waits on a person, and that wait is in the
+  run's time and not the review's.
+- **No row for thinking tokens.** The figures are `/usage`'s four, the provider's own counts, and every
+  provider counts thinking as output.
+- **`/usage` itself still sums a thread's research passes** into one section, as §97 built it;
+  `/usage --run` is where a run is split by pass.
+- **The shell's decision model** (§56) is called over its own client, so it is in no figure, as it
+  is in no `/usage`.
 - **The live view draws a step's thinking and then its text**, each where the last poll stopped. A
   step that interleaves them is drawn grouped until it lands, when the archive's order replaces it.
 - **The view polls once a second**, so streamed text arrives a second at a time, and a stream's
@@ -3936,8 +4008,9 @@ decision, were each killed by a failed assertion.
 - **`billed` still resets on `/grill-me`'s reload**, which builds a new memory for the same
   thread; the ledger does not (UF6), so after one the usage line reads less than `/usage`'s
   "this thread" section. Found in batch 279, not changed there.
-- **A figure for one research run or one pass** is not given: `/usage` counts the runs a
-  thread started together. The researcher-feedback proposals ask for one (PW5).
+- ~~**A figure for one research run or one pass** is not given: `/usage` counts the runs a
+  thread started together. The researcher-feedback proposals ask for one (PW5).~~ Closed in batch
+  283 (§108 PW5): `/usage --run <id>`, the run's trace and the research panel's foot.
 
 ---
 

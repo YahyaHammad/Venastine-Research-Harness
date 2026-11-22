@@ -78,6 +78,11 @@ def _review_input(run) -> str:
     Still distilled, not raw: these are the pipeline's own outputs, the
     same artifacts a human reads. No per-pass conversation thread is
     shared, so the "distill, don't share raw history" principle holds.
+
+    The trace WITHOUT its figures (ROADMAP_v3 §108, PW5): what each pass
+    cost is the person's to read, and a reviewer judging the run's claims
+    has no use for token counts -- they would be input it is billed for,
+    and a number it might weigh.
     """
     import json
 
@@ -99,7 +104,9 @@ def _review_input(run) -> str:
         f"Final annotated claims:\n{json.dumps(claims, indent=2)}\n\n"
         f"Coverage gaps:\n{json.dumps(run.coverage_gaps)}\n\n"
         f"Final report:\n{run.final_report}\n\n"
-        f"Pipeline trace:\n" + "\n".join(f"- {line}" for line in run.trace)
+        f"Pipeline trace:\n" + "\n".join(
+            f"- {line}" for line in run.trace
+            if not usage_view.is_usage_line(line))
     )
 
 
