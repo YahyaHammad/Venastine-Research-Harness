@@ -559,7 +559,7 @@ def test_the_effort_query_succeeds_against_REAL_sdk_objects():
         )
 
         client = SimpleNamespace(models=SimpleNamespace(
-            retrieve=lambda model: SimpleNamespace(
+            retrieve=lambda model, **_: SimpleNamespace(
                 capabilities=SimpleNamespace(effort=effort))))
 
         client_module._effort_levels_cache.clear()
@@ -668,7 +668,7 @@ def test_the_window_query_succeeds_against_a_REAL_openai_model_object():
             context_window=131_072)
 
         client = _SimpleNamespace(models=_SimpleNamespace(
-            retrieve=lambda name: model))
+            retrieve=lambda name, **_: model))
         try:
             window, authoritative = client_module.context_window_for(
                 client, "GROQ", "llama-3.3-70b")

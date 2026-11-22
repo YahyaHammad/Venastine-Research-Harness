@@ -53,16 +53,26 @@ max_tokens: 16000
 max_iterations: 50
 
 # How many more times ONE model call is attempted when the provider fails in
-# a way that can pass: a dropped connection, a 408/409/429/5xx, or an error
-# sent inside a stream that had already opened. Total attempts per call is
-# this plus one. The openai and anthropic SDKs still retry a request that
-# fails before its stream opens, inside each attempt. 0 turns this off.
+# a way that can pass: a dropped connection, a timeout, a 408/409/429/5xx, or
+# an error sent inside a stream that had already opened. Total attempts per
+# call is this plus one, and each retry is a warning on screen. Nothing else
+# retries: the provider SDKs are told not to. 0 turns this off.
 model_call_max_retries: 2
 
 # Seconds before the first of those retries. Each later retry waits twice as
 # long, with up to 25% jitter either way; a server's retry-after can make a
 # wait longer, never shorter, capped at 60s.
 model_call_retry_base_delay_s: 3.0
+
+# Seconds a model call waits for its next byte before it gives up on that
+# attempt: the first token, or the next piece of a stream. Per read, not per
+# answer, so a long answer that keeps arriving is never cut. A thinking model
+# on a busy server can be silent for minutes before its first token, which is
+# why this is 600 (the provider SDKs' own figure). Lower it if your provider
+# is never that slow and you would rather know sooner. Every provider uses
+# it; looking up a model's context window or effort levels waits 30s.
+# Takes effect on the next launch.
+model_call_read_timeout_s: 600
 
 # ======================================================================
 # Subagents

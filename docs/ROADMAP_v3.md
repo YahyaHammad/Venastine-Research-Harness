@@ -49,6 +49,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§99. A pass being corrected is seen while it runs** - **(BUILT in batch 270)** (a JSON pass's corrective retry, and a prose pass's no-text one, reached the model through `continue_conversation`, which drains its own loop: the owner's resumed Pass 6b spent 25 minutes and 14 model calls correcting one answer with its tool count frozen and its row gone from the panel, and looked hung. A retry now goes through the pass's own entry point, so its tool calls, its row and its character total show as the attempt's do, its reason is saved and shown the moment the parse fails, and its fetched pages reach the corpus; SR1-SR6)
 - **§100. A subagent that runs while its parent works** - **(BUILT in batch 271)** (a spawn blocked its parent until the child answered, and NA9's parallelism existed only within one reply, so the main agent could not delegate and keep working; SS10 had deferred background subagents since §49. `spawn_subagent` takes `background: true`, which returns at once and runs the child as a session of kind `subagent` (ids `a1`, `a2`, ...) that shares the session cap, the post-turn wait, kill and quit, and wakes the parent with its answer; it asks for approval as a blocking child does, escape leaves it running, the CLI's reader gives a question the terminal, and `shell_sessions`, `shell_output` and `shell_kill` ship on; BG1-BG10)
 - **§101. Flags a full-screen launch dropped: `--effort`, `--thread` and `--ref` under `--tui`** - **(BUILT in batch 277; LF5 in batch 278)** (`run_tui()` received the provider and model and nothing else, so `--tui --effort low` ran at the shipped `high` with `high` in the sidebar, the `--thread` a `/config` restart writes was ignored by the TUI it relaunched, and `--ref` attached nothing. All three reach the TUI now: the flag's effort outranks `tui.effort`, the thread opens at mount through `switch_to_thread`, the references attach through `/ref`'s writer and a restart does not attach them twice; and a census read from the parser gives every flag one answer under `--tui`. Batch 278 refuses `--tui` with a data command such as `--memories`, which ran while `--tui` went unused, and names the slash command; LF1-LF5)
+- **§102. A model call that never answers is reported before half an hour has passed** - **(BUILT in batch 284)** (a stalled OpenAI-compatible or Anthropic endpoint took fifteen requests a turn, because the SDKs' two retries sat inside each of the harness's three attempts and inside the lookups before them, all at the call's 600 s, so the first warning came an hour in and the failure after two and a half; google-genai had no timeout at all; and a stop pressed while a call was silent still sent every remaining attempt and ended the turn failed. The SDKs retry nothing now, the harness reads the two headers they read, every provider waits `model_call_read_timeout_s` (600) for each byte and a lookup 30 s, a stop is never retried past, and a waiting chat turn says `waiting 4m12s` in both shells; MW1-MW4)
 - **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(BUILT in batch 281)** (every write scrolled the transcript to the bottom, because `RichLog.auto_scroll` follows every write: a reader at row 5 was at the bottom again after five streamed rows, and the run and session viewers, which repaint whole, did the same on every new entry. A drag selected nothing, because `RichLog` implements none of the selection the pinned textual's screen supports. A transcript now follows only while its reader is at the bottom, follows again there or on any submit, and counts in its border what arrived below them; all four panes keep a scrolled-up reader's place through a repaint; and a drag selects the rows as drawn, copied with ctrl+c; SV1-SV4)
 - **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280)** (D2 overwrote the tier of every claim that ran out of revision rounds with UNVERIFIED, so a partly grounded claim scoring 0.45 (LOW) was published as one nothing supports beside a breakdown still saying 0.45. D2 keeps the tier 6b scored and records `loop_exhausted`; a flagged claim names its largest deduction; an exhausted claim publishes the revision 6b scored with what it was first stated as beside it; and every shell's report ends with a code-rendered "Where the evidence is thin" section, built after the review; XR1-XR4)
 - **§108. A research pass you can watch** - **(PW1-PW4, PW6 and PW7 BUILT in batch 282; PW5 in batch 283)** (a pass that streamed 40,000 characters of thinking and 3,000 of text announced 2,000 and its view, which reads the archive, showed its task alone until the call ended; a finished pass could not be opened from the TUI at all. Thinking is activity, every run's view streams the step in progress from a live record the loop writes, a running pass row says how long, what and how much, research rows open their pass, finished subagents stay in the agent panel, running rows spin, and the CLI says when a pass has waited a minute on the model. Batch 283: a run's and each pass's calls, tokens and time are stored on its record and shown in its trace, the panel's foot and `/usage --run`)
@@ -3123,6 +3124,11 @@ PW4's research-row half, PW6 and PW7 are the owner's choices; PW6 and PW7 are ne
 foot, its trace lines and the `/usage --run` form with a picker are the owner's (batch 283); its line
 reads `used` where the owner's preview had a colon, for the reason under Built (batch 283).
 
+**Amended by §102 (batch 284, MW3).** PW2's record now covers the conversation's own run as well,
+PHASE-ONLY: its phase, tools and last byte, and none of its text, which is still the transcript's.
+It is forgotten when the turn ends, so a chat never pushes a pass out of the ended records. Both
+shells read it to say a chat turn is waiting on the model.
+
 ### What §108 deliberately does not change
 
 - **`LoopEvent`.** It has seven fields and a test fails at an eighth (P1), so there is still no step
@@ -3245,8 +3251,9 @@ status listed newest first, the limit, and an old run reading `{}`. The mutation
   that raised.
 - **The research panel still shows the last 16 rows** (§26's window), so the earliest passes of a
   long run scroll out of the panel and cannot be clicked there.
-- **The CLI's waiting line is for research passes.** A CLI chat turn waiting on the model prints
-  nothing until it answers.
+- ~~**The CLI's waiting line is for research passes.** A CLI chat turn waiting on the model prints
+  nothing until it answers.~~ Closed in batch 284 (§102, MW3): a chat turn prints it too, and the
+  TUI's prompt border says `waiting 4m12s`.
 - **The wiki's user guide** (a separate repository) does not describe the sidebar's new figures.
 
 ---
@@ -3458,6 +3465,142 @@ reader through a poll and counts what arrived). The mutation result is in `DEVLO
   more.
 - **The wiki's user guide** (a separate repository) may still say the transcript cannot be
   selected.
+
+---
+
+## §102. A model call that never answers is reported before half an hour has passed
+
+**Proposed 2026-11-20 in `ROADMAP_v3_researcher_feedback.md`, accepted by the owner, and built in
+batch 284 (2026-11-23), with one decision of the owner's the proposal did not have (MW4).** After a
+`/research --resume`, the researcher watched their provider's dashboard show nothing sent for seven
+minutes, and then a 499 the harness never reported. A 499 is what a proxy logs when its client hangs
+up before the server answers. The proposal's §102 is this section; the feedback document now points
+here.
+
+### What the code did (main `a818963`, 0.3.26)
+
+Measured against a local server that accepts every request, reads it, and never answers. The probe
+used the clients `api_initialization` builds and the real loop, with the read timeout cut to one
+second so a count took seconds; the figures at 600 s are those counts times the shipped timeout.
+
+| a stalled endpoint | requests in one turn | first line on a screen | the turn ends |
+|---|---|---|---|
+| OpenAI-compatible | 15: three `GET /models/{id}`, three `GET /models`, nine calls | ~60 min, the window lookup's warning | ~2.5 h, failed |
+| Anthropic | 15, the same shape | ~60 min | ~2.5 h, failed |
+| Google | 1, then nothing | never | never |
+| any, with a stop pressed at the first request | every remaining attempt | — | failed, as the timeout |
+
+- **The SDKs retried inside the harness.** openai 3.45.0 and anthropic 2.5.0 keep `max_retries=2`,
+  so each of the loop's three attempts was three requests. They log their retries at INFO, which
+  reaches the log file and no screen. Their retried statuses are `RETRYABLE_STATUSES` exactly (408,
+  409, 429 and 5xx). They also read two headers the harness did not: `x-should-retry` and
+  `retry-after-ms`.
+- **The lookups in front of the call shared its timeout.** A turn's first call is preceded by the
+  context-window lookup, a retrieve and then the listing, until it has an answer. Each was three
+  requests at 600 s, so an hour passed before the call was sent.
+- **google-genai had no timeout.** `HttpOptions.timeout` defaults to None, which it passes to httpx
+  per request, and None there is no limit: the probe was still blocked after twenty seconds on its
+  first request.
+- **A stop could not land.** A cooperative stop cannot reach a read already blocked in the SDK
+  (§61's stated limit), and the attempt loop did not ask between attempts. Measured: a stop pressed
+  as the first request went out, and all nine went out; the turn ended as the timeout, a failure,
+  rather than as stopped.
+- **A chat turn waiting on the model looked like one being answered.** The TUI's border showed the
+  elapsed time and tok/s either way, and the CLI printed nothing until the step ended (§108's gap
+  register said so for the CLI).
+
+**What this does not establish**, as the proposal said: that the researcher's seven minutes was a
+read timeout. A slow first token on a busy cluster looks the same from outside, and their log has not
+been seen.
+
+### Decisions (MW1-MW4)
+
+| # | Decision |
+|---|---|
+| **MW1** | **The SDKs retry nothing; the harness retries everything, visibly** (owner: every client, over the model call alone). Every openai and anthropic client is built with `max_retries=0`, as the ChatGPT client already was. google-genai retries nothing without `retry_options`, and is left so. The transient set was checked against the pinned SDKs first. The statuses are the same, and `core/provider_errors.py` now reads the two things they read that it did not. `x-should-retry: true` or `false` is obeyed on an error status, before the status. `retry-after-ms` is preferred to `retry-after`. The window and effort lookups try once and fall back, as they already did on a failure, and embeddings keep their own three tries. Amends batch 91's "the SDK retries are KEPT". |
+| **MW2** | **`model_call_read_timeout_s`, default 600, on every client, and lookups wait 30 s** (owner). The key is the wait for the next byte. It applies per read, so a stream that keeps arriving is never cut. openai and anthropic take it as `Timeout(read, connect=5.0)`, keeping the SDKs' own connect. google-genai, which had none, takes it as `HttpOptions.timeout` in milliseconds; setting it also sends `X-Server-Timeout`. The context-window, listing and effort lookups wait a fixed 30 s (`LOOKUP_READ_TIMEOUT_S`): a `GET /models` that is silent that long is not coming. It takes effect at the next launch, because clients are built once per process. |
+| **MW3** | **A chat turn says it is waiting on the model, in both shells, in §108's words** (owner). The loop records the conversation's own run in `core/live_runs.py` PHASE-ONLY: its phase, tools and last byte, and none of its text. The text is the transcript's, so PW2's reason holds. The record is forgotten when the turn ends. The TUI's prompt border reads `4m12s  waiting 4m12s  up 1h02m` until the first byte, and `last byte 14s` once a stream has been silent for 10 s (`QUIET_SHOWN_S`); it does so only while the border's clock ticks. The CLI prints the research pass's `.. waiting 1m00s for the model` at a minute and every five after, for the chat turn and its wake turns. Amends PW2's "every run but the conversation's own". |
+| **MW4** | **No retry after a stop** (owner, over also cutting the read; new, since the proposal did not have it). The attempt loop asks for the stop before each retry, and the backoff wait asks every 0.25 s. A stopped run whose attempt failed the way a retry is for ends `cancelled`, including on its last attempt, and keeps what it had drawn (CN4). A failure that no retry is for still raises, so a stop does not hide a refusal or a bug. A stop pressed while a call is silent therefore lands when that read gives up, at most `model_call_read_timeout_s` later, not after every remaining attempt. |
+
+MW1-MW3 are the proposal's in substance. MW1's every-client scope, MW2's 30 s for the lookups, MW3's
+two shells and wording, and MW4 are the owner's choices (batch 284).
+
+### What §102 deliberately does not change
+
+- **`model_call_max_retries` and `model_call_retry_base_delay_s`**, still 2 and 3 s.
+- **The 600.** Shortening the default would turn slow into failed on a busy cluster (the proposal's
+  reason, and the owner's).
+- **§61's limit.** A stop still cannot interrupt a read already blocked in the SDK. The owner kept
+  that, over a transport hook in each SDK.
+- **`LoopEvent`** (P1). The waiting figure comes from the live record, not from an event.
+- **The SDKs' own pacing between retries**, which is gone with their retries. The loop's backoff,
+  three seconds and then six, was already the slower of the two.
+
+### Measured after (batch 284)
+
+The same probe on the branch, with the clients as `api_initialization` builds them, the read timeout
+at 2 s and the lookups at 1 s:
+
+| | main | batch 284 |
+|---|---|---|
+| a stalled OpenAI-compatible or Anthropic turn | 15 requests | 5: one window lookup, one listing, three calls, each retry a WARNING |
+| a stalled Google turn | 1 request, never ends | 4, ends, and sends `X-Server-Timeout` |
+| a stop at the first request | 9 requests, failed | 1, `cancelled` once the read gave up |
+| a stop 0.5 s into a 30 s backoff | — | woke within a slice, `cancelled`, 1 request |
+| the chat border while waiting | elapsed and tok/s | `waiting 0s`, `waiting 1s`, … for each attempt |
+
+At the shipped figures, a stalled turn now spends a minute on its lookups and at most three times
+600 s on the call. The window lookup's warning comes a minute in, and the first retry's eleven
+minutes in.
+
+### Built (batch 284)
+
+- **`core/provider_errors.py`**: `should_retry_header`, read in `is_transient` on an error status;
+  `retry_after_s` reads `retry-after-ms` first; `wait(seconds, stopped=None)` waits in
+  `WAIT_SLICE_S` slices when there is a stop to hear. The slices are counted rather than timed, so a
+  test that patches `sleep` still gets a wait that ends.
+- **`core/client.py`**: `_no_retries`, `_timeout` and `CONNECT_TIMEOUT_S` for openai and anthropic,
+  `_google_options` for google-genai, and `LOOKUP_READ_TIMEOUT_S` through `_lookup_timeout` and
+  `_google_lookup_config` at the four lookup sites. `_metered` carries Google's timeout when the meter
+  is on, since it builds the one object that can hold both.
+- **`config.yaml`** and **`config_schema.py`**: `model_call_read_timeout_s`, a `PositiveNumber`.
+- **`core/loop.py`**: the conversation's record is phase-only, and the attempt loop has MW4's two
+  checks.
+- **`core/live_runs.py`**: a run's `keeps_text`, `watching(phase_only=...)`, `model_wait()` and
+  `QUIET_SHOWN_S`.
+- **`tui/meters.py`**: `subtitle(now, model_wait)`. **`tui/app.py`**: `_model_wait_text()`, which
+  reads `_memory` and never the property, since the property builds a thread and a repaint is not a
+  use.
+- **`main.py`**: `_chat_turn` runs a chat-kind `_ModelWait` around `_chat_turn_steps`, the turn.
+- **`conftest.py`**: the fake `models` endpoint takes and records each lookup's options.
+
+Tests: `tests/test_stalled_calls.py`.
+- What the SDKs read: the header both ways, its exact words, a 200 stream, headers that cannot be
+  read, and `retry-after-ms` against every unreadable figure.
+- How each client is built: the key, Google's milliseconds and rounding, and the meter.
+- Each lookup's 30 s, and the key's schema.
+- The wait's slices, and the loop's stop: during a silent call, on the last attempt, after a refusal,
+  with a half-answer drawn, during the wait, and with no token.
+- The phase-only record, the words for the wait, the border, the mounted TUI, and the CLI's waiter.
+
+Amended tests: the exclusion test in `test_watching_a_pass.py` now pins the phase-only record. Every
+stand-in lookup takes per-request options, and each test that pins a client's keywords has the two
+new ones. The mutation result is in `DEVLOG.md`.
+
+### Gap register (§102)
+
+- **A stop still waits for the read in progress**, up to `model_call_read_timeout_s`: MW4's chosen
+  limit, and §61's.
+- **A changed `model_call_read_timeout_s` takes effect at the next launch**, because clients are
+  cached per process.
+- **With `tui.animations: false` the border shows no wait**, since nothing repaints it between
+  events and a figure that stood still would be wrong.
+- **The CLI's waiting line covers the conversation and research passes.** A foreground subagent's
+  silent call shows only in the TUI's sidebar.
+- **Google's timeout covers its connect too**, since google-genai takes one figure. A host that never
+  accepts a connection waits the whole read timeout there, where openai and anthropic give up in 5 s.
+- **The researcher's seven minutes** is still not known to be a read timeout.
+- **The wiki's user guide** (a separate repository) does not describe the key or the border's wait.
 
 ---
 

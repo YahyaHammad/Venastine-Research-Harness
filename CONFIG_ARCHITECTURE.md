@@ -242,10 +242,15 @@ overloaded upstream exactly that way -- "The service is temporarily
 unavailable", "Upstream idle timeout exceeded" -- which failed four nested
 subagents in the run that prompted this.
 
-Two, so a call gets three attempts. The SDK retries are KEPT (owner
-decision) and happen inside each attempt, so the worst case is nine HTTP
-requests for one call; turning the SDKs' off would lose their retry-after
-handling for the statuses they already cover well. `core/provider_errors.py`
+Two, so a call gets three attempts. Batch 91 KEPT the SDK retries (owner
+decision), inside each attempt, so the worst case was nine HTTP requests
+for one call. Batch 284 turned them off (ROADMAP_v3 §102, MW1, the owner's
+answer to a measurement). Against an endpoint that never answers, a turn
+made fifteen requests: nine for the call and six for the lookups in front
+of it. The SDKs also logged their retries where no screen shows them. Their
+retry-after handling, the reason for keeping them, is the harness's own
+now, `retry-after-ms` and `x-should-retry` included. A run that was stopped
+is not retried (MW4). `core/provider_errors.py`
 decides what qualifies -- temporary provider errors only, never a bad
 request, an auth failure or a harness bug -- and `core/loop.py` decides
 WHEN: a run whose output reaches no screen is retried whatever it had
@@ -262,6 +267,34 @@ with more of the same only extends itself. The jitter is for siblings: the
 failures that prompted this came in pairs from one parallel spawn batch, and
 without it they would retry in the same instant. A server's retry-after can
 lengthen a wait, never shorten it, up to 60 seconds.
+
+### `model_call_read_timeout_s`
+
+Batch 284 (ROADMAP_v3 §102, MW2). How long one attempt waits for its next
+byte: the first token, or the next piece of a stream. It applies PER READ,
+which is httpx's meaning, so an answer that keeps arriving is never cut,
+however long it is. The default is 600, the openai and anthropic SDKs' own
+figure, kept by the owner's choice. A thinking model on a busy server can be
+silent for minutes before its first token, and a shorter default would
+turn slow into failed.
+
+Every provider uses it:
+
+- openai and anthropic take it as `Timeout(600, connect=5.0)`. Their own
+  connect figure is kept, so a host that does not answer at all still fails
+  in seconds.
+- google-genai takes it as `HttpOptions.timeout`, in milliseconds, covering
+  the connect too. Before this it had NO timeout. Measured: a stalled
+  endpoint was still blocked after twenty seconds on its first request, and
+  nothing would have ended it.
+
+The metadata lookups in front of a call (a model's context window, its
+effort levels, the provider's listing) are not model calls. They wait 30
+seconds, `core/client.py`'s `LOOKUP_READ_TIMEOUT_S`, and each already warns
+and falls back when it fails.
+
+The key is read when a client is built, once per provider per process, so a
+change takes effect at the next launch.
 
 ## Subagents (ROADMAP_v2 §18)
 

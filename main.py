@@ -870,6 +870,25 @@ def run_chat(
 
 def _chat_turn(session: ChatSession, user_input: str, agent,
                one_shot: bool = False) -> _WaitEnd:
+    """One turn of `run_chat`'s conversation, and the wake turns after it,
+    with the waiting line running for all of it (ROADMAP_v3 §102, MW3).
+
+    A chat turn whose call is silent printed nothing until it answered --
+    §108's gap register said so -- because the CLI prints a step once it
+    has finished. The research pass's `.. waiting 1m00s for the model`,
+    read from the conversation's live record, which the loop keeps
+    phase-only. `_chat_turn_steps` is the turn itself.
+    """
+    waiting = _ModelWait(kind=storage.THREAD_KIND_CHAT)
+    waiting.start()
+    try:
+        return _chat_turn_steps(session, user_input, agent, one_shot)
+    finally:
+        waiting.stop()
+
+
+def _chat_turn_steps(session: ChatSession, user_input: str, agent,
+                     one_shot: bool = False) -> _WaitEnd:
     """One turn of `run_chat`'s conversation, and the wake turns after it.
 
     Returns how the wait after it ended (`_WaitEnd`), since batch 265 a
@@ -2492,7 +2511,8 @@ def _activity_line(event) -> str:
 
 class _ModelWait:
     """Says how long a research pass has waited on the model (ROADMAP_v3
-    §108, the owner's choice for the CLI).
+    §108, the owner's choice for the CLI), and since §102 (MW3) a chat
+    turn: `kind` says which runs it reads.
 
     A THREAD, because nothing else can speak then. While a call is out the
     pipeline is blocked in the read, so the loop over its events prints

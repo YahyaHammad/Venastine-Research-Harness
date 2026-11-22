@@ -1802,10 +1802,12 @@ class RunAgentLoop:
         try:
             # ROADMAP_v3 §108 (PW2, PW3). What the run is doing while it
             # does it, for a viewer and the sidebar: the archive holds
-            # finished steps only. Every run but the conversation's own,
-            # whose stream is the transcript; ended however the run ends,
-            # a closed generator included.
-            with live_runs.runs.watching(memory, exclude=(THREAD_KIND_CHAT,)):
+            # finished steps only. The conversation's own run, whose
+            # stream is the transcript, keeps its phase and no text
+            # (§102, MW3), so a shell can say it is waiting on the model.
+            # Ended however the run ends, a closed generator included.
+            with live_runs.runs.watching(memory,
+                                         phase_only=(THREAD_KIND_CHAT,)):
                 return (yield from RunAgentLoop._run_steps(
                     memory, *args, **kwargs))
         except Exception as error:
@@ -2060,11 +2062,22 @@ class RunAgentLoop:
                 return
             response = None
             # Batch 91. ONE model call, attempted up to
-            # 1 + MODEL_CALL_MAX_RETRIES times. The SDKs retry a request that
-            # fails before its stream opens; an error sent INSIDE a stream
-            # that opened with 200 is raised straight up by both, and that is
-            # how OpenRouter reports an overloaded upstream. Which failures
-            # qualify is core/provider_errors.py's question.
+            # 1 + MODEL_CALL_MAX_RETRIES times. Since ROADMAP_v3 §102 (MW1)
+            # this is the ONLY retry: every client is built with
+            # `max_retries=0`, where the SDKs' two used to sit inside each
+            # of these attempts, nine requests a call and none of them on a
+            # screen. An error sent INSIDE a stream that opened with 200 is
+            # raised straight up by both SDKs, and that is how OpenRouter
+            # reports an overloaded upstream. Which failures qualify is
+            # core/provider_errors.py's question.
+            #
+            # §102 (MW4): a stop is read before each retry and during the
+            # wait before it. A cooperative stop cannot reach a read already
+            # blocked in the SDK (core/cancel.py), so a stop pressed while a
+            # call is silent lands when that read gives up -- at most
+            # model_call_read_timeout_s -- and the turn ends stopped, not
+            # failed. Measured on main: the stop waited out the read, then
+            # every remaining attempt, and the turn ended as the timeout.
             #
             # `shown` was the boundary until batch 113 (TECHNICAL_DEBT 25).
             # It read "a RichLog row cannot be taken back", which was true
@@ -2128,8 +2141,25 @@ class RunAgentLoop:
                     break
                 except Exception as e:  # noqa: BLE001 -- re-raised unless it qualifies
                     retry += 1
-                    if (retry > config.MODEL_CALL_MAX_RETRIES
-                            or not provider_errors.is_transient(e)):
+                    transient = provider_errors.is_transient(e)
+                    if transient and is_cancelled(cancel):
+                        # §102 (MW4). Stopped while this attempt was out,
+                        # and it failed the way a retry is for -- a
+                        # timeout, most often, which is how a stop pressed
+                        # on a silent call arrives. That is not what ended
+                        # the turn: the stop did, so it ends stopped, the
+                        # last attempt included. CN4's rule for what it had
+                        # drawn, which is kept. The failure is the log's,
+                        # at INFO, because the screen has the stop's line.
+                        # A failure no retry is for still raises: a bug or
+                        # a refusal is not hidden behind a stop.
+                        logger.info(
+                            "Model call to %s/%s failed after the run was "
+                            "stopped (%s); not retried.", provider_name,
+                            model, provider_errors.describe(e))
+                        cut_short = True
+                        break
+                    if retry > config.MODEL_CALL_MAX_RETRIES or not transient:
                         raise
                     response = None
                     delay = provider_errors.backoff_delay(
@@ -2160,7 +2190,19 @@ class RunAgentLoop:
                             "attempt": retry + 1,
                             "attempts": attempts,
                         })
-                    provider_errors.wait(delay)
+                    # Watched in slices only when the run CAN be stopped:
+                    # a run with no token waits as it always did. The
+                    # token is asked again after, rather than the wait's
+                    # answer trusted, so the token alone decides.
+                    provider_errors.wait(
+                        delay, stopped=(None if cancel is None
+                                        else (lambda: is_cancelled(cancel))))
+                    if is_cancelled(cancel):
+                        # §102 (MW4). Stopped during the wait. Anything
+                        # drawn was retracted above, so nothing is kept.
+                        partial = []
+                        cut_short = True
+                        break
 
             # §61 CN2/CN4. Leaving the `for` above closed the
             # provider stream: every branch yields from inside its own

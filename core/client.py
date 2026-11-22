@@ -47,6 +47,77 @@ _client_cache: dict[str, object] = {}
 #: a server's log, and is not shaped like any provider's real key.
 KEYLESS = "venastine-no-key-configured"
 
+#: How long a metadata lookup -- a model's context window, its effort
+#: levels, a provider's listing -- waits for a byte (ROADMAP_v3 §102, MW2,
+#: the owner's figure). Not `model_call_read_timeout_s`: a model's first
+#: token can legitimately take minutes, and `GET /models` cannot. Measured
+#: on main, the lookups shared the model call's 600 s, and each was tried
+#: three times, so a stalled endpoint spent an hour on them before the call
+#: was sent. Each lookup already warns and falls back when it fails.
+LOOKUP_READ_TIMEOUT_S = 30.0
+
+#: How long a connection may take to open: the figure both SDKs build
+#: their own default with (`Timeout(600, connect=5.0)`, openai 3.45.0 and
+#: anthropic 2.5.0), kept, so a host that does not answer at all still
+#: fails in seconds. google-genai takes one figure for everything.
+CONNECT_TIMEOUT_S = 5.0
+
+
+def _timeout(read_s: float):
+    """`read_s` for each read, write and pool wait, and CONNECT_TIMEOUT_S
+    to connect: the SDKs' default with its 600 replaced.
+
+    PER READ, NOT PER CALL, which is httpx's meaning and why 600 is not
+    a cap on an answer's length: a stream that sends a byte every minute
+    never times out. httpx2, imported here, because the SDKs take its
+    `Timeout` and the suite fakes the SDKs but not it.
+    """
+    import httpx2
+
+    return httpx2.Timeout(read_s, connect=CONNECT_TIMEOUT_S)
+
+
+def _no_retries() -> dict:
+    """What every openai and anthropic client is built with (§102, MW1,
+    MW2): no SDK retry, and the configured read timeout.
+
+    `max_retries=0`, so the attempt loop in `core/loop.py` is the only
+    thing that sends a request again, and every retry is a WARNING. Measured
+    on main with the SDKs' default of two: three requests per attempt,
+    nine per call, logged at INFO, so never on a screen.
+    """
+    return {"max_retries": 0,
+            "timeout": _timeout(config.MODEL_CALL_READ_TIMEOUT_S)}
+
+
+def _google_options() -> dict:
+    """google-genai's constructor arguments: the meter's client when it is
+    on, and the read timeout always (§102, MW2).
+
+    google-genai HAD NO TIMEOUT. `HttpOptions.timeout` defaults to None,
+    which it passes to httpx per request, and None there is no limit --
+    measured on 2.34.0: a stalled endpoint still blocked after twenty
+    seconds on its first request, and nothing would ever end it. Its
+    `timeout` is in milliseconds and covers the connect too. It retries
+    nothing without `retry_options` (CONFIG_ARCHITECTURE.md), which stays
+    so. Setting a timeout also makes it send `X-Server-Timeout` with the
+    same figure, so the server is told when the client stops listening.
+    """
+    timeout_ms = math.ceil(config.MODEL_CALL_READ_TIMEOUT_S * 1000)
+    metered = _metered("google", timeout_ms=timeout_ms)
+    return metered or {"http_options": {"timeout": timeout_ms}}
+
+
+def _lookup_timeout():
+    """The per-request `timeout` of an openai or anthropic lookup."""
+    return _timeout(LOOKUP_READ_TIMEOUT_S)
+
+
+def _google_lookup_config() -> dict:
+    """The per-request `config` of a google-genai lookup."""
+    return {"http_options": {
+        "timeout": math.ceil(LOOKUP_READ_TIMEOUT_S * 1000)}}
+
 
 def api_initialization(provider_name: str):
     if provider_name in _client_cache:
@@ -86,10 +157,10 @@ def api_initialization(provider_name: str):
         # answers 401, and launch has already warned that the key is empty.
         client = OpenAI(base_url=entry["API_URL"],
                         api_key=entry["API_KEY"] or KEYLESS,
-                        **_metered("openai"))
+                        **_no_retries(), **_metered("openai"))
     elif provider_name == "GOOGLE":
         from google import genai
-        client = genai.Client(api_key=entry["API_KEY"], **_metered("google"))
+        client = genai.Client(api_key=entry["API_KEY"], **_google_options())
     elif provider_name == "ANTHROPIC":
         # Batch 234. Refused HERE, before a client exists, because the SDK
         # no longer says what is wrong: 2.x sends the key as `Bearer <key>`,
@@ -101,7 +172,9 @@ def api_initialization(provider_name: str):
         if not entry.get("API_KEY"):
             raise ValueError(credentials.empty_key_refusal(provider_name))
         from anthropic import Anthropic
-        client = Anthropic(api_key=entry["API_KEY"], **_metered("anthropic"))
+        client = Anthropic(api_key=entry["API_KEY"],
+                           **_no_retries(),
+                           **_metered("anthropic"))
         # Add further proprietary API formats here
     else:
         raise ValueError(f"Provider {provider_name} is not currently supported")
@@ -138,11 +211,11 @@ def _chatgpt_client():
     from core import chatgpt_auth
 
     return OpenAI(base_url=chatgpt_auth.RESOURCE,
-                  api_key=chatgpt_auth.access_token, max_retries=0,
-                  **_metered("openai"))
+                  api_key=chatgpt_auth.access_token,
+                  **_no_retries(), **_metered("openai"))
 
 
-def _metered(sdk: str) -> dict:
+def _metered(sdk: str, timeout_ms=None) -> dict:
     """The extra constructor arguments that put the provider meter on a
     client (ROADMAP_v3 §53, IO4) -- `{}` while that meter is off.
 
@@ -162,6 +235,9 @@ def _metered(sdk: str) -> dict:
     The client is built once per provider -- `_client_cache` -- and the
     ceiling is read when a request is made, so the hooks stay right for
     the life of the client.
+
+    `timeout_ms` is google-genai's (§102): its `HttpOptions` is built here
+    when the meter is on, and is the one object that can carry both.
     """
     from tools.builtin import _net_common
 
@@ -173,7 +249,7 @@ def _metered(sdk: str) -> dict:
         from google.genai import types
 
         return {"http_options": types.HttpOptions(httpx_client=httpx2.Client(
-            follow_redirects=True, event_hooks=hooks))}
+            follow_redirects=True, event_hooks=hooks), timeout=timeout_ms)}
     if sdk == "anthropic":
         from anthropic import DefaultHttpxClient
     else:
@@ -1362,7 +1438,8 @@ def _chatgpt_listing(client) -> list:
     Raises when the list cannot be read, which each caller counts as a
     failed query.
     """
-    body = client.get("/models", cast_to=object)
+    body = client.get("/models", cast_to=object,
+                      options={"timeout": _lookup_timeout()})
     entries = body.get("models") if isinstance(body, dict) else None
     if not isinstance(entries, list):
         raise ValueError(
@@ -1603,7 +1680,7 @@ def _effort_levels(client, provider_name: str, model: str) -> tuple:
             # pins anthropic exactly, and test_sdk_conformance.py exists
             # to go red when the pinned shape moves -- which is a better
             # signal than a fallback that silently keeps guessing.
-            info = client.models.retrieve(model)
+            info = client.models.retrieve(model, timeout=_lookup_timeout())
             # ONE retrieve, TWO readings (§21's revisit). The context
             # window is on this SAME ModelInfo as `max_input_tokens`, so
             # recording it here IS the entire Anthropic half of the
@@ -1769,13 +1846,13 @@ def _model_info(client, model):
       raises        neither route could answer; the caller counts it
     """
     try:
-        return client.models.retrieve(model)
+        return client.models.retrieve(model, timeout=_lookup_timeout())
     except Exception as retrieve_error:
         listing = getattr(getattr(client, "models", None), "list", None)
         if listing is None:
             raise
         try:
-            entries = list(listing())
+            entries = list(listing(timeout=_lookup_timeout()))
         except Exception as listing_error:
             # BATCH 258: one exception to the rule below. `/models` is the
             # route EVERY OpenAI-compatible server has, so a page-not-found
@@ -1872,7 +1949,8 @@ def context_window_for(client, provider_name: str, model: str) -> tuple:
 
     try:
         if provider_name == "GOOGLE":
-            info = client.models.get(model=model)
+            info = client.models.get(model=model,
+                                     config=_google_lookup_config())
             return _record_window(
                 provider_name, model,
                 getattr(info, "input_token_limit", None)), True

@@ -399,7 +399,7 @@ class TurnMeter:
             return None
         return (self._chars / CHARS_PER_TOKEN) / active
 
-    def subtitle(self, now: float):
+    def subtitle(self, now: float, model_wait: str = ""):
         """The three live figures as one string, or None when there is
         nothing to say yet.
 
@@ -407,6 +407,12 @@ class TurnMeter:
         the border it always rendered. Otherwise uptime is always there
         -- it is the half that says the shell is alive when no turn is --
         and the turn figures join it while one is running.
+
+        `model_wait` is what the turn is waiting on the model for, already
+        worded -- `waiting 4m12s`, `last byte 14s` (ROADMAP_v3 §102, MW3)
+        -- and joins the turn figures after the rate. Worded by the caller
+        because the phase is the loop's live record, which this module, by
+        its rule above, does not read.
         """
         if self._session_at is None:
             return None
@@ -416,6 +422,8 @@ class TurnMeter:
             rate = self.rate(now)
             if rate is not None:
                 parts.append("~%d tok/s" % round(rate))
+            if model_wait:
+                parts.append(model_wait)
         parts.append(_uptime(max(0.0, now - self._session_at)))
         return "  ".join(parts)
 

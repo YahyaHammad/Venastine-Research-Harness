@@ -330,6 +330,9 @@ class HarnessConfig(_Model):
     # Batch 91. Zero is a real answer for both: no retry, and no wait.
     model_call_max_retries: NonNegativeInt
     model_call_retry_base_delay_s: NonNegativeNumber
+    # ROADMAP_v3 §102 (MW2). Positive: zero would be "no time to answer",
+    # and httpx reads None, the only way to say "never", as no limit.
+    model_call_read_timeout_s: PositiveNumber
 
     # -- Subagents ---------------------------------------------------------
     # Zero is a real answer here: `subagent_depth >= this` then refuses

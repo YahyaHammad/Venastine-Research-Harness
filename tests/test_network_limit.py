@@ -607,7 +607,10 @@ class TestTheProviderClients:
             "OPENAI_LIKE": {"API_KEY": "k", "API_URL": "http://x/v1",
                             "is_v1_compatible": True}})
         built = client.api_initialization("OPENAI_LIKE")
-        assert built.kwargs == {"base_url": "http://x/v1", "api_key": "k"}
+        # §102 (MW1, MW2) added two keywords to every client; the meter
+        # being off still adds none.
+        assert built.kwargs == {"base_url": "http://x/v1", "api_key": "k",
+                                **client._no_retries()}
 
     @pytest.mark.parametrize("sdk", ["openai", "anthropic"])
     def test_on_uses_the_sdks_own_default_client_with_the_hooks(

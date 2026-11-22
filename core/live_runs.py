@@ -14,10 +14,16 @@ memory, what the step in progress has streamed, when its last byte came,
 which tools are running, and the provider's token counts so far.
 
 WRITTEN BY THE LOOP AND NOTHING ELSE. `RunAgentLoop._run` opens a record for
-every run that is not the conversation itself, whose own stream is already
-in the transcript, and `_run_steps` writes at moments it already has: a call
-going out, each delta, a retraction, a step persisted, a group of tool calls
+every run, and `_run_steps` writes at moments it already has: a call going
+out, each delta, a retraction, a step persisted, a group of tool calls
 starting and settling.
+
+THE CONVERSATION'S OWN RUN KEEPS NO TEXT (ROADMAP_v3 §102, MW3). Its stream
+is already the transcript, which is why §108's PW2 left it out. Since batch
+284 it is recorded PHASE-ONLY -- waiting, streaming, tools, and when its last
+byte came -- because a chat turn waiting on a silent model looked the same as
+one being answered: the shells read this to say `waiting 4m12s`. Its deltas
+move its phase and keep nothing, and the record goes when the turn ends.
 
 READ BY A SHELL ON ITS OWN CLOCK. The TUI's sidebar and viewer read a
 snapshot each tick; the CLI's ticker reads one every few seconds. Nothing
@@ -82,6 +88,30 @@ def duration(seconds) -> str:
     return f"{hours}h{minutes:02d}m"
 
 
+#: A stream silent this long is said to be, on a chat turn's border
+#: (ROADMAP_v3 §102, MW3): `last byte 14s`. Below it a stream is simply
+#: arriving, which the transcript already shows, and a few seconds between
+#: chunks is ordinary.
+QUIET_SHOWN_S = 10.0
+
+
+def model_wait(snap) -> str:
+    """What a chat turn is waiting on the model for, in §108's words, or
+    "" when it is not (§102, MW3, the owner's choice of wording).
+
+    `waiting 4m12s` while a call is out and nothing of it has arrived, or
+    the loop is between a step and the next call; `last byte 14s` once a
+    stream has been silent for QUIET_SHOWN_S. Nothing while tools run --
+    they are on screen -- or once the run is over."""
+    if snap is None or not snap.live:
+        return ""
+    if snap.phase == WAITING:
+        return f"waiting {duration(snap.phase_for)}"
+    if snap.phase == STREAMING and snap.phase_for >= QUIET_SHOWN_S:
+        return f"last byte {duration(snap.phase_for)}"
+    return ""
+
+
 def _count(value):
     """`value` as a token count, or None: `usage_view._count`'s rule, a
     bool is not a count and neither is a negative number."""
@@ -139,10 +169,13 @@ class _Stream:
 class _Run:
     """One run's record. Mutated under the registry's lock only."""
 
-    def __init__(self, key: str, kind, name, now: float) -> None:
+    def __init__(self, key: str, kind, name, now: float,
+                 keeps_text: bool = True) -> None:
         self.key = key
         self.kind = kind
         self.name = name
+        # False for a phase-only run (§102): see the module docstring.
+        self.keeps_text = keeps_text
         self.live = True
         self.begun = now
         self.phase = WAITING
@@ -249,10 +282,15 @@ class Registry:
 
     # -- the loop's half ------------------------------------------------
 
-    def begin(self, thread_id, kind=None, name=None) -> None:
+    def begin(self, thread_id, kind=None, name=None,
+              keeps_text: bool = True) -> None:
         """A run on `thread_id` began. A thread that ran before in this
         process carries on from its figures (its tokens and calls), with a
-        new step, so a reader drawing the old one draws again."""
+        new step, so a reader drawing the old one draws again.
+
+        `keeps_text` False records the run's phase and figures only (§102):
+        its deltas move the phase and are not kept, and it is forgotten
+        when it ends rather than kept among the ended."""
         if thread_id is None:
             return
         key = str(thread_id)
@@ -260,8 +298,9 @@ class Registry:
         with self._lock:
             run = self._live.get(key) or self._ended.pop(key, None)
             if run is None:
-                run = _Run(key, kind, name, now)
+                run = _Run(key, kind, name, now, keeps_text=keeps_text)
             else:
+                run.keeps_text = keeps_text
                 run.live = True
                 run.phase, run.since, run.last_byte = WAITING, now, None
                 run.tools = ()
@@ -281,7 +320,10 @@ class Registry:
         key = str(thread_id)
         with self._lock:
             run = self._live.pop(key, None)
-            if run is None:
+            if run is None or not run.keeps_text:
+                # A phase-only run has nothing worth keeping once it is
+                # over, and must not push a pass's figures out of the
+                # ended runs a corrective retry carries on from (§99).
                 return
             run.live = False
             run.phase, run.since = ENDED, self._clock()
@@ -304,9 +346,9 @@ class Registry:
             run = self._live.get(key)
             if run is None:
                 return
-            if text:
+            if text and run.keeps_text:
                 run.text.add(text)
-            if thinking:
+            if thinking and run.keeps_text:
                 run.thinking.add(thinking)
             if text or thinking:
                 run.phase, run.last_byte = STREAMING, self._clock()
@@ -359,18 +401,21 @@ class Registry:
                 run.tools = ()
 
     @contextmanager
-    def watching(self, memory, exclude=()):
+    def watching(self, memory, exclude=(), phase_only=()):
         """Bracket one run of `memory`'s thread: begin, then end however
         the run ends -- including a generator closed part way, which is how
         a quitting shell abandons one. A thread whose kind is in `exclude`
-        is not recorded at all; the loop excludes the conversation."""
+        is not recorded at all; one whose kind is in `phase_only` is
+        recorded without its text (§102), which is how the loop records
+        the conversation."""
         thread_id = getattr(memory, "thread_id", None)
         kind = getattr(memory, "kind", None)
         if thread_id is None or kind in exclude:
             yield
             return
         self.begin(thread_id, kind=kind,
-                   name=getattr(memory, "agent_name", None))
+                   name=getattr(memory, "agent_name", None),
+                   keeps_text=kind not in phase_only)
         try:
             yield
         finally:
