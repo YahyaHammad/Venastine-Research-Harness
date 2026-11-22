@@ -208,7 +208,7 @@ def test_google_reports_no_levels_when_the_sdk_cannot_carry_a_budget(monkeypatch
     """A picker must not offer levels that cannot be sent."""
     monkeypatch.setattr(client_module, "_google_budget_support", False)
     client = SimpleNamespace(models=SimpleNamespace(
-        retrieve=lambda m: pytest.fail("Google must not be queried")))
+        retrieve=lambda m, **_: pytest.fail("Google must not be queried")))
     assert effort_levels_for_model(client, "GOOGLE", "gemini-2.0") == []
 
 
@@ -272,7 +272,7 @@ def _anthropic_client_reporting(levels: dict):
         for name in ("low", "medium", "high", "xhigh", "max")
     })
     return SimpleNamespace(models=SimpleNamespace(
-        retrieve=lambda model: SimpleNamespace(
+        retrieve=lambda model, **_: SimpleNamespace(
             capabilities=SimpleNamespace(effort=effort))))
 
 
@@ -296,7 +296,7 @@ def test_anthropic_model_with_no_effort_support_reports_none():
 def test_anthropic_query_is_cached_per_model():
     calls = []
 
-    def retrieve(model):
+    def retrieve(model, **_options):
         calls.append(model)
         return SimpleNamespace(capabilities=SimpleNamespace(
             effort=SimpleNamespace(high=SimpleNamespace(supported=True))))
@@ -313,7 +313,7 @@ def test_query_failure_falls_back_to_the_table_and_says_so(caplog, monkeypatch):
     MODEL_CONTEXT_WINDOWS posture."""
     monkeypatch.setattr(config, "MODEL_EFFORT_LEVELS", {"m": ["low", "high"]})
 
-    def boom(model):
+    def boom(model, **_options):
         raise RuntimeError("no network")
 
     client = SimpleNamespace(models=SimpleNamespace(retrieve=boom))
@@ -326,7 +326,7 @@ def test_non_anthropic_uses_the_table_without_querying():
     """No OpenAI-compatible provider exposes a capability endpoint, so the
     table is the only source — and the client must not be probed."""
     client = SimpleNamespace(models=SimpleNamespace(
-        retrieve=lambda m: pytest.fail("must not query a non-Anthropic provider")
+        retrieve=lambda m, **_: pytest.fail("must not query a non-Anthropic provider")
     ))
     levels = effort_levels_for_model(client, "OPENAI", "gpt-unknown")
     assert levels == config.DEFAULT_EFFORT_LEVELS
@@ -344,13 +344,13 @@ def test_non_anthropic_uses_the_table_without_querying():
 
 def _capable_client(*levels):
     return SimpleNamespace(models=SimpleNamespace(
-        retrieve=lambda model: SimpleNamespace(
+        retrieve=lambda model, **_: SimpleNamespace(
             capabilities=SimpleNamespace(effort=SimpleNamespace(
                 **{lv: SimpleNamespace(supported=True) for lv in levels})))))
 
 
 def _failing_client(exc=RuntimeError("network down")):
-    def boom(model):
+    def boom(model, **_options):
         raise exc
     return SimpleNamespace(models=SimpleNamespace(retrieve=boom))
 
@@ -426,7 +426,7 @@ def test_a_successful_lookup_is_still_cached():
     turn would re-query the Models API."""
     calls = []
 
-    def retrieve(model):
+    def retrieve(model, **_options):
         calls.append(model)
         return SimpleNamespace(capabilities=SimpleNamespace(
             effort=SimpleNamespace(high=SimpleNamespace(supported=True))))

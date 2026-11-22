@@ -372,24 +372,39 @@ class TestTheLoopWritesIt:
             "the retracted half answer would be drawn under the retry's"
         assert seen["retry"].step > seen["first"].step
 
-    def test_a_subagent_is_recorded_and_the_conversation_is_not(
+    def test_a_subagent_is_recorded_and_the_conversation_keeps_no_text(
             self, mocker, real_loop, runs):
+        """ROADMAP_v3 §102 (MW3) amends PW2's exclusion: the conversation
+        is recorded PHASE-ONLY, so a shell can say it waits on the model,
+        and still keeps none of its stream, which is the transcript's. It
+        is gone once the turn ends."""
         seen = {}
 
         def stream(*args, **kwargs):
             seen["subagent"] = runs.latest(THREAD_KIND_SUBAGENT)
             seen["chat"] = runs.latest(THREAD_KIND_CHAT)
-            yield _final("ok")
+            yield StreamToken(text_delta="hello back")
+            chat = runs.latest(THREAD_KIND_CHAT)
+            if chat is not None:
+                seen["streamed"] = runs.read(chat.thread_id, text_from=0,
+                                             thinking_from=0)
+            yield _final("hello back")
 
         mocker.patch("core.loop.call_model_stream", side_effect=stream)
         RunAgentLoop.run_agent_conversation(
             user_goal="look", model="m", thread_kind=THREAD_KIND_SUBAGENT)
         assert seen["subagent"] is not None and seen["subagent"].live
 
-        RunAgentLoop.run_agent_conversation(
+        response = RunAgentLoop.run_agent_conversation(
             user_goal="hello", model="m", thread_kind=THREAD_KIND_CHAT)
-        assert seen["chat"] is None, \
+        assert seen["chat"] is not None and seen["chat"].live
+        assert seen["chat"].phase == live_runs.WAITING
+        streamed = seen["streamed"]
+        assert streamed.phase == live_runs.STREAMING
+        assert (streamed.text, streamed.text_total) == ("", 0), \
             "the conversation's own stream is the transcript already"
+        assert runs.read(response.thread_id) is None, \
+            "a phase-only record is forgotten when its turn ends"
 
     def test_a_retry_s_wait_is_timed_from_the_retry(self, mocker, real_loop,
                                                     monkeypatch):
@@ -412,7 +427,7 @@ class TestTheLoopWritesIt:
         mocker.patch("core.loop.provider_errors.is_transient",
                      return_value=True)
         mocker.patch("core.loop.provider_errors.wait",
-                     side_effect=lambda delay: setattr(clock, "t",
+                     side_effect=lambda delay, **_: setattr(clock, "t",
                                                        clock.t + 30))
         drain(RunAgentLoop.stream_deep_research_mode(
             pass_input="the task", model="m", pass_id="Pass 1",

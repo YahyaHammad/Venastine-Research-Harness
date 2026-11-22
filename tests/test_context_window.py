@@ -47,11 +47,11 @@ def _counting_client(info):
     """A client whose models endpoint records how often it was asked."""
     calls = []
 
-    def retrieve(model):
+    def retrieve(model, **_options):
         calls.append(model)
         return info
 
-    def get(*, model):
+    def get(*, model, config=None):
         calls.append(model)
         return info
 
@@ -210,11 +210,11 @@ def _listing_client(entries, retrieve_error=None):
     """A v1-compatible client whose per-id route fails, recording both."""
     calls = {"retrieve": 0, "list": 0}
 
-    def retrieve(model):
+    def retrieve(model, **_options):
         calls["retrieve"] += 1
         raise (retrieve_error or RuntimeError("404 page not found"))
 
-    def listing():
+    def listing(**_options):
         calls["list"] += 1
         return entries
 
@@ -312,10 +312,10 @@ def test_a_failing_listing_reports_the_retrieve_failure_not_its_own(caplog):
     """The listing is not a second opinion; it is the same question by
     another route. Reporting ITS error would name an endpoint the user
     never configured and hide the one they did."""
-    def retrieve(model):
+    def retrieve(model, **_options):
         raise RuntimeError("retrieve said 404")
 
-    def listing():
+    def listing(**_options):
         raise RuntimeError("list said 500")
 
     client = SimpleNamespace(
@@ -332,7 +332,7 @@ def test_a_client_with_no_listing_at_all_still_fails_the_old_way():
     """Groq, Fireworks and Z.AI publish no model-metadata endpoint. The
     fallback must not turn their loud failure into a silent None -- that
     is #35 exactly."""
-    def boom(model):
+    def boom(model, **_options):
         raise RuntimeError("no such endpoint")
 
     client = SimpleNamespace(models=SimpleNamespace(retrieve=boom))
@@ -350,10 +350,10 @@ def test_retrieve_still_wins_when_it_works():
     and a listing can be hundreds of entries."""
     listed = []
 
-    def retrieve(model):
+    def retrieve(model, **_options):
         return SimpleNamespace(model_extra={"context_window": 131_072})
 
-    def listing():
+    def listing(**_options):
         listed.append(True)
         return []
 
@@ -375,7 +375,7 @@ def test_a_failed_query_is_warned_and_NOT_cached(caplog):
     suppress the query for the life of the process. A network blip must
     cost one fallback, not every fallback.
     """
-    def boom(model):
+    def boom(model, **_options):
         raise RuntimeError("connection reset")
 
     client = SimpleNamespace(models=SimpleNamespace(retrieve=boom))
@@ -401,7 +401,7 @@ def test_a_failure_stops_being_retried_once_it_proves_permanent(caplog):
     """
     attempts = []
 
-    def boom(model):
+    def boom(model, **_options):
         attempts.append(model)
         raise RuntimeError("404 not found")
 
@@ -424,7 +424,7 @@ def test_a_transient_failure_still_recovers():
     answer for the life of the process."""
     calls = []
 
-    def flaky(model):
+    def flaky(model, **_options):
         calls.append(model)
         if len(calls) == 1:
             raise RuntimeError("connection reset")

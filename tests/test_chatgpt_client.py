@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import config
 import core.client as client
 from core import chatgpt_auth, provider_errors
 from core.client import (
@@ -96,7 +97,8 @@ class Plan:
         self.streams.append(stream)
         return stream
 
-    def get(self, path, *, cast_to=None):
+    def get(self, path, *, cast_to=None, options=None):
+        self.options = options
         assert path == "/models"
         self.gets += 1
         if isinstance(self.listing, BaseException):
@@ -489,9 +491,13 @@ class TestTheClient:
             "CHATGPT": {"API_KEY": "", "API_URL": "https://elsewhere.example/v1",
                         "is_v1_compatible": True}})
         built = client.api_initialization("CHATGPT")
+        # ROADMAP_v3 §102 (MW2): the read timeout every client is built
+        # with, and still no SDK retry (now every client's, MW1).
         assert built.kwargs == {"base_url": chatgpt_auth.RESOURCE,
                                 "api_key": chatgpt_auth.access_token,
-                                "max_retries": 0}
+                                "max_retries": 0,
+                                "timeout": client._timeout(
+                                    config.MODEL_CALL_READ_TIMEOUT_S)}
 
     def test_a_hosted_deployment_refuses_it(self, monkeypatch):
         from security import hosted

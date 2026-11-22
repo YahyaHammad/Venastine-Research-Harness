@@ -5,8 +5,8 @@ researcher gave in a chat thread on 2026-11-18 and 2026-11-19 after running the 
 OpenAI-compatible provider, plus the replies in the same thread. The researcher, the provider and its
 models are not named, and the researcher's words are paraphrased rather than quoted: the thread was a
 private conversation and this repository is public. Keep it that way in any edit. Except §101,
-§103, §105 and §108, which were accepted and built (batches 277, 281, 280, and 282 and
-283) and now live in `ROADMAP_v3.md`, nothing here is built
+§102, §103, §105 and §108, which were accepted and built (batches 277, 284, 281, 280, and
+282 and 283) and now live in `ROADMAP_v3.md`, nothing here is built
 and **no decision below is locked**: every Design Decisions table is a proposal for the
 owner to accept, change or refuse, in the convention the three roadmaps already use. A section the owner
 accepts keeps its number; one refused is recorded as refused rather than renumbered, so `§N` keeps one
@@ -37,7 +37,7 @@ append-only, and a deviation is an owner decision in `DEVLOG.md`.
 **Fix first — four defects the researcher hit, each verified in the code**
 
 - **§101. Flags a full-screen launch dropped: `--effort` and `--thread` under `--tui`** - **(BUILT in batch 277: now `ROADMAP_v3.md` §101, LF1-LF4)** (`run_tui()` receives the provider, the model and nothing else, so `--tui --effort low` runs at the remembered or shipped `high` and the sidebar says `high`; the same is true of `--thread`, which `relaunch_argv` itself writes after a `/config` restart and the relaunched TUI then ignores. The project refuses `--tui` with a query because "silently dropped" is not honest; these two are the same defect, unrefused)
-- **§102. A model call that never answers is reported before half an hour has passed** - **(NOT BUILT: proposed 2026-11-20)** (the OpenAI-compatible and Anthropic clients keep the SDK's own two retries under the harness's two, at the SDK's 600 s read timeout. Measured: one harness attempt is three requests, so a stalled endpoint costs up to nine requests and about ninety minutes, the first WARNING arrives after about thirty, and every abandoned request is a 499 in the provider's log -- the 499 the researcher saw in the provider's log and never in the harness)
+- **§102. A model call that never answers is reported before half an hour has passed** - **(BUILT in batch 284: now `ROADMAP_v3.md` §102, MW1-MW4)** (the OpenAI-compatible and Anthropic clients keep the SDK's own two retries under the harness's two, at the SDK's 600 s read timeout. Measured: one harness attempt is three requests, so a stalled endpoint costs up to nine requests and about ninety minutes, the first WARNING arrives after about thirty, and every abandoned request is a 499 in the provider's log -- the 499 the researcher saw in the provider's log and never in the harness)
 - **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(BUILT in batch 281: now `ROADMAP_v3.md` §103, SV1-SV4)** (measured: a reader scrolled to row 5 of 40 is at the bottom again after five streamed rows, because `RichLog.auto_scroll` follows every write. Text selection is not a ceiling of the pinned textual: 8.2.8 calls `get_selection` on a `RichLog` subclass, and a twelve-line prototype returned the dragged text. `/help` still says "not supported by this Textual version", written when the pin was 1.0.0)
 - **§104. A JSON pass cut off by the output ceiling is split, not corrected** - **(NOT BUILT: proposed 2026-11-20)** (a reply that ended on `finish_reason: length` is marked `complete` when it has text, so a Pass 3a answer cut at the 16,000-token ceiling -- which bounds thinking and text together on some providers -- is sent the "did not parse" corrective and asked for the same answer again, at the same size, three times. The researcher's failure was an unterminated string at character 36,142 of a one-call answer for 63 claims)
 - **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280: now `ROADMAP_v3.md` §105, XR1-XR4)** (D2's fallback overwrites the tier with UNVERIFIED whatever 6b scored, so a partly grounded claim scoring 0.45 (LOW) is published with the label of a claim nothing supports, and its `score_breakdown` -- which B10 says lets a reader recompute the tier -- still says 0.45. The researcher's run went from 37 LOW to 37 UNVERIFIED this way, and they read it correctly as the retries running out; the thread told them otherwise)
@@ -83,57 +83,14 @@ proposal's text is in the history of the commit that added this document.
 
 ## §102. A model call that never answers is reported before half an hour has passed
 
-**Proposed 2026-11-20, from the researcher's report.** After `/research --resume` they watched the
-provider's dashboard show nothing sent for seven minutes, then a 499 that never surfaced in the harness.
-A 499 is what nginx-style proxies log when the client closes the connection before the server answers.
-
-**Measured (Appendix A, B2).** `core/client.py` builds the OpenAI-compatible client as
-`OpenAI(base_url=..., api_key=..., **_metered(...))` and the Anthropic one the same way: neither sets
-`max_retries` or `timeout`, so both keep the SDK defaults, `max_retries=2` and a 600 s read timeout.
-A local server that accepts and never answers, driven through the same construction with only the read
-timeout shortened to 1 s, received **3 requests** for one `chat.completions.create(stream=True)`, and
-the SDK raised `APITimeoutError`. The harness then retries transient errors itself,
-`model_call_max_retries: 2`, with exponential backoff and jitter (`provider_errors.backoff_delay`).
-At the shipped figures one stalled call is:
-
-| | requests | wall time before the error | first thing the user sees |
-|---|---|---|---|
-| SDK attempt (×3 inside) | 3 | up to ~30 min | nothing -- the SDK's retries log nothing the harness routes |
-| harness (×3 attempts) | 9 | up to ~90 min | a WARNING after the first SDK attempt gives up, ~30 min in |
-
-Every abandoned request is a 499 on the server. `_chatgpt_client()` already sets `max_retries=0`, and
-its docstring gives the reason that applies to every provider: "CG10 decides every retry and the SDK
-decides none".
-
-**What this does not establish.** That the researcher's seven minutes was a read timeout. A slow
-first token on a busy cluster at a long context looks the same from outside. Their log
-(`~/.config/venastine/logs/`) would settle it; it has not been seen.
-
-**Proposal.**
-
-- `max_retries=0` on the OpenAI-compatible and Anthropic clients, so the harness's retry, which logs,
-  backs off and honours `retry-after`, is the only one. Every retry becomes a visible line.
-- `model_call_read_timeout_s` in `config.yaml`, default **unchanged at 600**: a long-context first token
-  on a shared cluster is legitimately slow, and shortening the default would turn slow into failed.
-- **The real fix is liveness, not a shorter timeout:** the panel row of a waiting call shows
-  `waiting for first byte 4m12s` and the time since the last byte while streaming (shared with §108), so
-  "slow" and "hung" are told apart by looking, and a 499 is no longer the first sign of either.
-
-**Drawbacks.** The SDK's retry also covers a few statuses `provider_errors.is_transient` may not (it
-retries 408, 409 and 429 and every 5xx by status). Before `max_retries=0`, the transient set must be
-checked against the SDK's list for the pinned openai and anthropic versions, or a lock-timeout 409
-that used to be retried silently will now fail. One more config key.
-
-**Alignment.** CG10, and §61's principle that a turn going the wrong way should be visible while it is
-going.
-
-### Design Decisions Record — §102 (proposed)
-
-| id | decision |
-|---|---|
-| **MW1** | **The SDKs retry nothing; the harness retries everything, visibly** (`max_retries=0` on every client), after the transient set is checked against the SDK's retried statuses for the pinned versions |
-| **MW2** | **`model_call_read_timeout_s`, default 600**, so a deployment that knows its first token is slow can say so |
-| **MW3** | **A waiting call shows how long it has waited for its first byte, and a streaming one the time since its last** |
+**Accepted and built in batch 284 (2026-11-23), and recorded as `ROADMAP_v3.md` §102
+(MW1-MW4).** The owner chose no SDK retry on every client rather than on the model call alone
+(MW1), and a fixed 30 s for the lookups beside the key's 600 (MW2). They also chose the waiting
+line in both shells, in §108's words (MW3). MW4 is new: no retry after a stop, which the
+measurement found when a stop pressed during a silent call still sent every attempt. The
+measurement also found that the lookups in front of the call doubled the proposal's nine requests
+to fifteen, and that google-genai had no timeout at all. The record holds the decisions and their
+ids; this proposal's text is in the history of the commit that added this document.
 
 ---
 

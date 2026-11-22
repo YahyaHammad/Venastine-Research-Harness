@@ -143,17 +143,23 @@ class _FakeModels:
 
     def __init__(self):
         self._info = None
+        # The per-request options each lookup was sent with, in order
+        # (ROADMAP_v3 §102, MW2: a lookup waits 30 s, not the call's 600).
+        self.options = []
 
     def set_info(self, info):
         self._info = info
 
-    def retrieve(self, model):
+    def retrieve(self, model, **options):
+        self.options.append(("retrieve", options))
         return self._info if self._info is not None else _FakeModelInfo()
 
-    def get(self, *, model):
+    def get(self, *, model, config=None):
+        self.options.append(("get", {"config": config}))
         return self._info if self._info is not None else _FakeModelInfo()
 
-    def list(self):
+    def list(self, **options):
+        self.options.append(("list", options))
         return types.SimpleNamespace(data=[])
 
 

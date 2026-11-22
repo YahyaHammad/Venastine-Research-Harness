@@ -33263,3 +33263,105 @@ real SQLite and asserts an old run reads `{}`. `tests/BREAKING_CHANGES.md` has a
 the run's last checkpoint is in no stored figure. A hard kill keeps the last checkpoint's figures.
 The review's consent walk is in the run's time, not the review's. There is no thinking-token row.
 `/usage` itself still sums a thread's passes. The wiki does not describe the foot or `/usage --run`.
+
+## Batch 284 -- a model call that never answers is reported in minutes, and a stop is not retried past (ROADMAP_v3 §102, MW1-MW4) (2026-11-23)
+
+**Asked.** Take another roadmap item, after PR #303 merged and released 0.3.26. Everything in
+`ROADMAP_v3.md`'s index is built except §60. The owner chose §102 from the researcher-feedback
+proposals, over §104's OC1, §110 and §115's ME1 and ME2.
+
+**Checked first.** Measured on `main` (`a818963`, 0.3.26) against a local server that accepts every
+request, reads it, and never answers. The probe used the clients `api_initialization` builds and the
+real loop, with the read timeout cut to a second so a count took seconds:
+- A stalled OpenAI-compatible turn made **15 requests**: three `GET /models/m`, three `GET /models`,
+  nine `POST /chat/completions`. Anthropic made the same shape. The proposal had counted the nine.
+  The lookups in front of the call share its timeout and its SDK retries. At the shipped 600 s, the
+  first warning comes an hour in and the failure after two and a half.
+- The SDKs' retries logged at INFO only (`Retrying request in 0.41 seconds`), so they reached the log
+  file and never a screen.
+- **google-genai had no timeout at all.** `HttpOptions.timeout` is None by default, and httpx reads
+  None as no limit: still blocked after twenty seconds on its first request.
+- **A stop could not land**, a finding the proposal did not have. A stop pressed as the first request
+  went out still sent all nine. The turn ended as `APITimeoutError`, a failure, not as stopped: the
+  attempt loop never asked for the stop between attempts.
+- The pinned SDKs' retried statuses are `RETRYABLE_STATUSES` exactly. What they read and the harness
+  did not is `x-should-retry` and `retry-after-ms`.
+- Research passes already showed the wait (§108's PW3 and PW7). A chat turn showed elapsed time and
+  tok/s whether bytes arrived or not.
+
+**Settled with the owner.** One round, the recommended option each time:
+- MW1: no SDK retry on any client, over the model call alone, with the harness reading the two
+  headers. Embeddings keep their own three tries.
+- MW2: `model_call_read_timeout_s`, default 600, for every provider including Google. The lookups
+  wait a fixed 30 s.
+- MW4: no retry after a stop, over also closing the connection the call is blocked on.
+- MW3: a chat turn shows the wait in both shells, in §108's words.
+
+**Built.**
+- `core/provider_errors.py`: `should_retry_header`, obeyed on an error status. `retry_after_s`
+  prefers `retry-after-ms`. `wait(seconds, stopped=None)` waits in 0.25 s slices when there is a
+  stop to hear.
+- `core/client.py`:
+  - `_no_retries()` (`max_retries=0`, and `Timeout(read, connect=5.0)`) on the OpenAI-compatible,
+    Anthropic and ChatGPT clients.
+  - `_google_options()`: the timeout in milliseconds, with the meter's client when that is on.
+  - `LOOKUP_READ_TIMEOUT_S` at the four lookup sites: Anthropic's effort retrieve, the window's
+    retrieve and listing, Google's `models.get`, and the ChatGPT plan's listing.
+- `config.yaml` and `config_schema.py`: the key, a `PositiveNumber`.
+- `core/loop.py`: a transient failure after a stop ends the turn `cancelled` and keeps what was
+  drawn. A failure no retry is for still raises. The backoff wait wakes for a stop. The
+  conversation's live record is phase-only.
+- `core/live_runs.py`: `keeps_text`, `watching(phase_only=...)`, `model_wait()` and
+  `QUIET_SHOWN_S`.
+- `tui/meters.py` and `tui/app.py`: the border's `waiting 4m12s` and `last byte 14s`.
+- `main.py`: the chat turn's waiter.
+
+**Two things found on the way.**
+- **A border repaint built a thread.** `_model_wait_text` first read `self.memory`, and that property
+  BUILDS the conversation's thread on first use. The suite's storage-failure test died in the repaint
+  that `_busy = True` triggers, before the turn's own first touch of the thread. It reads `_memory`
+  now, and a mutation that puts the property back is killed.
+- **A stand-in's truthy wait would have been read as a stop.** One test patches the backoff wait with
+  a bare `MagicMock`, whose return value is truthy. The loop asks the token itself after the wait
+  rather than trusting what the wait returned.
+
+**Changed in the tests.**
+- Every stand-in lookup in `test_context_window.py`, `test_client_effort.py`,
+  `test_sdk_conformance.py` and `test_chatgpt_client.py` takes per-request options.
+- The four tests that pin a client's exact keywords have the two new ones.
+- PW2's exclusion test now pins the phase-only record.
+- The settable-scalar count is 169.
+- The fake `models` endpoint records its options.
+- `tests/BREAKING_CHANGES.md` has a row for each.
+
+**Verified.**
+- Full suite on Windows with `AGENT_WORKSPACE` unset, run on the commit: 10313 passed, 88 skipped
+  (10401) in 2:37. Its one warning is the deliberately duplicated name in a hostile test archive.
+- The first full run on the working tree failed 8, all expected or test-side and all fixed: four
+  tests pinning a client's exact keywords, the settable-scalar count and its sentence, the
+  docs gate on the new ids, and the border reading the `memory` property (above).
+- 69 deliberate breaks of the new code, one per line that carries a decision. All 69 were
+  killed by failed assertions on the first pass, none by an error.
+- ruff is clean. bandit 1.9.4 finds nothing outside the baseline, and
+  `scripts/bandit-count-check.py` reports that no (file, test) count grew. gitleaks 8.30.1 with
+  CI's config finds nothing in an export of the tree. pip-audit finds nothing in either
+  requirements file.
+- No workflow or requirements file is in the diff.
+- The probe again on the branch, with the read timeout at 2 s and the lookups at 1 s:
+  - a stalled OpenAI-compatible or Anthropic turn makes 5 requests, each retry a WARNING;
+  - a Google turn makes 4 and ends, sending `X-Server-Timeout`;
+  - a stop at the first request makes 1 and ends `cancelled`;
+  - a stop 0.5 s into a 30 s backoff woke within a slice;
+  - the chat border counted `waiting 0s`, `waiting 1s` for each attempt.
+
+**Batch 283's release, settled.** PR #303 merged as `1739a7a`, and `release.yml` released 0.3.26
+(`a818963`).
+
+**Not done** (§102's gap register):
+- A stop still waits for the read in progress, up to the timeout.
+- A changed timeout takes effect at the next launch.
+- With `tui.animations: false` the border shows no wait.
+- A foreground subagent's silent call shows only in the TUI's sidebar.
+- Google's one figure covers its connect too.
+- The researcher's seven minutes is still not known to be a read timeout.
+- The wiki does not describe the key or the border.

@@ -1944,6 +1944,27 @@ class VenastineApp(App):
         else:
             self._meter_timer.pause()
 
+    def _model_wait_text(self) -> str:
+        """What this turn is waiting on the model for, or "" (ROADMAP_v3
+        §102, MW3): `waiting 4m12s` before a call's first byte, `last byte
+        14s` once its stream has gone quiet. Read from the conversation's
+        live record, which the loop keeps phase-only.
+
+        ONLY WHILE THE METER TICKS. With `tui.animations: false` nothing
+        repaints the border between events, so a `waiting 0s` drawn as a
+        call went out would stand there for as long as the call was
+        silent -- a figure that is wrong, which is worse than none.
+        """
+        if self._meter_timer is None or not self._meter.running:
+            return ""
+        # `_memory`, NEVER `memory`: the property BUILDS the thread on
+        # first use, and a border repaint is not a use. Measured, the
+        # suite's storage-failure test died here when it went through the
+        # property: the repaint at `_busy = True` precedes the turn's own
+        # first touch of the thread.
+        thread_id = getattr(getattr(self, "_memory", None), "thread_id", None)
+        return live_runs.model_wait(live_runs.runs.read(thread_id))
+
     def _refresh_meter(self) -> None:
         """Paint the live figures onto the prompt's bottom border.
 
@@ -1977,7 +1998,7 @@ class VenastineApp(App):
         except Exception:  # noqa: BLE001 -- no screen yet; nothing is blocking
             blocked = False
         self._meter.set_blocked(blocked, now)
-        text = self._meter.subtitle(now)
+        text = self._meter.subtitle(now, self._model_wait_text())
         if text == self._meter_last:
             return
         self._meter_last = text

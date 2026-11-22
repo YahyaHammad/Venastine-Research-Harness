@@ -348,7 +348,10 @@ def test_an_empty_anthropic_key_is_refused_before_a_client_exists(
     # Nothing about the refusal was kept: adding the key is enough.
     write("sk-test-not-real")
     assert client_module.api_initialization("ANTHROPIC") is not None
-    assert built == [{"api_key": "sk-test-not-real"}]
+    # ROADMAP_v3 §102 (MW1, MW2): every client is built with no SDK retry
+    # and the configured read timeout, beside its key.
+    assert built == [{"api_key": "sk-test-not-real",
+                      **client_module._no_retries()}]
 
 
 def test_an_empty_key_elsewhere_is_sent_as_the_placeholder(_in_tmp,
@@ -372,7 +375,8 @@ def test_an_empty_key_elsewhere_is_sent_as_the_placeholder(_in_tmp,
 
     client_module.api_initialization("LOCAL")
     assert built == [{"base_url": "http://127.0.0.1:1/v1",
-                      "api_key": client_module.KEYLESS}]
+                      "api_key": client_module.KEYLESS,
+                      **client_module._no_retries()}]
 
 
 # ---------------------------------------------------------------------------

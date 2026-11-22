@@ -30,7 +30,8 @@ WHAT COUNTS AS TRANSIENT (owner decision, batch 91):
     token refresh; google-genai 1.0's transport), and the builtin ConnectionError /
     TimeoutError;
   * HTTP 408, 409, 429 and any 5xx -- the statuses the openai and anthropic
-    SDKs already retry for themselves before a stream opens;
+    SDKs retry for themselves before a stream opens, when they are let to
+    (since ROADMAP_v3 §102 they are not: see below);
   * an error event inside a stream that had ALREADY opened with 200. The
     openai SDK raises its base APIError for it, with no status at all;
     anthropic raises APIStatusError carrying the 200 the stream opened with.
@@ -55,6 +56,19 @@ twice more here with a wait, and then described as "Connection error.",
 which says nothing true. So both questions this module answers walk
 `__cause__` / `__context__` first: a refusal anywhere in the chain is not
 worth another attempt, and its own sentence is the description.
+
+THE ONLY RETRY (ROADMAP_v3 §102, MW1). Every client is built with
+`max_retries=0` since batch 284, so the attempt loop in `core/loop.py` is
+the one place a model call is sent again, and every retry it makes is a
+WARNING a person can see. Measured on main before it: the SDKs' two
+retries sat inside each of the loop's three attempts, so a stalled
+endpoint took nine requests for one call -- plus three for each metadata
+lookup in front of it -- and the SDKs logged theirs at INFO, which reaches
+the log file and never a screen. What the SDKs read and this module did
+not is read here now, from the pinned openai 3.45.0 and anthropic 2.5.0:
+a server's `x-should-retry: true|false`, which they obey before looking
+at the status, and `retry-after-ms`, which they prefer to `retry-after`.
+Their retried statuses were already this module's set.
 """
 
 import json
@@ -179,6 +193,39 @@ def _body_verdict(body) -> Optional[bool]:
     return None
 
 
+def _headers(exc: BaseException):
+    """The headers of the response a failure carried, or None."""
+    return getattr(getattr(exc, "response", None), "headers", None)
+
+
+def _header(exc: BaseException, name: str):
+    headers = _headers(exc)
+    if headers is None:
+        return None
+    try:
+        return headers.get(name)
+    except (AttributeError, TypeError):
+        return None
+
+
+def should_retry_header(exc: BaseException) -> Optional[bool]:
+    """What a server's `x-should-retry` says, or None when it says nothing
+    (§102, MW1).
+
+    Not a standard header; the openai and anthropic SDKs read it before the
+    status, and obey it either way, so a server that sends `false` with a
+    503 is not sent the request again and one that sends `true` with a 400
+    is. Read here because nothing else reads it once the SDKs retry nothing.
+    Exactly `true` or `false`, as the SDKs compare it.
+    """
+    value = _header(exc, "x-should-retry")
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    return None
+
+
 def is_transient(exc: BaseException) -> bool:
     """Would the same call plausibly succeed if simply made again?"""
     if network_refusal(exc) is not None:
@@ -190,6 +237,11 @@ def is_transient(exc: BaseException) -> bool:
         return True
     status = _status(exc, names)
     if status is not None and status != 200:
+        # On an error status only, as the SDKs read it: the headers of a
+        # stream that opened with 200 are not about the error inside it.
+        said = should_retry_header(exc)
+        if said is not None:
+            return said
         return _retryable_status(status)
     if "APIError" in names:
         # An error event inside a stream that opened: no status (openai) or
@@ -218,17 +270,23 @@ def retry_after_s(exc: BaseException) -> Optional[float]:
     Only the delta-seconds form. The HTTP-date form is legal and rare enough
     on these APIs that a date parser here would be code with no caller; an
     unreadable value is simply ignored and the backoff decides.
+
+    `retry-after-ms` first, as both SDKs read it (§102, MW1): not a
+    standard header, but the one that says it in milliseconds, so a server
+    that sends both is read at its finer figure. An unreadable one falls
+    back to `retry-after`, as theirs does.
     """
-    headers = getattr(getattr(exc, "response", None), "headers", None)
-    if headers is None:
-        return None
-    try:
-        seconds = float(headers.get("retry-after"))
-    except (AttributeError, TypeError, ValueError):
-        return None
-    if seconds < 0:
-        return None
-    return min(seconds, RETRY_AFTER_CAP_S)
+    for name, divisor in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
+        try:
+            seconds = float(_header(exc, name)) / divisor
+        except (TypeError, ValueError):
+            continue
+        # A NaN compares false with everything, so it would pass `< 0`
+        # and reach the wait; `!=` is how it is caught without `math`.
+        if seconds != seconds or seconds < 0:
+            continue
+        return min(seconds, RETRY_AFTER_CAP_S)
+    return None
 
 
 def backoff_delay(retry: int, base_s: float,
@@ -250,15 +308,38 @@ def backoff_delay(retry: int, base_s: float,
     return delay
 
 
-def wait(seconds: float) -> None:
-    """Sleep before a retry.
+#: How often a backoff wait looks at whether the run was stopped (§102,
+#: MW4): a stop lands within this of being pressed.
+WAIT_SLICE_S = 0.25
+
+
+def wait(seconds: float, stopped=None) -> bool:
+    """Sleep before a retry; True when it ended because `stopped()` said
+    the run was stopped, False when it waited the whole time.
 
     Through `sleep` bound HERE, so a test patches `core.provider_errors.sleep`
     and reaches nothing else -- AGENTS.md's `from time import monotonic`
     rule: patching the global `time` module froze textual's event loop and
     conftest's `settle` along with it, and the suite hung rather than failed.
+
+    IN SLICES when there is a stop to watch for (§102, MW4). Measured on
+    main: a stop pressed during a stalled call waited out the read, then
+    this wait, then every remaining attempt. The slices are counted, not
+    timed, so a test that patches `sleep` to return at once still gets a
+    wait that ends, and in as many steps.
     """
-    sleep(seconds)
+    if stopped is None:
+        sleep(seconds)
+        return False
+    left = max(0.0, float(seconds))
+    while True:
+        if stopped():
+            return True
+        if left <= 0:
+            return False
+        step = min(WAIT_SLICE_S, left)
+        sleep(step)
+        left -= step
 
 
 def describe(exc: BaseException) -> str:
