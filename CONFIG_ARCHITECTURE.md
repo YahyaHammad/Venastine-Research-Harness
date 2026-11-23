@@ -1566,6 +1566,18 @@ this one, left unanswered, sends the run on without the sources. A run
 nobody can be asked in -- a piped CLI, an unattended run -- never asks,
 so this never stalls one.
 
+### `wanted_sources_retry_parallel`
+
+ROADMAP_v3 §113 (WT9). How many of the sources a run could not read are
+fetched at once when the answer to its question is "I've connected access:
+try them again". **4 by default** (the owner's choice of a key over a
+constant): 111 addresses one at a time, each allowed `fetch_url`'s
+timeout, was minutes after the answer. Each fetch still goes through the
+registry, so the URL policy, the output policy and the network meter apply
+as to the model's own calls; this sets only how many run side by side. The
+results are recorded in the listed order, so the record is the same
+whatever order they answer in. At least 1.
+
 ### `research_unattended`
 
 ROADMAP_v3 §113 (WT6). Whether a research run asks anything at all.

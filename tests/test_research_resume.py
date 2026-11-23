@@ -926,7 +926,7 @@ class TestTheCli:
                    "it stopped inside" in line for line in lines)
         assert lines[-1] == "Resume one with: venastine --resume <id>"
         assert main.resume_list_lines([]) == [
-            "No failed or abandoned research run to resume."]
+            "No failed, abandoned or scouted research run to resume."]
 
 
 class TestTheTui:

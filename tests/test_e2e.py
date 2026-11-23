@@ -257,6 +257,8 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
         # unattended -- the parameters' own defaults, forwarded.
         ask=None,
         unattended=False,
+        # ROADMAP_v3 §113 (WT2): a full run, not a scout.
+        scout=False,
     )
 
     # --- Verify write_run_artifacts was called with the run ---

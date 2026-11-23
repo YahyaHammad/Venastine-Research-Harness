@@ -15,6 +15,20 @@ other name.
 
 ---
 
+## The scout, a file matched to its address, the retry side by side (batch 287, ROADMAP_v3 §113)
+
+| Change | Test | Fix |
+|---|---|---|
+| **175 settable scalars** | `test_setting_every_leaf_to_its_own_value_changes_nothing`, `test_the_documented_settable_scalar_count_is_the_one_the_test_walks` | Batch 287: `wanted_sources_retry_parallel` (WT9) |
+| **A 404's reason is "not found (HTTP 404): the address may be wrong"** | `test_each_error_reads_as_a_few_words` | WT10; the row's expected words |
+| **The retry fetches side by side**, so a refusal by policy no longer stops the next dispatch | ~~`test_a_retry_refused_by_policy_stops_and_the_rest_wait`~~, now `test_a_retry_refused_by_policy_records_nothing` | WT9: both fetches are sent; nothing is recorded from the refusal on, and no source gains a retry failure |
+| **The claims to ground again after Pass 3a are the answer's `citing`**, recorded as the question is asked | `test_a_resumed_run_grounds_again_with_the_answer_it_was_given` | Its stand-in answer carries `"citing": ["C1"]`, as a saved answer now does |
+| **`--scout`**, refused outside research and with `--resume` | `test_every_flag_has_exactly_one_answer`, `test_research_only_flags_are_refused_in_chat` | In `_REFUSED`, and a row of the chat refusal |
+| **`run_research` and the pipeline take `scout=`** | `test_research_mode_e2e_prints_report_and_trace` | The expected call carries `scout=False` |
+| **The resume listing's empty line names scouted runs** | `test_the_listing_names_where_each_run_resumes` | "No failed, abandoned or scouted research run to resume." |
+
+---
+
 ## What a run could not read (batch 286, ROADMAP_v3 §113)
 
 | Change | Test | Fix |

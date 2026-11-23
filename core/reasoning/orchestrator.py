@@ -76,6 +76,8 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
 import config
 from core import interaction, pipeline_models, usage_view
@@ -93,6 +95,7 @@ from core.reasoning.json_retry import parse_json_response as _parse_json_respons
 from core.reasoning.json_retry import stream_until_json, stream_until_text
 from core.reasoning.payload_validation import validate as _validate_payload
 from core.reasoning.pipeline_storage import (
+    SCOUTED,
     create_pipeline_run,
     reopen_pipeline_run,
     update_pipeline_run,
@@ -1253,7 +1256,8 @@ def _not_asked_because(ask, unattended: bool, folder) -> str | None:
 
 
 def _ask_about_sources(point: str, run: PipelineRun, corpus, ask,
-                       unattended: bool, authorization, folder, progress):
+                       unattended: bool, authorization, folder, progress,
+                       scouted: bool = False):
     """Put the sources the run could not read to the user, at `point`, once
     (WT5). A generator returning (authorization, pending): `pending` is the
     text the redraft or the re-grounding is given, "" when the answer
@@ -1261,16 +1265,27 @@ def _ask_about_sources(point: str, run: PipelineRun, corpus, ask,
 
     `authorization` comes back because a run with none is given one the
     moment a file is supplied: read_source reaches the files through it,
-    and every pass after this one is handed this same object."""
+    and every pass after this one is handed this same object.
+
+    `scouted` is a scout's resume (WT2): there the files in the folder are
+    the answer the scout asked for, so with nobody to ask they are read
+    anyway, and read even when the draft wanted nothing."""
     if _asked(run, point) is not None:
         return authorization, ""
     sources = wanted_sources.listed(
         wanted_sources.entries(corpus, run.claims), point)
-    if not sources:
+    reads_anyway = scouted and folder is not None
+    if not sources and not reads_anyway:
         return authorization, ""
     entry = {"point": point, "listed": len(sources)}
+    # The claims that cite what is listed, kept as asked: the answer can
+    # make those sources readable (a fetch that answers now, a file matched
+    # to its address), and they are the claims to ground again.
+    citing = sorted({c for s in sources for c in s.get("cited_by") or ()})
+    if citing:
+        entry["citing"] = citing
     why = _not_asked_because(ask, unattended, folder)
-    if why is not None:
+    if why is not None and not reads_anyway:
         entry.update(asked=False, why=why)
         run.source_asks.append(entry)
         yield from progress.checkpoint(
@@ -1278,17 +1293,26 @@ def _ask_about_sources(point: str, run: PipelineRun, corpus, ask,
             f"because {why}.")
         return authorization, ""
 
-    yield from progress.checkpoint(
-        f"{point}: {len(sources)} source(s) could not be read; asking what "
-        f"to do about them.")
-    payload = wanted_sources.question(sources, point, folder)
-    payload["choices"] = list(interaction.SOURCES_CHOICES)
-    payload["options"] = [interaction.SOURCES_LABELS[choice]
-                          for choice in interaction.SOURCES_CHOICES]
-    payload["wait_s"] = config.WANTED_SOURCES_WAIT_S
-    choice, note = interaction.ask(ask, interaction.Request(
-        kind=interaction.SOURCES, payload=payload))
-    entry.update(asked=True, answer=choice, note=note)
+    if why is not None or not sources:
+        choice, note = interaction.SOURCES_SUPPLIED, ""
+        entry.update(asked=False, why=why or "the draft wanted nothing",
+                     answer=choice)
+        yield from progress.checkpoint(
+            f"{point}: {len(sources)} source(s) could not be read; not asked, "
+            f"because {why or 'the draft wanted nothing'}, so the scout's "
+            f"supplied/ folder is read as the answer.")
+    else:
+        yield from progress.checkpoint(
+            f"{point}: {len(sources)} source(s) could not be read; asking "
+            f"what to do about them.")
+        payload = wanted_sources.question(sources, point, folder)
+        payload["choices"] = list(interaction.SOURCES_CHOICES)
+        payload["options"] = [interaction.SOURCES_LABELS[choice]
+                              for choice in interaction.SOURCES_CHOICES]
+        payload["wait_s"] = config.WANTED_SOURCES_WAIT_S
+        choice, note = interaction.ask(ask, interaction.Request(
+            kind=interaction.SOURCES, payload=payload))
+        entry.update(asked=True, answer=choice, note=note)
 
     supplied, obtained = [], []
     if choice != interaction.SOURCES_PROCEED:
@@ -1296,14 +1320,21 @@ def _ask_about_sources(point: str, run: PipelineRun, corpus, ask,
         # a file and then typed a note instead of choosing has supplied it.
         held = authorization.supplied if authorization is not None else {}
         supplied, skipped = wanted_sources.load_supplied(folder, held)
+        # WT8: which address each file stands for, among those listed.
+        matched, ambiguous = wanted_sources.match(supplied, sources)
         if supplied:
             if authorization is None:
                 from core.approval import RunAuthorization
                 authorization = RunAuthorization()
             for document in supplied:
+                document.url = matched.get(document.name)
                 authorization.supplied[document.name] = document
-                corpus.add_supplied(document.name, document.text)
+                corpus.add_supplied(document.name, document.text,
+                                    url=document.url)
         entry["supplied"] = [d.artifact() for d in supplied]
+        if ambiguous:
+            entry["ambiguous"] = [{"name": name, "urls": urls}
+                                  for name, urls in ambiguous.items()]
         if skipped:
             entry["skipped"] = skipped
         if choice == interaction.SOURCES_RETRY:
@@ -1333,23 +1364,45 @@ def _retry_fetches(sources, corpus, point: str) -> list:
     """Fetch every listed source again, in code (WT5's "I've connected
     access"). Through the registry, so the URL policy, the output policy and
     the network meter apply exactly as to the model's own calls. Returns
-    the URLs that answer now."""
+    the URLs that answer now.
+
+    `wanted_sources_retry_parallel` at a time (WT9): 111 URLs one at a
+    time, each allowed `fetch_url`'s timeout, was minutes after the answer.
+    The fetches run in threads, each in a copy of this context, and their
+    results are recorded HERE, in the listed order, because the corpus is
+    not shared between threads and the record must read the same on every
+    run. A refusal by policy (`ToolCallDenied`) ends the recording at that
+    URL, as it ended the loop before: a policy refuses the tool, not one
+    address, so the rest were refused too."""
     from tools.registry import ToolCallDenied, registry
 
-    obtained = []
-    for source in sources:
-        url = source.get("url")
-        if not isinstance(url, str) or not url.startswith(("http://",
-                                                           "https://")):
-            continue
-        params = {"url": url}
+    urls = [s.get("url") for s in sources]
+    urls = [u for u in urls
+            if isinstance(u, str) and u.startswith(("http://", "https://"))]
+    if not urls:
+        return []
+
+    def fetch(url):
         try:
-            result = registry.dispatch("fetch_url", params)
+            return registry.dispatch("fetch_url", {"url": url}), None
         except ToolCallDenied as denied:
+            return None, denied
+        except Exception as exc:  # noqa: BLE001 -- one URL must not stop the rest
+            return {"error": f"Could not fetch URL: {exc}"}, None
+
+    width = min(len(urls), config.WANTED_SOURCES_RETRY_PARALLEL)
+    with ThreadPoolExecutor(max_workers=width,
+                            thread_name_prefix="venastine-retry") as pool:
+        futures = [pool.submit(copy_context().run, fetch, url)
+                   for url in urls]
+        outcomes = [future.result() for future in futures]
+
+    obtained = []
+    for url, (result, denied) in zip(urls, outcomes):
+        if denied is not None:
             logger.info("Not retrying %s: %s", url, denied)
             break
-        except Exception as exc:  # noqa: BLE001 -- one URL must not stop the rest
-            result = {"error": f"Could not fetch URL: {exc}"}
+        params = {"url": url}
         if isinstance(result, dict) and "error" not in result:
             corpus.add("fetch_url", result)
             corpus.note_obtained("fetch_url", params)
@@ -1364,12 +1417,13 @@ def _restore_supplied(run: PipelineRun, corpus, authorization):
     """A resumed run's supplied files, read again from its folder: the ones
     its answers recorded, unchanged since (by sha256). Returns the
     authorization, made if the run had none."""
-    wanted = {}
+    wanted, stands_for = {}, {}
     for entry in run.source_asks:
         records = entry.get("supplied") if isinstance(entry, dict) else None
         for record in records or ():
             if isinstance(record, dict) and record.get("name"):
                 wanted[record["name"]] = record.get("sha256")
+                stands_for[record["name"]] = record.get("stands_for")
     if not wanted:
         return authorization
     found, _skipped = wanted_sources.load_supplied(
@@ -1380,8 +1434,10 @@ def _restore_supplied(run: PipelineRun, corpus, authorization):
             from core.approval import RunAuthorization
             authorization = RunAuthorization()
         for document in kept:
+            document.url = stands_for.get(document.name)
             authorization.supplied[document.name] = document
-            corpus.add_supplied(document.name, document.text)
+            corpus.add_supplied(document.name, document.text,
+                                url=document.url)
     missing = sorted(set(wanted) - {d.name for d in kept})
     if missing:
         run.log("Resume: " + ", ".join(missing) + " in supplied/ changed or "
@@ -1655,6 +1711,9 @@ def stream_deep_research_pipeline(
     # the record.
     ask=None,
     unattended: bool = False,
+    # ROADMAP_v3 §113 (WT2). Pass 0 and Pass 1 only, ending 'scouted' on
+    # the list of sources the draft could not read; a new run's mode.
+    scout: bool = False,
 ):
     """The pipeline, as a generator of PipelineEvents (§22). The terminal
     `run_complete` event carries the finished PipelineRun.
@@ -1722,6 +1781,11 @@ def stream_deep_research_pipeline(
         )
 
     roster = _ensemble_roster(ensemble_mode)
+    if scout and resume is not None:
+        # §113 (WT2). A resumed run goes on in its own mode: a scout's
+        # resume is the rest of the run, and a full run's is not a scout.
+        raise ValueError("scout starts a new run; a resumed run keeps the "
+                         "mode it was started in")
 
     # ROADMAP_v3 §98. A resume is prepared BEFORE the record is touched, so a
     # refusal leaves a failed run failed. `point` stays None for a new run,
@@ -1737,6 +1801,17 @@ def stream_deep_research_pipeline(
 
     def done(stage: str, round_no: int = 0) -> bool:
         return point is not None and point.done(stage, round_no)
+
+    # ROADMAP_v3 §113 (WT2). A scout that stopped before the end of Pass 1
+    # goes on as one; one that reached it resumes into the after-draft
+    # question, with the files put in its folder since, and the rest.
+    # `is True`: a point's flag, not anything truthy standing in for one.
+    resuming_scout = False
+    if point is not None and point.scout is True:
+        if point.done("Pass 1"):
+            resuming_scout = True
+        else:
+            scout = True
 
     # §45 (SQ2). RUN-SCOPED, and attached to every pass rather than only to
     # the two that ground. The question it answers is "what did this run
@@ -1829,7 +1904,8 @@ def stream_deep_research_pipeline(
     def mark(stage: str, round_no: int = 0, batch=()) -> dict:
         from core.reasoning.resume import snapshot
         return snapshot(run, stage, round_no=round_no, flagged=batch,
-                        effective_n=effective_n, pass1_threads=pass1_threads)
+                        effective_n=effective_n, pass1_threads=pass1_threads,
+                        scout=scout)
 
     def via(pass_id: str) -> dict:
         """The §98 arguments one pass is given: its thread is recorded as
@@ -1848,9 +1924,11 @@ def stream_deep_research_pipeline(
         progress.save_point(mark(None))
     # ROADMAP_v3 §113 (WT3). The run's folder for supplied sources, made
     # as the run starts so it exists before the question names it -- and
-    # only where the question can be asked.
+    # only where the question can be asked, or where a scout's resume will
+    # read it (WT2).
     supplied_folder = (wanted_sources.prepare_folder(run.run_id)
-                       if ask is not None and not unattended else None)
+                       if (ask is not None and not unattended) or scout
+                       or resuming_scout else None)
 
     # Entered here, with the try below as its only way out.
     tallying = usage_view.enter_run(progress.usage)
@@ -1886,14 +1964,37 @@ def stream_deep_research_pipeline(
             yield from progress.checkpoint(f"Pass 0: plan produced ({len(run.plan.get('key_entities_or_subjects', []))} key entities anticipated).", done=mark("Pass 0"))
 
         # --- Pass 1: initial generation (ensemble mode: N candidates) ---
-        if not done("Pass 1"):
+        if not done("Pass 1") or resuming_scout:
             pass1_input = f"Original query:\n{user_query}\n\nPreliminary plan (loose context, may deviate freely):\n{json.dumps(run.plan)}"
             # ROADMAP_v3 §113 (WT5). A resumed run whose question was
             # already answered redrafts with that answer, not asking again.
             answered = _asked(run, wanted_sources.AFTER_DRAFT)
             if answered is not None and answered.get("pending"):
                 pass1_input += answered["pending"]
-            for attempt in (1, 2):
+            # The first attempt drafts; the second asks about what that
+            # draft could not read, once, and drafts again only when the
+            # answer brought something. A scout's resume has its draft
+            # already, so it starts at the question (WT2).
+            for attempt in ((2,) if resuming_scout else (1, 2)):
+                if attempt == 2:
+                    authorization, pending = yield from _ask_about_sources(
+                        wanted_sources.AFTER_DRAFT, run, corpus, ask,
+                        unattended, authorization, supplied_folder, progress,
+                        scouted=resuming_scout)
+                    if _asked(run, wanted_sources.AFTER_DRAFT) is not None:
+                        # Saved now, under the stage before, so a run that
+                        # dies in the redraft is not asked this again. A
+                        # scout's draft is already written: with nothing to
+                        # redraft, the answer is saved after it.
+                        progress.save_point(
+                            mark("Pass 1") if resuming_scout and not pending
+                            else mark("Pass 0"))
+                    if not pending:
+                        break
+                    run.log("Pass 1: writing the draft again with what the "
+                            "answer brought.")
+                    run.candidates = []
+                    pass1_input += pending
                 effective_n = 0
                 pass1_threads = []
                 if roster:
@@ -1910,9 +2011,13 @@ def stream_deep_research_pipeline(
                     for entry in roster:
                         label = f"{entry['provider_name']}/{entry['model']}"
                         try:
+                            # §113 (WT7): with the corpus, as the
+                            # single draft has it and as a resume replays
+                            # every candidate's thread into it.
                             candidates.append((yield from _run_pass(
                                 "Pass 1", pass1_input, entry["model"], entry["provider_name"],
-                                authorization=authorization, trace=run.trace,
+                                authorization=authorization, corpus=corpus,
+                                trace=run.trace,
                                 pass_threads=run.pass_threads, effort=effort,
                                 activity=activity, **via("Pass 1"))))
                         except Exception as e:
@@ -1983,24 +2088,28 @@ def stream_deep_research_pipeline(
                     run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, corpus=corpus, trace=run.trace, pass_threads=run.pass_threads, effort=effort, activity=activity, **via("Pass 1"))
                     pass1_threads = [_last_thread(run.pass_threads, "Pass 1")]
                     run.log("Pass 1: initial generation complete.")
-                # §113 (WT5): what the draft could not read, asked once;
-                # an answer that brings something writes it again.
-                if attempt == 2:
+                if scout:
+                    # §113 (WT2): a scout asks nothing; it ends on the list.
                     break
-                authorization, pending = yield from _ask_about_sources(
-                    wanted_sources.AFTER_DRAFT, run, corpus, ask,
-                    unattended, authorization, supplied_folder, progress)
-                if _asked(run, wanted_sources.AFTER_DRAFT) is not None:
-                    # Saved now, under the stage before, so a run that
-                    # dies in the redraft is not asked this again.
-                    progress.save_point(mark("Pass 0"))
-                if not pending:
-                    break
-                run.log("Pass 1: writing the draft again with what the "
-                        "answer brought.")
-                run.candidates = []
-                pass1_input += pending
             yield from progress.checkpoint(done=mark("Pass 1"))
+
+        # --- §113 (WT2): a scout stops here, on what it could not read ---
+        if scout:
+            run.scouted = True
+            run.wanted_sources = wanted_sources.record(
+                corpus, run.claims, run.source_asks,
+                authorization.supplied if authorization is not None else {})
+            run.final_report = wanted_sources.scout_report(
+                run.wanted_sources["sources"],
+                supplied_folder or wanted_sources.folder(run.run_id),
+                run.run_id)
+            run.log(wanted_sources.scout_line(run.wanted_sources["sources"],
+                                              run.run_id))
+            progress.log_totals()
+            yield from progress.checkpoint()
+            update_pipeline_run(run.run_id, run, status=SCOUTED)
+            yield PipelineEvent(kind="run_complete", run=run)
+            return
 
         # --- Pass 2: claim extraction & classification ---
         if not done("Pass 2"):
@@ -2051,9 +2160,11 @@ def stream_deep_research_pipeline(
                     if _asked(run, wanted_sources.AFTER_GROUNDING) is not None:
                         progress.save_point(mark("D0"))
                 if pending:
-                    needing = {c for s in wanted_sources.listed(
-                        wanted_sources.entries(corpus, run.claims),
-                        wanted_sources.AFTER_GROUNDING) for c in s["cited_by"]}
+                    # The claims the question named, as it named them: read
+                    # now, a source the answer made readable would leave its
+                    # claims out.
+                    needing = set(_asked(run, wanted_sources.AFTER_GROUNDING)
+                                  .get("citing") or ())
                     regrounded = [c for c in factual_claims if c.id in needing]
                     if regrounded:
                         regrounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", _reground_input(regrounded, pending), critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in regrounded], effort=effort, activity=activity, **via("Pass 3a"))))

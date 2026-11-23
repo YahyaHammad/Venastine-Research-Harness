@@ -36,7 +36,17 @@ is made when a run that can ask starts, so the folder exists before the
 question names it. The HARNESS reads it, once per answer, into the run's
 corpus and into the run's authorization, and `read_source` pages through
 what was read then -- never the filesystem, never the workspace, and
-never `read`. A file added after the answer is not seen.
+never `read`. A file added after the answer is not seen. A file is matched
+to the address it stands for by identifiers (WT8): named after the
+address's last part, or holding its DOI or arXiv id. A matched file's text
+is held under that address too, so a claim citing it is checked against the
+user's copy; any other file is cited by its own name.
+
+THE SCOUT (WT2) STOPS AFTER PASS 1, on the list. `--scout` runs Pass 0
+and Pass 1 and ends the run `scouted`, with this list as its report and
+the folder made; resuming it asks the after-draft question with whatever
+the user has put in the folder since, or, with nobody to ask, takes the
+folder's files as the answer.
 """
 
 from __future__ import annotations
@@ -48,10 +58,10 @@ import re
 import stat
 from collections import defaultdict
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import config
-from core.reasoning.source_corpus import normalize_url
+from core.reasoning.source_corpus import arxiv_id_from_url, normalize_url
 from safety.policy_enforcement import redact_output_text
 
 logger = logging.getLogger(__name__)
@@ -84,7 +94,12 @@ READINGS = {"none": "not read", "snippet": "search snippet only",
 
 _HTTP = re.compile(r"error '(\d{3})\b")
 _STATUS_WORDS = {401: "refused access", 403: "refused access",
-                 404: "not found", 410: "gone", 429: "rate limited"}
+                 410: "gone", 429: "rate limited"}
+# WT10. A 404 is as often an address the model made up as a paper that
+# moved, so it says so, and the question lists those last.
+MAYBE_WRONG = "the address may be wrong"
+NOT_FOUND = f"not found (HTTP 404): {MAYBE_WRONG}"
+NOT_FOUND_HEADING = f"Not found: {MAYBE_WRONG}"
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +130,8 @@ def reason(error: str) -> str:
     match = _HTTP.search(text)
     if match:
         code = int(match.group(1))
+        if code == 404:
+            return NOT_FOUND
         words = _STATUS_WORDS.get(code) or (
             "server error" if code >= 500 else "refused")
         return f"{words} (HTTP {code})"
@@ -252,6 +269,30 @@ def summary(sources) -> str | None:
 # ---- The question (WT5) ---------------------------------------------------
 # ---------------------------------------------------------------------------
 
+def not_found(source) -> bool:
+    """Whether `source` failed with a 404 (WT10)."""
+    return source.get("reason") == NOT_FOUND
+
+
+def grouped(sources) -> list[tuple]:
+    """(heading, sources) pairs, in the order a person reads them: by
+    host, the biggest group first, and the 404s last under their own
+    heading, so nobody hunts for a paper the model may have made up before
+    the ones that are refused or timed out."""
+    by_host = defaultdict(list)
+    missing = []
+    for s in sources:
+        if not_found(s):
+            missing.append(s)
+        else:
+            by_host[_host(s["url"])].append(s)
+    groups = [(host, by_host[host])
+              for host in sorted(by_host, key=lambda h: (-len(by_host[h]), h))]
+    if missing:
+        groups.append((NOT_FOUND_HEADING, missing))
+    return groups
+
+
 def listed(sources, point: str) -> list[dict]:
     """What the question at `point` names. After the draft, everything not
     obtained so far; after grounding, the sources claims cite."""
@@ -282,9 +323,6 @@ def prepare_folder(run_id) -> str | None:
 def question(sources, point: str, path: str) -> dict:
     """The SOURCES request's payload: the list grouped by host, and where to
     put a file. Every string here is what both shells print."""
-    by_host = defaultdict(list)
-    for s in sources:
-        by_host[_host(s["url"])].append(s)
     if point == AFTER_GROUNDING:
         intro = ("Claims cite these sources, and grounding could not read "
                  "them in full. The claims that cite them can be grounded "
@@ -293,16 +331,15 @@ def question(sources, point: str, path: str) -> dict:
         intro = ("The first draft was written without these sources. Pass 1 "
                  "can write it again with what you supply.")
     lines = [intro, ""]
-    for host in sorted(by_host, key=lambda h: (-len(by_host[h]), h)):
-        group = by_host[host]
-        lines.append(f"{host} ({len(group)})")
+    for heading, group in grouped(sources):
+        lines.append(f"{heading} ({len(group)})")
         for s in group:
             cited = (f"; cited by {', '.join(s['cited_by'])}"
                      if s.get("cited_by") else "")
-            lines.append(f"  {' '.join(str(s['url']).split())} -- "
-                         f"{s['reason']}{cited}")
-    lines += ["", "To supply one, save it (PDF, HTML or text, any name) in:",
-              f"  {path}", "then choose the first answer below."]
+            why = "" if not_found(s) else f" -- {s['reason']}"
+            lines.append(f"  {' '.join(str(s['url']).split())}{why}{cited}")
+    lines += ["", "To supply one, save it (PDF, HTML or text) in:",
+              f"  {path}", MATCHING, "Then choose the first answer below."]
     return {
         "title": (f"The run could not read {len(sources)} source"
                   f"{'' if len(sources) == 1 else 's'}"),
@@ -323,9 +360,11 @@ def pending_note(supplied, obtained, note: str) -> str:
              "since answered:"]
     if supplied:
         lines += ["", "Files the user supplied for this run. Read them with "
-                      "`read_source`, by name, a page at a time, and cite "
-                      "one as `supplied/<name>`:"]
+                      "`read_source`, by name, a page at a time. Cite a "
+                      "file that is the user's copy of an address by that "
+                      "address, and any other as `supplied/<name>`:"]
         lines += [f"- {doc.name} ({doc.total:,} characters)"
+                  + (f": the user's copy of {doc.url}" if doc.url else "")
                   for doc in supplied]
     if obtained:
         lines += ["", "Sources that failed before and answer now, with "
@@ -334,6 +373,155 @@ def pending_note(supplied, obtained, note: str) -> str:
     if note:
         lines += ["", f"The user's note: {' '.join(note.split())}"]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# ---- The scout (WT2) --------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+SCOUT_HEADING = "# What the first draft could not read"
+
+
+def _resume_line(run_id) -> str:
+    short = str(run_id)[:8]
+    return (f"`venastine --resume {short}`, or `/research --resume {short}` "
+            f"in the TUI")
+
+
+def scout_report(sources, path: str, run_id) -> str:
+    """A scout run's report: what Pass 1 could not read, grouped as the
+    question groups it, where to put a file, and how to go on. Markdown,
+    because it is `report.md` and every shell shows it as the report."""
+    sources = list(sources or ())
+    lines = [SCOUT_HEADING, "",
+             "This run was a scout: it stopped after Pass 1, and its draft "
+             "is in the run's folder beside this report."]
+    if not sources:
+        lines += ["", "It read every source it asked for, so there is "
+                      "nothing to supply. Resume the run to finish it: "
+                      f"{_resume_line(run_id)}."]
+        return "\n".join(lines) + "\n"
+    count = len(sources)
+    lines += ["", f"It could not read {count} source"
+                  f"{'' if count == 1 else 's'}.", ""]
+    for heading, group in grouped(sources):
+        lines.append(f"**{heading}** ({len(group)})")
+        lines.append("")
+        lines += [f"- {_link(s['url'])}"
+                  + ("" if not_found(s) else f": {s['reason']}")
+                  for s in group]
+        lines.append("")
+    lines += ["To go on, save what you can get (PDF, HTML or text) in:", "",
+              f"    {path}", "", MATCHING, "",
+              f"Then resume the run: {_resume_line(run_id)}. Pass 1 is "
+              "written again with what you supplied, and the rest of the "
+              "run follows."]
+    return "\n".join(lines) + "\n"
+
+
+def scout_line(sources, run_id) -> str:
+    """The scout's last trace line."""
+    count = len(list(sources or ()))
+    return (f"Scout: stopped after Pass 1; the run could not read {count} "
+            f"source{'' if count == 1 else 's'}. Resume it with "
+            f"--resume {str(run_id)[:8]}.")
+
+
+# ---------------------------------------------------------------------------
+# ---- Which address a supplied file stands for (WT8) ------------------------
+# ---------------------------------------------------------------------------
+
+MATCHING = ("A file named after the address's last part, or holding its DOI "
+            "or arXiv id, is matched to that address; any other is read as "
+            "it is.")
+
+#: Path segments that name a page's form rather than the work, which an
+#: address's last part is never matched on (`.../10.3389/x/full`).
+_GENERIC_SEGMENTS = frozenset({
+    "abs", "abstract", "article", "articles", "content", "download", "epdf",
+    "full", "fulltext", "html", "index", "meta", "pdf", "pdfft", "view",
+    "viewcontent"})
+_PAGE_SUFFIXES = (".pdf", ".html", ".htm")
+#: Shorter than this, an address's last part names nothing (`/1.pdf`).
+MATCH_MIN_CHARS = 6
+#: Where a paper prints its DOI and arXiv id: its first page.
+HEAD_CHARS = 5000
+_DOI = re.compile(r"10\.\d{4,9}/[^\s?#\"<>]+")
+_DOI_TAIL = re.compile(r"(?:/(?:full|abstract|pdf|epdf|meta|fulltext))+$|"
+                       r"\.pdf$")
+# A browser's second download of a file: "name (1).pdf".
+_COPY = re.compile(r"\s*\(\d+\)$")
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _stem(name: str) -> str:
+    return _COPY.sub("", os.path.splitext(name)[0].lower()).strip()
+
+
+def identifiers(url: str) -> dict:
+    """What a file can be matched to `url` by: the address's last part
+    that names the work, its DOI and its arXiv id, each None when absent."""
+    try:
+        path = unquote(urlsplit(url).path)
+    except ValueError:
+        path = ""
+    segment = None
+    for part in reversed([p for p in path.split("/") if p]):
+        low = part.lower()
+        if low.endswith(_PAGE_SUFFIXES):
+            low = os.path.splitext(low)[0]
+        if low in _GENERIC_SEGMENTS:
+            continue
+        segment = low if len(low) >= MATCH_MIN_CHARS else None
+        break
+    found = _DOI.search(unquote(url))
+    doi = _DOI_TAIL.sub("", found.group(0).lower()) if found else None
+    arxiv = arxiv_id_from_url(url)
+    return {"segment": segment, "doi": doi,
+            "arxiv": arxiv.lower() if arxiv else None}
+
+
+def _matches(document, ids: dict) -> bool:
+    stem = _stem(document.name)
+    if ids["segment"] and stem == ids["segment"]:
+        return True
+    # Whitespace out, so a DOI a PDF's text broke across lines still reads.
+    head = "".join(document.text[:HEAD_CHARS].lower().split())
+    doi = ids["doi"]
+    if doi and (_squash(doi) in _squash(stem) or doi in head):
+        return True
+    arxiv = ids["arxiv"]
+    return bool(arxiv and (_squash(arxiv) in _squash(stem) or arxiv in head))
+
+
+def match(supplied, sources) -> tuple[dict, dict]:
+    """(matched, ambiguous): each supplied file's name -> the one address
+    it stands for, and name -> the addresses it could not be told apart
+    between. A file that matches two addresses, or one of two files that
+    match the same address, is ambiguous and is not matched at all: a
+    wrong match would check a claim against the wrong paper.
+
+    `sources` are the record's entries, one per address already."""
+    urls = [s.get("url") for s in sources or ()]
+    urls = [u for u in urls
+            if isinstance(u, str) and u.startswith(("http://", "https://"))]
+    ids = {url: identifiers(url) for url in urls}
+    found = {doc.name: [u for u in urls if _matches(doc, ids[u])]
+             for doc in supplied or ()}
+    claims = defaultdict(list)
+    for name, hits in found.items():
+        if len(hits) == 1:
+            claims[hits[0]].append(name)
+    matched, ambiguous = {}, {}
+    for name, hits in found.items():
+        if len(hits) == 1 and len(claims[hits[0]]) == 1:
+            matched[name] = hits[0]
+        elif hits:
+            ambiguous[name] = hits
+    return matched, ambiguous
 
 
 # ---------------------------------------------------------------------------
@@ -348,10 +536,15 @@ class Supplied:
     sha256: str
     total: int
     kind: str
+    # WT8: the address this file was matched to, None when it was not.
+    url: str | None = None
 
     def artifact(self) -> dict:
-        return {"name": self.name, "kind": self.kind, "sha256": self.sha256,
-                "chars": len(self.text), "total_chars": self.total}
+        record = {"name": self.name, "kind": self.kind, "sha256": self.sha256,
+                  "chars": len(self.text), "total_chars": self.total}
+        if self.url:
+            record["stands_for"] = self.url
+        return record
 
 
 def _limit(suffix: str) -> int:

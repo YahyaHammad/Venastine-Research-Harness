@@ -516,6 +516,8 @@ class HarnessConfig(_Model):
     attended_approval_timeout_s: PositiveInt
     # ROADMAP_v3 §113 (WT5). 0 waits until the question is answered.
     wanted_sources_wait_s: NonNegativeInt
+    # §113 (WT9). How many of the retry's fetches run at once.
+    wanted_sources_retry_parallel: PositiveInt
     research_unattended: StrictBool
     subagent_review: StrictBool
     max_review_findings: NonNegativeInt

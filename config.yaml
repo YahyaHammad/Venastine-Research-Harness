@@ -990,6 +990,13 @@ attended_approval_timeout_s: 600
 # someone can answer: a piped CLI and an unattended run never ask.
 wanted_sources_wait_s: 0
 
+# How many of the sources a research run could not read it fetches again
+# at once, when you answer its question with "I've connected access: try
+# them again". Each fetch goes through fetch_url, its URL policy and its
+# network meter as the model's own would; this is only how many run side
+# by side.
+wanted_sources_retry_parallel: 4
+
 # Whether a research run is unattended: nothing in it asks anything.
 # Gated tools are hidden as on a piped run, review findings are recorded
 # and not applied, and the sources questions are recorded and skipped. A

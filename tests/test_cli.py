@@ -2073,7 +2073,7 @@ class TestTheModeValidations:
         assert "does not take a positional query" in capsys.readouterr().err
 
     @pytest.mark.parametrize("flag", ["--attended", "--unattended",
-                                      "--review", "--no-review"])
+                                      "--review", "--no-review", "--scout"])
     def test_research_only_flags_are_refused_in_chat(self, flag, startup,
                                                      capsys):
         """N8, audit #141. --review and --no-review are documented exactly
@@ -2093,6 +2093,24 @@ class TestTheModeValidations:
         self._refuses(["--mode", "research", "--attended",
                        "--unattended", "q"], "")
         assert "choose one" in capsys.readouterr().err
+
+    def test_scout_and_resume_together_are_refused(self, startup, capsys):
+        """ROADMAP_v3 §113 (WT2). A scout is a new run's mode; a resumed
+        run goes on in the mode it was started in, and a scout's resume is
+        the rest of the run."""
+        self._refuses(["--mode", "research", "--scout", "--resume",
+                       "5fc55fac"], "")
+        assert "--scout starts a new run" in capsys.readouterr().err
+
+    def test_a_scout_launch_hands_it_on(self, startup, monkeypatch):
+        import main
+        seen = {}
+        monkeypatch.setattr(main, "run_research",
+                            lambda *a, **k: seen.update(k))
+        assert main.main(["--mode", "research", "--scout", "q"]) == 0
+        assert seen["scout"] is True
+        assert main.main(["--mode", "research", "q"]) == 0
+        assert seen["scout"] is False
 
     def test_an_unattended_launch_hands_on_nothing_that_asks(self, startup,
                                                              monkeypatch):
@@ -2164,6 +2182,7 @@ _REFUSED = {
     "--attended": ["--attended"],
     # ROADMAP_v3 §113. Research mode's, like --attended beside it.
     "--unattended": ["--unattended"],
+    "--scout": ["--scout"],
     "--review": ["--review"],
     "--no-review": ["--no-review"],
     # Bare: it lists stored runs. A value would have to survive the

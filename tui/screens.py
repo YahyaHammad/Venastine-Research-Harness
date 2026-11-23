@@ -1268,7 +1268,8 @@ class _RunPicker:
 
 
 class ResumeRunPickerScreen(_RunPicker, ModalScreen[object]):
-    """Pick a failed or abandoned research run to resume (ROADMAP_v3 §98).
+    """Pick a failed, abandoned or scouted research run to resume
+    (ROADMAP_v3 §98, §113).
 
     A run this build cannot resume is still listed, with the reason, so a
     person looking for it learns why rather than wondering where it went;
@@ -1277,7 +1278,7 @@ class ResumeRunPickerScreen(_RunPicker, ModalScreen[object]):
 
     BINDINGS = [("escape", "cancel", "Cancel")]
     TITLE_TEXT = "Resume which research run?"
-    EMPTY_TEXT = "No failed or abandoned research run to resume."
+    EMPTY_TEXT = "No failed, abandoned or scouted research run to resume."
 
     def row(self, run: dict) -> str:
         return resume_run_row(run)

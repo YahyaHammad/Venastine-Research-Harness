@@ -6348,6 +6348,7 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     )
 
     unattended_flag, args = _split_unattended(args)
+    scout, args = _split_flag(args, "--scout")
     attended, review, grant_spec, query = _split_research_flags(args)
     resume = _split_resume(query)
     if unattended_flag and attended:
@@ -6355,6 +6356,13 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
             "/research: --attended asks about every gated call and "
             "--unattended asks nothing; choose one.")
         return
+    if scout and resume is not None:
+        app._transcript.write_error(
+            "/research: --scout starts a new run; a resumed run goes on in "
+            "the mode it was started in.")
+        return
+    # ROADMAP_v3 §113 (WT2), read by _start_research as the others are.
+    app._research_scout = scout
     # ROADMAP_v3 §113. An explicit --attended outranks a persisted
     # unattended; otherwise unattended, from wherever, turns asking off.
     unattended = (not attended) and _research_unattended(
@@ -6372,7 +6380,7 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     if not query:
         app._transcript.write_error(
             "Usage: /research [--attended|--unattended] [--review|--no-review] "
-            "[--grant[=a,b]] <query>|--resume [run-id]")
+            "[--grant[=a,b]] [--scout] <query>|--resume [run-id]")
         return
     if app.refuse_if_occupied("start a research run"):
         return
@@ -6518,31 +6526,37 @@ def _modal_wait(timeout, wait_forever: bool):
 #: The leading /research flags, every one: the splitters below walk the
 #: same run of tokens, so a flag written before or after another is found.
 _RESEARCH_FLAGS = ("--attended", "--unattended", "--review", "--no-review",
-                   "--grant", "--grant-tools")
+                   "--grant", "--grant-tools", "--scout")
 
 
-def _split_unattended(args: str):
-    """(unattended, args with it removed) -- ROADMAP_v3 §113.
+def _split_flag(args: str, flag: str):
+    """(present, args with `flag` removed): one bare flag found anywhere in
+    the run of leading /research flags (ROADMAP_v3 §113).
 
-    Its own splitter rather than a fifth value from _split_research_flags,
+    Its own splitter rather than another value from _split_research_flags,
     whose four are a contract the suite pins. It walks the same run of
-    leading flags, so `--grant --unattended q` and `--unattended --grant q`
-    are one request, and `/research what does --unattended do` stays a
-    question about the flag."""
+    leading flags, so `--grant --scout q` and `--scout --grant q` are one
+    request, and `/research what does --scout do` stays a question about
+    the flag."""
     tokens = (args or "").strip().split(" ")
-    kept, unattended = [], False
+    kept, present = [], False
     index = 0
     while index < len(tokens):
         head = tokens[index]
         name = head.split("=", 1)[0]
-        if head == "--unattended":
-            unattended = True
+        if head == flag:
+            present = True
         elif name in _RESEARCH_FLAGS:
             kept.append(head)
         else:
             break
         index += 1
-    return unattended, " ".join(kept + tokens[index:]).strip()
+    return present, " ".join(kept + tokens[index:]).strip()
+
+
+def _split_unattended(args: str):
+    """(unattended, args with it removed) -- ROADMAP_v3 §113 (WT6)."""
+    return _split_flag(args, "--unattended")
 
 
 def _research_unattended(app, flag: bool) -> bool:
@@ -6661,11 +6675,19 @@ def _start_research(app: VenastineApp, query, authorization,
     to resume."""
     app._busy = True
     app._research_run_id = str(resume) if resume is not None else None
+    # ROADMAP_v3 §113 (WT2). getattr, as for unattended below: the picker
+    # path and a stub app in the suite reach here without the command.
+    scout = resume is None and bool(getattr(app, "_research_scout", False))
     if resume is not None:
         app._transcript.write_user(f"/research --resume {resume}")
         app._transcript.write_system(
             "Resuming the run where it stopped; completed passes are not "
             "run again.")
+    elif scout:
+        app._transcript.write_user(f"/research --scout {query}")
+        app._transcript.write_system(
+            "Scouting: Pass 0 and Pass 1, then the list of sources the "
+            "draft could not read.")
     else:
         app._transcript.write_user(f"/research {query}")
         app._transcript.write_system("Running the ten-pass pipeline. This takes a while.")
@@ -6702,6 +6724,7 @@ def _start_research(app: VenastineApp, query, authorization,
                 # sources it could not read, through the same channel.
                 ask=None if unattended else app.response_channel(),
                 unattended=unattended,
+                scout=scout,
                 # §47. The sink, so the ten passes and the reviewer
                 # draw in the panel and can be opened while they run.
                 # `getattr`, matching every other span call site: a

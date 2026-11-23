@@ -11,7 +11,7 @@ Every fixture here is neutral; none echoes a stored run.
 import json
 import os
 import threading
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -49,8 +49,9 @@ class TestTheReason:
         (HTTP_403.format("https://a.example/x"), "refused access (HTTP 403)"),
         ("Could not fetch URL: Client error '401 Unauthorized' for url 'u'",
          "refused access (HTTP 401)"),
+        # WT10: a 404 says the address may be wrong.
         ("Could not fetch URL: Client error '404 Not Found' for url 'u'",
-         "not found (HTTP 404)"),
+         "not found (HTTP 404): the address may be wrong"),
         ("Could not fetch URL: Client error '410 Gone' for url 'u'",
          "gone (HTTP 410)"),
         ("Could not fetch URL: Client error '429 Too Many Requests' for url 'u'",
@@ -835,7 +836,10 @@ class TestAfterTheDraft:
         assert source["reason"] == "timed out"
         assert source["passes"] == ["Pass 1", "Pass 1 retry"]
 
-    def test_a_retry_refused_by_policy_stops_and_the_rest_wait(self, mocker, out):
+    def test_a_retry_refused_by_policy_records_nothing(self, mocker, out):
+        """WT9: the fetches run side by side, so both were sent; a refusal
+        by policy is no failure of the source, and nothing is recorded from
+        it on."""
         from tools.registry import ToolCallDenied, registry
         mocker.patch.object(registry, "dispatch",
                             side_effect=ToolCallDenied("fetch_url is disabled"))
@@ -843,8 +847,10 @@ class TestAfterTheDraft:
         passes = _Passes(_empty_run_payloads(),
                          {"Pass 1": ["https://pub.example/a", "https://pub.example/b"]})
         run = _go(mocker, passes, ask=channel.channel)
-        assert registry.dispatch.call_count == 1
+        assert registry.dispatch.call_count == 2
         assert run.source_asks[0]["obtained"] == []
+        assert [s["passes"] for s in run.wanted_sources["sources"]] == [
+            ["Pass 1"], ["Pass 1"]]
 
     def test_a_retry_skips_what_is_not_a_web_address(self, mocker):
         from core.reasoning import orchestrator
@@ -1476,7 +1482,7 @@ class TestTheWiring:
         point.run.claims = [Claim(id="C1", text="X holds.", type="factual",
                                   entities=["X"])]
         point.run.source_asks = [{"point": "Pass 3a", "asked": True,
-                                  "pending": pending}]
+                                  "citing": ["C1"], "pending": pending}]
         point.done.side_effect = lambda stage, round_no=0: stage in (
             "Pass 0", "Pass 1", "Pass 2", "D0")
         point.trace_length = 0
@@ -1611,3 +1617,907 @@ class TestTheTuiWiring:
 
         assert _review_consent_for(_App()) is None
         assert "none is applied" in _App._transcript.lines[-1]
+
+
+# ===========================================================================
+# ---- Batch 287: the scout (WT2), and WT7-WT10 ------------------------------
+# ===========================================================================
+
+NOT_FOUND = "Could not fetch URL: Client error '404 Not Found' for url '{}'"
+PAPER = "https://pub.example/papers/article-123456"
+RUN_ID = UUID("5fc55fac-1e17-4082-b662-176bfad0e5bc")
+
+
+def _supplied(name, text="Some paper text, long enough.", url=None):
+    return ws.Supplied(name=name, text=text, sha256="", total=len(text),
+                       kind="text", url=url)
+
+
+class TestNotFound:
+    """WT10: a 404 may be an address the model made up, so it says so and
+    the question lists those last."""
+
+    def test_a_404_is_not_found_and_nothing_else_is(self):
+        corpus = SourceCorpus()
+        _fail(corpus, "https://a.example/gone", NOT_FOUND.format("u"))
+        _fail(corpus, "https://a.example/refused")
+        gone, refused = ws.entries(corpus, [])
+        assert gone["reason"] == ws.NOT_FOUND
+        assert ws.not_found(gone) and not ws.not_found(refused)
+        assert not ws.not_found({})
+
+    def test_404s_come_last_under_their_own_heading(self):
+        corpus = SourceCorpus()
+        _fail(corpus, "https://a.example/1", NOT_FOUND.format("u"))
+        _fail(corpus, "https://b.example/2")
+        _fail(corpus, "https://b.example/3", NOT_FOUND.format("u"))
+        _fail(corpus, "https://c.example/4")
+        _fail(corpus, "https://c.example/5")
+        groups = ws.grouped(ws.entries(corpus, []))
+        assert [(h, [s["url"] for s in g]) for h, g in groups] == [
+            ("c.example", ["https://c.example/4", "https://c.example/5"]),
+            ("b.example", ["https://b.example/2"]),
+            (ws.NOT_FOUND_HEADING, ["https://a.example/1",
+                                    "https://b.example/3"])]
+
+    def test_no_404_no_heading_for_them(self):
+        corpus = SourceCorpus()
+        _fail(corpus, "https://b.example/2")
+        assert [h for h, _g in ws.grouped(ws.entries(corpus, []))] == [
+            "b.example"]
+
+    def test_the_question_lists_them_last_without_repeating_why(self):
+        corpus = SourceCorpus()
+        _fail(corpus, "https://a.example/1", NOT_FOUND.format("u"))
+        _fail(corpus, "https://b.example/2")
+        sources = ws.entries(corpus, [_claim("c1", ["https://a.example/1"])])
+        body = ws.question(sources, ws.AFTER_DRAFT, "/f")["body"]
+        assert body.index("b.example (1)") < body.index(
+            "Not found: the address may be wrong (1)")
+        assert "  https://a.example/1; cited by c1" in body.splitlines()
+        assert "  https://b.example/2 -- refused access (HTTP 403)" in \
+            body.splitlines()
+        assert ws.MATCHING in body.splitlines()
+
+    def test_the_report_says_the_address_may_be_wrong(self):
+        corpus = SourceCorpus()
+        _fail(corpus, "https://a.example/1", NOT_FOUND.format("u"))
+        text = ws.section(ws.entries(corpus, [_claim("c1", ["https://a.example/1"])]))
+        assert ("- <https://a.example/1>: not found (HTTP 404): the address "
+                "may be wrong. Cited by c1.") in text
+
+
+class TestWhichAddressAFileStandsFor:
+    """WT8: by identifiers, and never a guess between two."""
+
+    @pytest.mark.parametrize("url, segment, doi, arxiv", [
+        ("https://doi.org/10.1038/s41586-023-06291-2", "s41586-023-06291-2",
+         "10.1038/s41586-023-06291-2", None),
+        ("https://www.frontiersin.org/articles/10.3389/fpsyg.2020.01234/full",
+         "fpsyg.2020.01234", "10.3389/fpsyg.2020.01234", None),
+        ("https://pub.example/doi/pdf/10.1002/anie.202012345.pdf",
+         "anie.202012345", "10.1002/anie.202012345", None),
+        ("https://arxiv.org/pdf/2005.14165v3.pdf", "2005.14165v3", None,
+         "2005.14165"),
+        ("https://pub.example/papers/Deep%20Nets.HTML", "deep nets", None, None),
+        ("https://pub.example/a/1.pdf", None, None, None),
+        ("https://pub.example/view", None, None, None),
+        ("https://pub.example/", None, None, None),
+    ])
+    def test_what_an_address_is_known_by(self, url, segment, doi, arxiv):
+        assert ws.identifiers(url) == {"segment": segment, "doi": doi,
+                                       "arxiv": arxiv}
+
+    def test_an_address_that_cannot_be_read_has_no_part(self):
+        assert ws.identifiers("http://[bad")["segment"] is None
+
+    @pytest.mark.parametrize("name, text", [
+        ("s41586-023-06291-2.pdf", "words of the paper"),
+        ("S41586-023-06291-2 (1).pdf", "words of the paper"),
+        ("10.1038_s41586-023-06291-2.pdf", "words of the paper"),
+        ("paper.pdf", "doi: 10.1038/s41586-\n023-06291-2 and more words"),
+    ])
+    def test_a_file_matches_its_address(self, name, text):
+        url = "https://doi.org/10.1038/s41586-023-06291-2"
+        assert ws.match([_supplied(name, text)], [{"url": url}]) == (
+            {name: url}, {})
+
+    @pytest.mark.parametrize("name, text", [
+        ("2005.14165v2.pdf", "words of the paper"),
+        ("gpt.pdf", "arXiv:2005.14165v1 [cs.CL] and more words"),
+    ])
+    def test_an_arxiv_paper_matches_by_its_id(self, name, text):
+        url = "https://arxiv.org/abs/2005.14165"
+        assert ws.match([_supplied(name, text)], [{"url": url}]) == (
+            {name: url}, {})
+
+    def test_a_doi_in_capitals_matches_the_text_as_printed(self):
+        url = "https://doi.org/10.1002/ANIE.202012345"
+        doc = _supplied("paper.pdf", "doi: 10.1002/anie.202012345 more words")
+        assert ws.match([doc], [{"url": url}]) == ({"paper.pdf": url}, {})
+
+    @pytest.mark.parametrize("name, text", [
+        ("math.GT_0309136.pdf", "words of the paper"),
+        ("paper.pdf", "arXiv:math.GT/0309136 and more words"),
+    ])
+    def test_an_old_arxiv_id_matches_too(self, name, text):
+        url = "https://arxiv.org/abs/math.GT/0309136"
+        assert ws.match([_supplied(name, text)], [{"url": url}]) == (
+            {name: url}, {})
+
+    def test_only_the_first_page_is_read_for_an_identifier(self):
+        url = "https://doi.org/10.1038/s41586-023-06291-2"
+        late = "x" * ws.HEAD_CHARS + " 10.1038/s41586-023-06291-2"
+        assert ws.match([_supplied("paper.pdf", late)], [{"url": url}]) == (
+            {}, {})
+
+    def test_a_file_that_names_nothing_is_read_as_it_is(self):
+        assert ws.match([_supplied("notes.txt")], [{"url": PAPER}]) == ({}, {})
+
+    def test_a_file_that_matches_two_addresses_is_matched_to_neither(self):
+        urls = ["https://doi.org/10.1234/aaaaaa", "https://arxiv.org/abs/2005.14165"]
+        doc = _supplied("paper.pdf", "10.1234/aaaaaa and arXiv:2005.14165")
+        assert ws.match([doc], [{"url": u} for u in urls]) == (
+            {}, {"paper.pdf": urls})
+
+    def test_two_files_for_one_address_are_matched_to_neither(self):
+        url = "https://doi.org/10.1038/s41586-023-06291-2"
+        named = _supplied("s41586-023-06291-2.pdf")
+        holding = _supplied("x.pdf", "10.1038/s41586-023-06291-2 words")
+        assert ws.match([named, holding], [{"url": url}]) == (
+            {}, {"s41586-023-06291-2.pdf": [url], "x.pdf": [url]})
+
+    def test_one_file_matched_beside_another_that_is_not(self):
+        named = _supplied("article-123456.pdf")
+        assert ws.match([named, _supplied("notes.txt")], [{"url": PAPER}]) \
+            == ({"article-123456.pdf": PAPER}, {})
+
+    def test_what_is_not_a_web_address_is_never_matched(self):
+        doc = _supplied("supplied.pdf")
+        assert ws.match([doc], [{"url": "supplied/supplied.pdf"}, {"url": None},
+                                {}]) == ({}, {})
+
+    def test_the_note_and_the_record_say_whose_copy_it_is(self):
+        doc = _supplied("p.pdf", "x" * 10, url=PAPER)
+        assert (f"- p.pdf (10 characters): the user's copy of {PAPER}"
+                in ws.pending_note([doc], [], ""))
+        assert doc.artifact()["stands_for"] == PAPER
+        assert "stands_for" not in _supplied("q.txt").artifact()
+
+
+class TestTheCopyUnderItsAddress:
+
+    def test_a_matched_file_is_held_under_its_address_too(self):
+        corpus = SourceCorpus()
+        assert corpus.add_supplied("p.txt", "the paper's own words",
+                                   url=PAPER) == 2
+        document = corpus.get(PAPER)
+        assert (document.url, document.tool, document.title, document.text) \
+            == (PAPER, "supplied", "p.txt", "the paper's own words")
+        assert corpus.reading(PAPER) == "full"
+        assert corpus.reading("supplied/p.txt") == "full"
+
+    @pytest.mark.parametrize("tool, result", [
+        ("web_search", {"results": [{"url": PAPER, "title": "A title",
+                                     "snippet": "a snippet of the paper"}]}),
+        ("arxiv_search", None),
+    ])
+    def test_it_replaces_a_snippet_or_an_abstract(self, tool, result):
+        corpus = SourceCorpus()
+        url = PAPER
+        if tool == "arxiv_search":
+            url = "https://arxiv.org/abs/2005.14165"
+            result = {"results": [{"arxiv_id": "2005.14165", "title": "A title",
+                                   "summary": "an abstract of the paper"}]}
+        corpus.add(tool, result)
+        corpus.add_supplied("p.txt", "the whole paper, from the user", url=url)
+        assert corpus.text_for(url) == "the whole paper, from the user"
+
+    def test_never_a_page_a_fetch_read(self):
+        corpus = SourceCorpus()
+        corpus.add("fetch_url", {"url": PAPER,
+                                 "content": "the fetched page, in full"})
+        corpus.add_supplied("p.txt", "the user's copy, longer than the page",
+                            url=PAPER)
+        assert corpus.text_for(PAPER) == "the fetched page, in full"
+
+    def test_too_little_text_is_held_nowhere(self):
+        corpus = SourceCorpus()
+        assert corpus.add_supplied("p.txt", "short", url=PAPER) == 0
+        assert corpus.get(PAPER) is None
+
+    def test_no_address_holds_it_once(self):
+        corpus = SourceCorpus()
+        assert corpus.add_supplied("q.txt", "long enough to be held") == 1
+        assert list(corpus.documents) == ["supplied/q.txt"]
+
+    def test_the_document_cap_holds(self, monkeypatch):
+        from core.reasoning import source_corpus
+        monkeypatch.setattr(source_corpus, "MAX_DOCUMENTS", 1)
+        corpus = SourceCorpus()
+        assert corpus.add_supplied("p.txt", "the paper's own words",
+                                   url=PAPER) == 1
+        assert corpus.get(PAPER) is None
+        assert corpus.dropped == 1
+
+
+class TestAMatchedFileInARun:
+
+    def test_after_the_draft_it_stands_for_its_address(self, mocker, out):
+        text = "The paper's own words, in full."
+        channel = _Channel(_supply("article-123456.txt", text))
+        passes = _Passes(_empty_run_payloads(("First.", "Second.")),
+                         {"Pass 1": [PAPER]})
+        run = _go(mocker, passes, ask=channel.channel)
+        second = passes.of("Pass 1")[1]
+        assert (f"- article-123456.txt ({len(text)} characters): the user's "
+                f"copy of {PAPER}") in second["input"]
+        assert second["authorization"].supplied["article-123456.txt"].url == PAPER
+        (record,) = run.source_asks[0]["supplied"]
+        assert record["stands_for"] == PAPER
+        assert "ambiguous" not in run.source_asks[0]
+        assert run.wanted_sources["sources"] == []
+
+    def test_an_ambiguous_file_is_recorded_and_not_matched(self, mocker, out):
+        urls = ["https://doi.org/10.1234/aaaaaa", "https://doi.org/10.1234/bbbbbb"]
+        channel = _Channel(_supply("paper.txt", "10.1234/aaaaaa and 10.1234/bbbbbb"))
+        passes = _Passes(_empty_run_payloads(("First.", "Second.")),
+                         {"Pass 1": urls})
+        run = _go(mocker, passes, ask=channel.channel)
+        entry = run.source_asks[0]
+        assert entry["ambiguous"] == [{"name": "paper.txt", "urls": urls}]
+        assert "stands_for" not in entry["supplied"][0]
+        assert [s["url"] for s in run.wanted_sources["sources"]] == urls
+
+    @pytest.mark.parametrize("name, verified", [
+        ("article-123456.txt", True), ("unrelated.txt", None)])
+    def test_a_claim_citing_the_address_is_checked_against_the_copy(
+            self, mocker, out, name, verified):
+        payloads = _one_claim_payloads(reground=_grounding("C1", PAPER))
+        payloads["Pass 3a"][0] = _grounding("C1", PAPER)
+        channel = _Channel(_supply(name, "the passage, in full"))
+        passes = _Passes(payloads, {"Pass 3a": [PAPER]})
+        run = _go(mocker, passes, ask=channel.channel)
+        (source,) = run.claim_by_id("C1").grounding_sources
+        assert source["url"] == PAPER
+        assert source["quote_verified"] is verified
+
+    def test_a_retry_that_answers_grounds_its_claims_again(self, mocker, out):
+        """The claims to ground again are the ones the question named, kept
+        as it was asked: read after the answer, a source the answer made
+        readable left its claims out, and none was grounded again."""
+        from tools.registry import registry
+        mocker.patch.object(registry, "dispatch", return_value={
+            "url": "https://pub.example/x",
+            "content": "the passage, fetched at last"})
+        channel = _Channel({"choice": interaction.SOURCES_RETRY, "text": ""})
+        passes = _Passes(_one_claim_payloads(
+            reground=_grounding("C1", "https://pub.example/x")),
+            {"Pass 3a": ["https://pub.example/x"]})
+        run = _go(mocker, passes, ask=channel.channel)
+        assert len(passes.of("Pass 3a")) == 2
+        assert run.source_asks[0]["citing"] == ["C1"]
+        (source,) = run.claim_by_id("C1").grounding_sources
+        assert source["quote_verified"] is True
+        assert run.wanted_sources["sources"] == []
+
+    def test_the_draft_names_no_citing_claims(self, mocker, out):
+        channel = _Channel({"choice": interaction.SOURCES_PROCEED})
+        passes = _Passes(_empty_run_payloads(), {"Pass 1": [PAPER]})
+        run = _go(mocker, passes, ask=channel.channel)
+        assert "citing" not in run.source_asks[0]
+
+    def test_a_resume_holds_the_file_under_its_address_again(
+            self, tmp_path, monkeypatch):
+        from core.reasoning import orchestrator
+        monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
+        run = PipelineRun(user_query="q")
+        run.run_id = uuid4()
+        folder = ws.prepare_folder(run.run_id)
+        with open(os.path.join(folder, "article-123456.txt"), "w") as handle:
+            handle.write("the paper's own words")
+        (found,), _ = ws.load_supplied(folder, {})
+        found.url = PAPER
+        run.source_asks = [{"point": "Pass 1", "supplied": [found.artifact()]}]
+        corpus = SourceCorpus()
+        authorization = orchestrator._restore_supplied(run, corpus, None)
+        assert authorization.supplied["article-123456.txt"].url == PAPER
+        assert corpus.text_for(PAPER) == "the paper's own words"
+
+
+class TestTheRetryRunsSideBySide:
+    """WT9: `wanted_sources_retry_parallel` at a time, recorded in order."""
+
+    @staticmethod
+    def _sources(count):
+        return [{"url": f"https://pub.example/{i}"} for i in range(count)]
+
+    @staticmethod
+    def _answer(url):
+        return {"url": url, "content": "Now it answers. " * 4}
+
+    def test_as_many_at_once_as_the_setting_says(self, mocker, monkeypatch):
+        from core.reasoning import orchestrator
+        from tools.registry import registry
+        monkeypatch.setattr(config, "WANTED_SOURCES_RETRY_PARALLEL", 2)
+        lock = threading.Lock()
+        state = {"now": 0, "most": 0}
+        # Two must be in flight at once, or the barrier breaks.
+        barrier = threading.Barrier(2, timeout=10)
+
+        def dispatch(name, params, *a, **k):
+            with lock:
+                state["now"] += 1
+                state["most"] = max(state["most"], state["now"])
+            barrier.wait()
+            with lock:
+                state["now"] -= 1
+            return self._answer(params["url"])
+
+        mocker.patch.object(registry, "dispatch", side_effect=dispatch)
+        obtained = orchestrator._retry_fetches(self._sources(4), SourceCorpus(),
+                                               "Pass 1")
+        assert obtained == [s["url"] for s in self._sources(4)]
+        assert state["most"] == 2
+
+    def test_never_more_threads_than_sources(self, mocker, monkeypatch):
+        from core.reasoning import orchestrator
+        from tools.registry import registry
+        widths = []
+        real = orchestrator.ThreadPoolExecutor
+
+        class _Spy(real):
+            def __init__(self, max_workers=None, **kwargs):
+                widths.append(max_workers)
+                super().__init__(max_workers=max_workers, **kwargs)
+
+        monkeypatch.setattr(orchestrator, "ThreadPoolExecutor", _Spy)
+        monkeypatch.setattr(config, "WANTED_SOURCES_RETRY_PARALLEL", 4)
+        mocker.patch.object(registry, "dispatch", return_value={"error": "x"})
+        orchestrator._retry_fetches(self._sources(2), SourceCorpus(), "Pass 1")
+        orchestrator._retry_fetches(self._sources(6), SourceCorpus(), "Pass 1")
+        assert widths == [2, 4]
+
+    def test_recorded_in_the_listed_order_whatever_order_they_answer_in(
+            self, mocker, monkeypatch):
+        from core.reasoning import orchestrator
+        from tools.registry import registry
+        monkeypatch.setattr(config, "WANTED_SOURCES_RETRY_PARALLEL", 2)
+        second_done = threading.Event()
+        finished = []
+
+        def dispatch(name, params, *a, **k):
+            if params["url"].endswith("/0"):
+                assert second_done.wait(10)
+            finished.append(params["url"])
+            if params["url"].endswith("/1"):
+                second_done.set()
+                return {"error": "Could not fetch URL: The read operation timed out"}
+            return self._answer(params["url"])
+
+        mocker.patch.object(registry, "dispatch", side_effect=dispatch)
+        corpus = SourceCorpus()
+        obtained = orchestrator._retry_fetches(self._sources(3), corpus,
+                                               "Pass 1")
+        assert finished.index("https://pub.example/1") < finished.index(
+            "https://pub.example/0")
+        assert obtained == ["https://pub.example/0", "https://pub.example/2"]
+        assert corpus.failures["https://pub.example/1"]["passes"] == [
+            "Pass 1 retry"]
+
+    def test_each_fetch_runs_in_a_copy_of_the_callers_context(self, mocker):
+        import contextvars
+
+        from core.reasoning import orchestrator
+        from tools.registry import registry
+        probe = contextvars.ContextVar("probe", default="unset")
+        seen = []
+
+        def dispatch(name, params, *a, **k):
+            seen.append(probe.get())
+            return {"error": "x"}
+
+        mocker.patch.object(registry, "dispatch", side_effect=dispatch)
+        token = probe.set("the run's")
+        try:
+            orchestrator._retry_fetches(self._sources(3), SourceCorpus(),
+                                        "Pass 1")
+        finally:
+            probe.reset(token)
+        assert seen == ["the run's"] * 3
+
+    def test_a_fetch_that_raises_is_a_failure_and_the_rest_go_on(self, mocker):
+        from core.reasoning import orchestrator
+        from tools.registry import registry
+
+        def dispatch(name, params, *a, **k):
+            if params["url"].endswith("/0"):
+                raise OSError("reset by peer")
+            return self._answer(params["url"])
+
+        mocker.patch.object(registry, "dispatch", side_effect=dispatch)
+        corpus = SourceCorpus()
+        assert orchestrator._retry_fetches(self._sources(2), corpus,
+                                           "Pass 1") == ["https://pub.example/1"]
+        failure = corpus.failures["https://pub.example/0"]
+        assert (failure["error"], failure["passes"]) == (
+            "Could not fetch URL: reset by peer", ["Pass 1 retry"])
+
+    def test_recording_stops_at_a_refusal_by_policy(self, mocker):
+        from core.reasoning import orchestrator
+        from tools.registry import ToolCallDenied, registry
+
+        def dispatch(name, params, *a, **k):
+            if params["url"].endswith("/1"):
+                raise ToolCallDenied("fetch_url is disabled by policy")
+            return self._answer(params["url"])
+
+        mocker.patch.object(registry, "dispatch", side_effect=dispatch)
+        corpus = SourceCorpus()
+        assert orchestrator._retry_fetches(self._sources(3), corpus,
+                                           "Pass 1") == ["https://pub.example/0"]
+        assert corpus.reading("https://pub.example/2") == "none"
+        assert corpus.failures == {}
+
+    def test_the_setting(self):
+        assert config.WANTED_SOURCES_RETRY_PARALLEL == 4
+
+
+class TestTheCandidatesFetches:
+    """WT7: an ensemble candidate's fetches reach the corpus, as the single
+    draft's do and as a resume replays them."""
+
+    @pytest.fixture
+    def two(self, monkeypatch):
+        monkeypatch.setattr(config, "ENSEMBLE_MODELS", [
+            {"provider_name": "ANTHROPIC", "model": "m1"},
+            {"provider_name": "ANTHROPIC", "model": "m2"}])
+
+    def test_a_candidates_failed_fetch_is_recorded(self, mocker, out, two):
+        passes = _Passes(_empty_run_payloads(("A.", "B.")),
+                         {"Pass 1": ["https://pub.example/a"]})
+        run = _go(mocker, passes, ensemble_mode=True)
+        (source,) = run.wanted_sources["sources"]
+        assert (source["url"], source["passes"]) == ("https://pub.example/a",
+                                                     ["Pass 1"])
+
+    def test_a_candidates_later_answer_clears_it(self, mocker, out, two):
+        url = "https://pub.example/a"
+        passes = _Passes(_empty_run_payloads(("A.", "B.")), {"Pass 1": [url]},
+                         answered={"Pass 1": [(url, url)]})
+        run = _go(mocker, passes, ensemble_mode=True)
+        assert run.wanted_sources["sources"] == []
+
+
+class TestTheScout:
+    """WT2: Pass 0 and Pass 1, then the list; resumed, the rest."""
+
+    def test_a_scout_drafts_and_stops_on_the_list(self, mocker, out):
+        from core.reasoning.pipeline_storage import load_pipeline_run
+        channel = _Channel()
+        passes = _Passes(_empty_run_payloads(), {"Pass 1": [PAPER]})
+        run = _go(mocker, passes, ask=channel.channel, scout=True)
+        assert [c["pass"] for c in passes.calls] == ["Pass 0", "Pass 1"]
+        assert channel.requests == []
+        assert run.scouted is True and run.claims == [] and run.source_asks == []
+        assert run.final_report == ws.scout_report(
+            run.wanted_sources["sources"], ws.folder(run.run_id), run.run_id)
+        assert PAPER in run.final_report
+        assert ws.scout_line(run.wanted_sources["sources"], run.run_id) in run.trace
+        record = load_pipeline_run(run.run_id)
+        assert record["status"] == "scouted"
+        assert record["finished_at"] is not None
+        assert (record["resume"]["stage"], record["resume"]["scout"]) == (
+            "Pass 1", True)
+        assert os.path.isdir(out / str(run.run_id) / "supplied")
+
+    @pytest.mark.parametrize("kwargs", [{}, {"unattended": True}])
+    def test_its_folder_is_made_whoever_can_be_asked(self, mocker, out, kwargs):
+        run = _go(mocker, _Passes(_empty_run_payloads()), scout=True, **kwargs)
+        assert os.path.isdir(out / str(run.run_id) / "supplied")
+        assert "nothing to supply" in run.final_report
+
+    def test_a_folder_that_cannot_be_made_is_still_named(self, mocker, out):
+        mocker.patch.object(ws, "prepare_folder", return_value=None)
+        passes = _Passes(_empty_run_payloads(), {"Pass 1": [PAPER]})
+        run = _go(mocker, passes, scout=True)
+        assert ws.folder(run.run_id) in run.final_report
+
+    def test_a_scout_is_a_new_run(self, mocker):
+        with pytest.raises(ValueError, match="scout starts a new run"):
+            _go(mocker, _Passes({}), scout=True, resume=uuid4())
+
+    def test_a_full_run_is_not_a_scout(self, mocker, out):
+        run = _go(mocker, _Passes(_empty_run_payloads()))
+        assert run.scouted is False
+        assert run.final_report.startswith("REPORT")
+
+
+class TestTheScoutsReport:
+
+    def test_the_list_where_to_put_them_and_how_to_go_on(self):
+        corpus = SourceCorpus()
+        _fail(corpus, "https://b.example/1")
+        _fail(corpus, "https://a.example/2", NOT_FOUND.format("u"))
+        report = ws.scout_report(ws.entries(corpus, []), "/out/r/supplied",
+                                 RUN_ID)
+        lines = report.splitlines()
+        assert lines[0] == ws.SCOUT_HEADING
+        assert "It could not read 2 sources." in lines
+        assert lines.index("**b.example** (1)") < lines.index(
+            f"**{ws.NOT_FOUND_HEADING}** (1)")
+        assert "- <https://b.example/1>: refused access (HTTP 403)" in lines
+        assert "- <https://a.example/2>" in lines
+        assert "    /out/r/supplied" in lines
+        assert ws.MATCHING in lines
+        assert ("Then resume the run: `venastine --resume 5fc55fac`, or "
+                "`/research --resume 5fc55fac` in the TUI.") in report
+        assert report.endswith("follows.\n")
+
+    def test_one_source_is_singular(self):
+        corpus = SourceCorpus()
+        _fail(corpus, "https://b.example/1")
+        assert "It could not read 1 source." in ws.scout_report(
+            ws.entries(corpus, []), "/f", RUN_ID).splitlines()
+
+    def test_nothing_wanted_nothing_to_supply(self):
+        report = ws.scout_report([], "/f", RUN_ID)
+        assert report == (
+            f"{ws.SCOUT_HEADING}\n\nThis run was a scout: it stopped after "
+            "Pass 1, and its draft is in the run's folder beside this "
+            "report.\n\nIt read every source it asked for, so there is "
+            "nothing to supply. Resume the run to finish it: `venastine "
+            "--resume 5fc55fac`, or `/research --resume 5fc55fac` in the "
+            "TUI.\n")
+
+    def test_the_closing_line(self):
+        assert ws.scout_line([{}, {}], RUN_ID) == (
+            "Scout: stopped after Pass 1; the run could not read 2 sources. "
+            "Resume it with --resume 5fc55fac.")
+        assert "could not read 1 source." in ws.scout_line([{}], RUN_ID)
+
+    @pytest.mark.parametrize("wanted, written", [
+        ({"sources": [{"url": "u"}], "asks": [], "supplied": []}, True),
+        ({"sources": [], "asks": [], "supplied": []}, False)])
+    def test_a_scout_writes_what_it_has(self, tmp_path, monkeypatch, wanted,
+                                        written):
+        from core.reasoning.output_writer import write_run_artifacts
+        monkeypatch.setattr(config, "OUTPUT_DIR", str(tmp_path))
+        run = PipelineRun(user_query="q")
+        run.run_id = uuid4()
+        run.scouted = True
+        run.raw_response = "The draft."
+        run.final_report = "THE LIST"
+        run.wanted_sources = wanted
+        run.trace = ["a line"]
+        folder = write_run_artifacts(run)
+        expected = {"00_plan.md", "01_raw_response.md", "code",
+                    "pass_threads.json", "report.md", "sources", "trace.md"}
+        if written:
+            expected.add(ws.FILENAME)
+        assert set(os.listdir(folder)) == expected
+        with open(os.path.join(folder, "report.md"), encoding="utf-8") as handle:
+            assert handle.read() == "THE LIST"
+        with open(os.path.join(folder, "trace.md"), encoding="utf-8") as handle:
+            assert handle.read() == "- a line"
+
+    def test_every_shell_shows_a_scouts_list(self, monkeypatch):
+        from core.reasoning import annotated_draft
+        monkeypatch.setattr(config, "REPORT_STYLE", annotated_draft.DRAFT_FIRST)
+        run = PipelineRun(user_query="q")
+        run.final_report = "THE LIST"
+        run.scouted = True
+        assert annotated_draft.shown_report(run) == "THE LIST"
+
+
+class TestResumingAScout:
+
+    def _point(self, mocker, done=("Pass 0", "Pass 1"), wanted=True):
+        from core.reasoning import orchestrator
+        point = mocker.MagicMock()
+        point.run = PipelineRun(user_query="q")
+        point.run.run_id = uuid4()
+        point.run.raw_response = "The draft."
+        point.scout = True
+        point.done.side_effect = lambda stage, round_no=0: stage in done
+        point.trace_length = 0
+        point.effective_n = 0
+        point.pass1_threads = []
+        point.notes = []
+        point.take_thread.return_value = None
+        mocker.patch("core.reasoning.resume.prepare", return_value=point)
+
+        def rebuild(corpus, threads):
+            if wanted:
+                _fail(corpus, PAPER)
+            return (1, 0)
+
+        mocker.patch("core.reasoning.resume.rebuild_corpus", side_effect=rebuild)
+        mocker.patch("core.reasoning.resume.describe", return_value="Resuming.")
+        mocker.patch.object(orchestrator, "reopen_pipeline_run")
+        mocker.patch.object(orchestrator, "update_pipeline_run")
+        saved = []
+        mocker.patch.object(orchestrator, "_save_resume_point",
+                            side_effect=lambda run_id, p: saved.append(p))
+        return point, saved
+
+    @staticmethod
+    def _put(point, name, text="The paper's own words, in full."):
+        folder = ws.folder(point.run.run_id)
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, name), "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def test_it_asks_with_what_was_put_there_and_goes_on(self, mocker, out):
+        point, saved = self._point(mocker)
+        channel = _Channel(_supply("article-123456.txt", "The paper, in full."))
+        passes = _Passes(_empty_run_payloads(("Second.",)))
+        run = _go(mocker, passes, ask=channel.channel, resume=uuid4())
+        (request,) = channel.requests
+        assert request.payload["point"] == ws.AFTER_DRAFT
+        order = [c["pass"] for c in passes.calls]
+        assert order[0] == "Pass 1" and "Pass 0" not in order
+        assert "Pass 2" in order and order[-1] == "Final synthesis"
+        assert f"the user's copy of {PAPER}" in passes.of("Pass 1")[0]["input"]
+        assert run.scouted is False and run.raw_response == "Second."
+        assert run.final_report.startswith("REPORT")
+        asked = [p for p in saved if p.get("source_asks")]
+        assert asked[0]["stage"] == "Pass 0"
+        assert all(p["scout"] is False for p in saved)
+
+    def test_told_to_proceed_it_keeps_its_draft(self, mocker, out):
+        point, saved = self._point(mocker)
+        channel = _Channel({"choice": interaction.SOURCES_PROCEED})
+        passes = _Passes(_empty_run_payloads(()))
+        run = _go(mocker, passes, ask=channel.channel, resume=uuid4())
+        assert passes.of("Pass 1") == []
+        assert run.raw_response == "The draft."
+        asked = [p for p in saved if p.get("source_asks")]
+        assert asked[0]["stage"] == "Pass 1"
+
+    @pytest.mark.parametrize("kwargs, why", [
+        ({}, "nobody can be asked"), ({"unattended": True}, "the run is unattended")])
+    def test_with_nobody_to_ask_it_reads_the_folder_anyway(self, mocker, out,
+                                                           kwargs, why):
+        point, saved = self._point(mocker)
+        self._put(point, "notes.txt")
+        passes = _Passes(_empty_run_payloads(("Second.",)))
+        run = _go(mocker, passes, resume=uuid4(), **kwargs)
+        (call,) = passes.of("Pass 1")
+        assert "- notes.txt (" in call["input"]
+        entry = run.source_asks[0]
+        assert (entry["asked"], entry["answer"], entry["why"]) == (
+            False, interaction.SOURCES_SUPPLIED, why)
+        assert any("so the scout's supplied/ folder is read as the answer"
+                   in line for line in run.trace)
+
+    def test_no_folder_nothing_to_read_and_nothing_asked(self, mocker, out):
+        point, saved = self._point(mocker)
+        mocker.patch.object(ws, "prepare_folder", return_value=None)
+        passes = _Passes(_empty_run_payloads(()))
+        run = _go(mocker, passes, resume=uuid4())
+        entry = run.source_asks[0]
+        assert (entry["asked"], entry["why"]) == (False, "nobody can be asked")
+        assert "answer" not in entry
+        assert passes.of("Pass 1") == []
+
+    def test_an_empty_folder_brings_nothing(self, mocker, out):
+        point, saved = self._point(mocker)
+        passes = _Passes(_empty_run_payloads(()))
+        run = _go(mocker, passes, resume=uuid4())
+        assert passes.of("Pass 1") == []
+        assert run.source_asks[0]["pending"] == ""
+
+    def test_one_that_wanted_nothing_still_reads_what_was_put_there(
+            self, mocker, out):
+        point, saved = self._point(mocker, wanted=False)
+        self._put(point, "extra.txt")
+        channel = _Channel()
+        passes = _Passes(_empty_run_payloads(("Second.",)))
+        run = _go(mocker, passes, ask=channel.channel, resume=uuid4())
+        assert channel.requests == []
+        (call,) = passes.of("Pass 1")
+        assert "- extra.txt (" in call["input"]
+        assert run.source_asks[0]["why"] == "the draft wanted nothing"
+
+    def test_a_full_run_that_wanted_nothing_reads_nothing(self, mocker, out):
+        """The control: only a scout's resume reads the folder unasked."""
+        real = ws.prepare_folder
+
+        def prepare(run_id):
+            path = real(run_id)
+            with open(os.path.join(path, "extra.txt"), "w") as handle:
+                handle.write("words the run never asked for")
+            return path
+
+        mocker.patch.object(ws, "prepare_folder", side_effect=prepare)
+        passes = _Passes(_empty_run_payloads())
+        run = _go(mocker, passes, ask=_Channel().channel)
+        assert run.source_asks == []
+        assert "extra.txt" not in passes.of("Pass 1")[0]["input"]
+
+    def test_one_stopped_before_its_draft_goes_on_as_a_scout(self, mocker, out):
+        from core.reasoning import orchestrator
+        point, saved = self._point(mocker, done=("Pass 0",))
+        passes = _Passes(_empty_run_payloads(("Draft.",)))
+        run = _go(mocker, passes, ask=_Channel().channel, resume=uuid4())
+        assert [c["pass"] for c in passes.calls] == ["Pass 1"]
+        assert run.scouted is True
+        assert saved[-1]["stage"] == "Pass 1" and saved[-1]["scout"] is True
+        assert orchestrator.update_pipeline_run.call_args.kwargs["status"] == \
+            "scouted"
+
+    @pytest.mark.parametrize("flag", [False, "a stand-in"])
+    def test_a_point_that_is_not_a_scout_resumes_as_before(self, mocker, out,
+                                                           flag):
+        """Only a flag that IS True: a stand-in attribute is truthy, and a
+        point the suite builds from a MagicMock carries one."""
+        point, saved = self._point(mocker)
+        point.scout = False if flag is False else mocker.MagicMock()
+        channel = _Channel()
+        passes = _Passes(_empty_run_payloads(()))
+        run = _go(mocker, passes, ask=channel.channel, resume=uuid4())
+        assert channel.requests == [] and passes.of("Pass 1") == []
+        assert run.source_asks == []
+
+
+class TestTheScoutsResumePoint:
+
+    def test_the_point_says_whether_the_run_is_a_scout(self):
+        from core.reasoning import resume
+        run = PipelineRun(user_query="q")
+        assert resume.snapshot(run, "Pass 1", scout=True)["scout"] is True
+        assert resume.snapshot(run, "Pass 1")["scout"] is False
+
+    @pytest.mark.parametrize("value, expected", [
+        (True, True), ("yes", False), (1, False), (None, False)])
+    def test_read_back_only_when_it_is_true(self, value, expected):
+        from core.reasoning import resume
+        point = resume.snapshot(PipelineRun(user_query="q"), "Pass 0")
+        if value is None:
+            del point["scout"]
+        else:
+            point["scout"] = value
+        record = {"user_query": "q", "id": uuid4(), "trace": [],
+                  "pass_threads": []}
+        assert resume._from_point(record, point).scout is expected
+
+    def test_scouted_is_a_status_a_resume_is_offered_for(self):
+        from core.reasoning.pipeline_storage import RESUMABLE_STATUSES, SCOUTED
+        assert SCOUTED == "scouted" and SCOUTED in RESUMABLE_STATUSES
+
+    def test_the_listing_says_a_scout_resumes_with_what_you_supplied(
+            self, mocker):
+        from core.reasoning import resume
+
+        def row(status):
+            return {"id": uuid4(), "user_query": "q", "status": status,
+                    "started_at": None, "trace": [],
+                    "resume": {"stage": "Pass 1"}}
+
+        mocker.patch.object(resume, "list_resumable_runs",
+                            return_value=[row("scouted"), row("failed")])
+        scouted, failed = resume.resumable_runs()
+        assert scouted["stage"] == "after Pass 1 with what you supplied"
+        assert failed["stage"] == "after Pass 1"
+
+    def test_a_finished_run_is_refused_in_words_that_name_the_scout(
+            self, mocker):
+        from core.reasoning import resume
+        mocker.patch.object(resume, "load_pipeline_run",
+                            return_value={"status": "complete"})
+        with pytest.raises(resume.ResumeRefused,
+                           match="only a failed, abandoned or scouted run"):
+            resume.prepare(uuid4())
+
+
+class TestTheScoutInEachShell:
+
+    def test_the_cli_flag(self):
+        import main
+        parser = main.build_parser()
+        assert parser.parse_args(["--mode", "research", "--scout", "q"]).scout
+        assert parser.parse_args(["--mode", "research", "q"]).scout is False
+
+    def test_the_cli_hands_the_pipeline_scout_and_says_so(self, mocker, capsys):
+        import main
+        seen = {}
+
+        def pipeline(**kwargs):
+            seen.update(kwargs)
+            raise RuntimeError("stop here")
+            yield  # unreachable: it makes this a generator
+
+        mocker.patch("core.reasoning.orchestrator.stream_deep_research_pipeline",
+                     side_effect=pipeline)
+        with pytest.raises(SystemExit):
+            main.run_research("q", "ANTHROPIC", "m", scout=True)
+        assert seen.get("scout") is True
+        assert "Scouting: Pass 0 and Pass 1 on 'q'" in capsys.readouterr().out
+
+    def test_the_cli_listing_shows_a_scouted_run(self):
+        import main
+        lines = main.resume_list_lines([
+            {"id": RUN_ID, "user_query": "q", "status": "scouted",
+             "started_at": None, "stage": "after Pass 1 with what you supplied",
+             "note": None}])
+        assert any(line.startswith("  5fc55fac") and line.endswith(
+            "scouted  resumes after Pass 1 with what you supplied")
+            for line in lines)
+
+    @pytest.mark.parametrize("text, expected", [
+        ("--scout q", (True, "q")),
+        ("--attended --scout --grant=a q", (True, "--attended --grant=a q")),
+        ("--unattended q", (False, "--unattended q")),
+        ("what does --scout do", (False, "what does --scout do")),
+    ])
+    def test_the_tui_splitter(self, text, expected):
+        from tui.app import _split_flag
+        assert _split_flag(text, "--scout") == expected
+
+    def test_a_flag_after_scout_is_still_found(self):
+        from tui.app import _split_unattended
+        assert _split_unattended("--scout --unattended q") == (True, "--scout q")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("command, scout", [
+        ("--scout q", True), ("--grant --scout q", True), ("q", False)])
+    async def test_the_tui_hands_the_pipeline_scout(self, mocker, command,
+                                                    scout):
+        from tests.conftest import settle
+        from tui.app import VenastineApp, _cmd_research
+        mocker.patch("core.reasoning.authorization.candidates", return_value=[])
+        captured = {}
+
+        def pipeline(**kw):
+            captured.update(kw)
+            yield from ()
+
+        mocker.patch("core.reasoning.orchestrator.stream_deep_research_pipeline",
+                     side_effect=pipeline)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            _cmd_research(app, command)
+            assert await settle(pilot, lambda: "scout" in captured)
+            text = "\n".join(t for _r, t in app._transcript._entries)
+        assert (captured["scout"], captured["user_query"]) == (scout, "q")
+        assert ("Scouting: Pass 0 and Pass 1" in text) is scout
+
+    @pytest.mark.asyncio
+    async def test_the_tui_refuses_a_scout_that_resumes(self, mocker):
+        from tui.app import VenastineApp, _cmd_research
+        start = mocker.patch("tui.app._start_research")
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            _cmd_research(app, "--scout --resume 5fc55fac")
+            text = "\n".join(t for _r, t in app._transcript._entries)
+        start.assert_not_called()
+        assert "--scout starts a new run" in text
+
+    @pytest.mark.asyncio
+    async def test_a_tui_resume_is_never_a_scout(self, mocker):
+        from tests.conftest import settle
+        from tui.app import VenastineApp, _start_research
+        captured = {}
+
+        def pipeline(**kw):
+            captured.update(kw)
+            yield from ()
+
+        mocker.patch("core.reasoning.orchestrator.stream_deep_research_pipeline",
+                     side_effect=pipeline)
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test() as pilot:
+            app._research_scout = True
+            _start_research(app, None, None, resume=RUN_ID)
+            assert await settle(pilot, lambda: "scout" in captured)
+        assert captured["scout"] is False
+
+    @pytest.mark.asyncio
+    async def test_the_tui_usage_names_the_flag(self):
+        from tui.app import VenastineApp, _cmd_research
+        app = VenastineApp("ANTHROPIC", "test-model", {})
+        async with app.run_test():
+            _cmd_research(app, "")
+            text = "\n".join(t for _r, t in app._transcript._entries)
+        assert "[--scout] <query>" in text

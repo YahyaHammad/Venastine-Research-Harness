@@ -33544,3 +33544,88 @@ that produces (BREAKING_CHANGES lists each).
 - The hosted demo shows the question and has no way to supply a file.
 - WT2 (`--scout`) and WT4 (Zotero) stay proposals.
 - The wiki does not describe any of it yet.
+
+## Batch 287 -- the scout, and what batch 286 left in its gap register (ROADMAP_v3 §113, WT2, WT7, WT8, WT9, WT10) (2026-11-23)
+
+**Asked.** Continue with more of §113's open items. The owner chose WT2 (`--scout`) and the run-side
+entries of batch 286's gap register; WT4 (Zotero through MCP) and the wiki were left for later.
+
+**Checked first.**
+- **Most of what a run could not read, it failed to read in Pass 1.** On the owner's largest stored
+  run, 97 of the 111 addresses never obtained had failed by the end of Pass 1 (batch 286's
+  measurement), so a run that stops there sees most of what it will want.
+- **A resume already picks a run up at a stage** (§98), and batch 286's question after Pass 1 already
+  reads the run's folder and redrafts. A scout is the first half of a run, with its question left for
+  the resume.
+- **A live ensemble run and its own resume read different corpora.** `_run_pass` was not handed the
+  corpus for a candidate, while `resume.rebuild_corpus` replays every recorded thread, a candidate's
+  included.
+- **`fetch_url` already runs on several threads at once** inside spawned subagents; the body cache and
+  the network meter each hold a lock. The loop's parallel calls run each in `copy_context()`, and the
+  retry needs the same, or a fetch would run outside the run's context.
+
+**Settled with the owner.** Two rounds. WT2 and the run-side gap fixes over WT4 and the wiki. The scout
+run is resumed, not rerun. On a resume with nobody to ask, the folder's files are the answer. A
+supplied file is matched by identifiers, not by a name the question suggests. The retry's width is a
+config key, `wanted_sources_retry_parallel` (4). A 404 is separated, listed last under "Not found:
+the address may be wrong".
+
+**Built.**
+- **WT2.** `--scout` (CLI) and `/research --scout` (TUI) run Pass 0 and Pass 1 and stop, asking
+  nothing, with the folder made whoever can be asked. The run ends `scouted` (resumable, with
+  `finished_at`), its resume point at Pass 1 carrying `scout: true`, and its report is the list:
+  grouped as the question groups it, the folder, and the resuming command in both shells' spellings.
+  It writes the plan, the draft, `wanted_sources.json`, `pass_threads.json`, `trace.md` and that
+  report, and no claim files. Resumed, the run enters Pass 1's loop at its second attempt: the
+  question now opens that attempt, so the draft is written again only when the answer brings
+  something. With nobody to ask there, the folder is read as the answer, even when the draft wanted
+  nothing; a scout stopped before its draft finished goes on as one. Refused with `--resume`.
+- **WT7.** Each ensemble candidate's pass gets the corpus.
+- **WT8.** `identifiers` and `match`: the address's last part that names the work, its DOI, its arXiv
+  id, against the file's name and the first 5,000 characters of its text. A file that matches two
+  addresses, or two files that match one, are matched to nothing and recorded as ambiguous. A matched
+  file is held under its address too (`add_supplied(url=)`), replacing a snippet or an abstract and
+  never a fetched page; the note says whose copy it is, the record says `stands_for`, and a resume
+  restores it.
+- **WT9.** `_retry_fetches` fetches in a pool of `wanted_sources_retry_parallel` threads, each in a
+  copy of the run's context, and records the results in the listed order on the run's thread.
+- **WT10.** A 404 reads "not found (HTTP 404): the address may be wrong", listed last.
+
+**Found and fixed: after Pass 3a, the claims to ground again were read after the answer.** Batch 286
+chose them as the claims citing a source still wanted once the answer was in. An answer that made a
+source readable -- a retry that answered, or now a file matched to its address -- therefore left its
+claims out, and none was grounded again. WT8's whole-run test found it: `quote_verified` stayed `None`
+on a claim whose copy the run held. The claims the question lists are now recorded as it is asked
+(`citing`, saved in the resume point), and those are the claims grounded again. Batch 286 is not
+pushed, so no released build has the defect.
+
+**Changed in the tests.** The 404 row of the reason table; the policy-refused retry test, renamed
+because both fetches are now sent; the resumed re-grounding's stand-in answer, which carries `citing`;
+`--scout` in the flag census and the chat refusal; the e2e call's `scout=False`; the resume listing's
+empty line; and the settable-scalar count, 175. `tests/BREAKING_CHANGES.md` lists each.
+
+**Verified.**
+- Full suite on Windows with `AGENT_WORKSPACE` unset, run on a clean checkout of the commit: 10650
+  passed, 89 skipped (10739), in 2:06. The 89th skip is the link test, which needs privilege on
+  Windows; the one warning is the duplicate name in the hostile archive.
+- 110 deliberate breaks of this batch's code, one per line that carries a decision, were each killed
+  by a failed assertion. The first run left one alive: a resume point whose `scout` is merely truthy,
+  which only the suite's stand-in points produce, was not pinned; a test now is. That test's first
+  form failed for its own reason (the stand-in helper had set the flag to True), so its kill was the
+  false red the harness warns about; the clean-checkout run caught it, and the mutant was run again
+  against a green baseline and killed. Writing the list
+  first found four gaps the tests then covered (a DOI in capitals, an old-style arXiv id, a flag
+  written after `--scout`, a scout resumed with no folder) and one dead call: a scout wrote the
+  `sources/` index, which lists the pages claims cite, before any claim existed.
+- ruff is clean. bandit finds nothing outside the baseline, and
+  `scripts/bandit-count-check.py` reports that no count grew. gitleaks 8.30.1 finds no leaks in an export of the tree. pip-audit finds
+  nothing in either requirements file.
+- No workflow or requirements file is in the diff.
+
+**Not done** (§113's gap register):
+- A file named otherwise, with no DOI or arXiv id on its first page, is not matched.
+- A scout knows only what the draft fetched; what grounding wants is asked on the resume.
+- A scout's report is replaced when its resume finishes.
+- The hosted demo cannot be given files, so a scout there has nothing to resume with.
+- A 404 is still wanted; nothing tells a moved paper from a made-up address.
+- WT4 (Zotero) stays a proposal. The wiki does not describe §113 yet.

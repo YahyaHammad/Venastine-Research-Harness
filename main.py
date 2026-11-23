@@ -2293,7 +2293,7 @@ def run_resume_list() -> int:
 def resume_list_lines(runs) -> list:
     """The listing `run_resume_list` prints, as lines a test can read."""
     if not runs:
-        return ["No failed or abandoned research run to resume."]
+        return ["No failed, abandoned or scouted research run to resume."]
     lines = ["Research runs that can be resumed, newest first:"]
     for row in runs:
         status = ("stopped, or still running elsewhere"
@@ -2630,6 +2630,7 @@ def run_research(
     resume=None,
     ask=None,
     unattended: bool = False,
+    scout: bool = False,
 ) -> None:
     """Run the full deep-research pipeline, write artifacts to disk,
     and print the results. ensemble_mode/ensemble_n come from
@@ -2654,7 +2655,10 @@ def run_research(
     resume (ROADMAP_v3 §98) is a run id, or the start of one, to pick up
     instead of starting `query`. A run that fails, this time or that one,
     ends with the command that resumes it, because the id is otherwise
-    printed only by a run that completed."""
+    printed only by a run that completed.
+
+    scout (ROADMAP_v3 §113, WT2) runs Pass 0 and Pass 1 only and prints, as
+    its report, what the draft could not read and how to resume it."""
     from core.reasoning.annotated_draft import shown_report
     from core.reasoning.orchestrator import stream_deep_research_pipeline
     from core.reasoning.output_writer import write_run_artifacts
@@ -2669,6 +2673,9 @@ def run_research(
                   f"{ansi.for_display(e)}.")
             raise SystemExit(1) from None
         print(f"Resuming research run {run_id}")
+    elif scout:
+        print(f"Scouting: Pass 0 and Pass 1 on {query!r}, then the list of "
+              f"sources the draft could not read")
     else:
         print(f"Running deep-research pipeline on: {query!r}")
     print(f"Provider: {provider_name} | Model: {model} | "
@@ -2684,7 +2691,7 @@ def run_research(
             ensemble_mode=ensemble_mode, ensemble_n=ensemble_n,
             authorization=authorization, review=review,
             subagent_review=subagent_review, effort=effort,
-            resume=run_id, ask=ask, unattended=unattended,
+            resume=run_id, ask=ask, unattended=unattended, scout=scout,
         ):
             # §26: tool calls and code stages print here too. The CLI is
             # the shell an unattended run is launched from, so a
@@ -2928,6 +2935,17 @@ def build_parser() -> argparse.ArgumentParser:
              "hidden, review findings are recorded and not applied, and "
              "the questions about sources it could not read are skipped. "
              "Not with --attended.",
+    )
+    # ROADMAP_v3 §113 (WT2). A new run's mode, so not with --resume: a
+    # scout's resume is the rest of the run.
+    parser.add_argument(
+        "--scout",
+        dest="scout",
+        action="store_true",
+        help="Research mode: run Pass 0 and Pass 1 only, and end on the "
+             "list of sources the draft could not read, with the folder to "
+             "put them in. Resume the run with --resume when you have them. "
+             "Not with --resume.",
     )
     # §20 (D9). Same None-default precedence as --attended, and for the
     # same reason: the MODE is persistable, so settings.json can turn the
@@ -3854,9 +3872,12 @@ def main(argv=None) -> int:
     if args.attended and args.unattended:
         parser.error("--attended asks about every gated call and "
                      "--unattended asks nothing; choose one.")
+    if args.scout and args.resume is not None:
+        parser.error("--scout starts a new run; a resumed run goes on in "
+                     "the mode it was started in.")
     if (args.grant_tools is not None or args.attended is not None
             or args.review is not None or args.unattended is not None
-            ) and args.mode != "research":
+            or args.scout) and args.mode != "research":
         # Chat is interactive by definition, so a pre-flight grant there
         # would be authorising up front what is about to be asked anyway --
         # and silently widening chat is not what a flag documented for
@@ -4006,6 +4027,7 @@ def main(argv=None) -> int:
                 # ROADMAP_v3 §113 (WT5).
                 ask=None if unattended else build_sources_channel(),
                 unattended=unattended,
+                scout=args.scout,
             )
         else:
             thread_id = args.thread

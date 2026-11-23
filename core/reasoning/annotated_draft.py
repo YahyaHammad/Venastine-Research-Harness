@@ -455,8 +455,10 @@ def shown_report(run) -> str:
 
     A draft that cannot be rendered degrades to the synthesis with a
     warning (#81): a finished run must not lose its report over the
-    artifact built beside it."""
-    if getattr(config, "REPORT_STYLE", "synthesis") != DRAFT_FIRST:
+    artifact built beside it. A scout's report is its list of what the
+    draft could not read (ROADMAP_v3 §113, WT2), whatever the style."""
+    if (getattr(config, "REPORT_STYLE", "synthesis") != DRAFT_FIRST
+            or getattr(run, "scouted", False)):
         return run.final_report or ""
     try:
         return render(run, DRAFT_FIRST)

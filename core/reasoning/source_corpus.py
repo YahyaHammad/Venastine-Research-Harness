@@ -53,7 +53,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
 
@@ -463,11 +463,30 @@ class SourceCorpus:
             self.resolved.add(key)
 
     def add_supplied(self, name: str, text: str,
-                     retrieved_at: str | None = None) -> int:
+                     retrieved_at: str | None = None,
+                     url: str | None = None) -> int:
         """A file the user supplied (§113, WT3), under `supplied/<name>`.
-        Redacted and bounded like every other document."""
-        return self._store(url=f"supplied/{name}", text=text, title=name,
-                           tool="supplied", retrieved_at=retrieved_at)
+        Redacted and bounded like every other document.
+
+        `url` is the address the file was matched to (WT8): the same text is
+        held under it too, so a claim citing that address is checked against
+        the user's copy, replacing a search snippet or an abstract but never
+        a page a fetch read."""
+        added = self._store(url=f"supplied/{name}", text=text, title=name,
+                            tool="supplied", retrieved_at=retrieved_at)
+        held = self.documents.get(normalize_url(f"supplied/{name}"))
+        key = normalize_url(url) if isinstance(url, str) else ""
+        if held is None or not key:
+            return added
+        current = self.documents.get(key)
+        if current is not None and current.tool not in (
+                "web_search", "arxiv_search"):
+            return added
+        if current is None and len(self.documents) >= MAX_DOCUMENTS:
+            self.dropped += 1
+            return added
+        self.documents[key] = replace(held, url=key)
+        return added + 1
 
     def reading(self, url: str) -> str:
         """How much of `url` this run read: "full", "snippet" (a search

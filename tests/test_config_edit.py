@@ -325,8 +325,9 @@ class TestTheRoundTripIsLossless:
         # §102, MW2). 170 since batch 285: `report_style` (ROADMAP_v3
         # §110, AD2). 174 since batch 286: ROADMAP_v3 §113's
         # `wanted_sources_wait_s` and `research_unattended`, and
-        # read_source's row in each tool table.
-        assert touched == 174, f"{touched} settable scalars, expected 174"
+        # read_source's row in each tool table. 175 since batch 287:
+        # `wanted_sources_retry_parallel` (§113, WT9).
+        assert touched == 175, f"{touched} settable scalars, expected 175"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,

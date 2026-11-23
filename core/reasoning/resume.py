@@ -50,6 +50,7 @@ from core.reasoning.base import Claim, PipelineRun
 from core.reasoning.json_retry import parse_json_response
 from core.reasoning.pipeline_storage import (
     RESUMABLE_STATUSES,
+    SCOUTED,
     list_pipeline_runs,
     list_resumable_runs,
     load_pipeline_run,
@@ -157,6 +158,9 @@ class ResumePoint:
     legacy: bool = False
     trace_length: int = 0
     notes: list = field(default_factory=list)
+    # ROADMAP_v3 §113 (WT2): the run is a scout. Stopped before the end of
+    # Pass 1, it goes on as one; stopped after it, its resume is the rest.
+    scout: bool = False
 
     def done(self, stage: str, round_no: int = 0) -> bool:
         """Whether `stage` (of `round_no`, for a loop stage) completed
@@ -173,7 +177,8 @@ class ResumePoint:
 
 
 def snapshot(run: PipelineRun, stage: str, *, round_no: int = 0,
-             flagged=(), effective_n: int = 0, pass1_threads=()) -> dict:
+             flagged=(), effective_n: int = 0, pass1_threads=(),
+             scout: bool = False) -> dict:
     """The resume point the orchestrator saves at the end of `stage`
     (RS2). Everything a later stage reads that is not already in a
     column, plus the claims themselves: claims_json is also written on the
@@ -195,6 +200,8 @@ def snapshot(run: PipelineRun, stage: str, *, round_no: int = 0,
         "pass1_threads": [t for t in pass1_threads],
         # ROADMAP_v3 §113 (WT5): each point asks once, a resume included.
         "source_asks": list(run.source_asks),
+        # §113 (WT2). Absent from a point an older build wrote: not a scout.
+        "scout": scout,
     }
 
 
@@ -397,7 +404,8 @@ def _from_point(record: dict, point: dict) -> ResumePoint:
         # Several are an ensemble Pass 1 that stopped part way; its
         # candidates run again rather than this guessing which to continue.
         pending=after[0] if len(after) == 1 else None,
-        trace_length=len(run.trace))
+        trace_length=len(run.trace),
+        scout=point.get("scout") is True)
     by_id = {c.id: c for c in run.claims}
     resume.flagged = [by_id[i] for i in point.get("flagged") or () if i in by_id]
     _restore_pass1(resume, record)
@@ -497,8 +505,8 @@ def prepare(run_id) -> ResumePoint:
         raise ResumeRefused(f"there is no research run with id {uid}") from e
     if record["status"] not in RESUMABLE_STATUSES:
         raise ResumeRefused(
-            f"run {uid} is {record['status']}; only a failed or abandoned "
-            f"run can be resumed")
+            f"run {uid} is {record['status']}; only a failed, abandoned or "
+            f"scouted run can be resumed")
     point = record.get("resume") or {}
     if point:
         return _from_point(record, point)
@@ -531,12 +539,15 @@ def resumable_runs(limit: int = 50) -> list:
         else:
             stage, note = legacy_stage(record.get("trace"))
             round_no = 0
+        where = None if note else describe_stage(stage, round_no)
+        if where and record["status"] == SCOUTED:
+            where += " with what you supplied"
         rows.append({
             "id": record["id"],
             "user_query": record["user_query"],
             "status": record["status"],
             "started_at": record["started_at"],
-            "stage": None if note else describe_stage(stage, round_no),
+            "stage": where,
             "note": note,
         })
     return rows

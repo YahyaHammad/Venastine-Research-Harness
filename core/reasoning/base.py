@@ -229,6 +229,9 @@ class PipelineRun:
     # record wanted_sources.json holds (WT1), built at the end of the run.
     source_asks: list = field(default_factory=list)
     wanted_sources: dict = field(default_factory=dict)
+    # ROADMAP_v3 §113 (WT2): a scout that stopped after Pass 1 on that
+    # record. Its report is the list, and it ends 'scouted', to be resumed.
+    scouted: bool = False
     final_report: str = ""
     # ROADMAP_v3 §108 (PW5): the run's calls, tokens and wall time, by pass
     # and then by model -- `usage_view.RunUsage.to_dict`'s form, refreshed
