@@ -78,10 +78,10 @@ import logging
 import time
 
 import config
-from core import pipeline_models, usage_view
+from core import interaction, pipeline_models, usage_view
 from core.config_loader import effective_confidence, effective_source_scoring
 from core.loop import RunAgentLoop
-from core.reasoning import thin_evidence
+from core.reasoning import thin_evidence, wanted_sources
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
 from core.reasoning.confidence_scoring import (
     FLAGGED_TIERS,
@@ -421,6 +421,7 @@ def _translate(pass_id: str, stream, corpus=None, streamed=None):
     page nobody kept. None, the default, collects nothing: that is every
     caller that predates §45 and every test double."""
     names: dict = {}          # tool_call id -> name, since tool_result has none
+    inputs: dict = {}         # tool_call id -> input, for a failure's URL (§113)
     total = streamed if streamed is not None else _Streamed()
     while True:
         # next() rather than `for event in stream`, because a for loop
@@ -459,6 +460,9 @@ def _translate(pass_id: str, stream, corpus=None, streamed=None):
         if event.tool_call_start:
             name = event.tool_call_start.get("name")
             names[event.tool_call_start.get("id")] = name
+            # §113 (WT1): an error result does not say which URL it was for.
+            inputs[event.tool_call_start.get("id")] = (
+                event.tool_call_start.get("input"))
             yield PipelineEvent(
                 kind="tool_call", pass_id=pass_id, tool=name,
                 # §42 (RA3): through the registry, so a tool's
@@ -470,6 +474,7 @@ def _translate(pass_id: str, stream, corpus=None, streamed=None):
             result = event.tool_result.get("result")
             failed = isinstance(result, dict) and "error" in result
             name = names.get(event.tool_result.get("id"))
+            params = inputs.get(event.tool_result.get("id"))
             if corpus is not None and not failed:
                 # BEFORE the yield, for #42's reason one layer up: a
                 # generator only advances while someone iterates it, so
@@ -477,6 +482,12 @@ def _translate(pass_id: str, stream, corpus=None, streamed=None):
                 # on a consumer continuing to read. `corpus.add` ignores
                 # every tool it does not recognise.
                 corpus.add(name, result)
+                corpus.note_obtained(name, params)
+            elif corpus is not None:
+                # ROADMAP_v3 §113 (WT1). The record of what the run wanted
+                # and could not read, for the same reason and at the same
+                # moment. Every tool but fetch_url is ignored.
+                corpus.note_failure(name, params, result, pass_id)
             yield PipelineEvent(
                 kind="tool_result", pass_id=pass_id,
                 tool=name,
@@ -1218,6 +1229,177 @@ def _synthesis_input(run: PipelineRun, directives: list | None = None) -> str:
     return text
 
 
+# ===========================================================================
+# ---- ROADMAP_v3 §113: the sources the run could not read -------------------
+# ===========================================================================
+
+def _asked(run: PipelineRun, point: str):
+    """The record of the question at `point`, or None: each point asks once,
+    and a resumed run reads the record from its resume point."""
+    for entry in run.source_asks:
+        if isinstance(entry, dict) and entry.get("point") == point:
+            return entry
+    return None
+
+
+def _not_asked_because(ask, unattended: bool, folder) -> str | None:
+    if unattended:
+        return "the run is unattended"
+    if ask is None:
+        return "nobody can be asked"
+    if folder is None:
+        return "the supplied/ folder could not be made"
+    return None
+
+
+def _ask_about_sources(point: str, run: PipelineRun, corpus, ask,
+                       unattended: bool, authorization, folder, progress):
+    """Put the sources the run could not read to the user, at `point`, once
+    (WT5). A generator returning (authorization, pending): `pending` is the
+    text the redraft or the re-grounding is given, "" when the answer
+    brought nothing it could use.
+
+    `authorization` comes back because a run with none is given one the
+    moment a file is supplied: read_source reaches the files through it,
+    and every pass after this one is handed this same object."""
+    if _asked(run, point) is not None:
+        return authorization, ""
+    sources = wanted_sources.listed(
+        wanted_sources.entries(corpus, run.claims), point)
+    if not sources:
+        return authorization, ""
+    entry = {"point": point, "listed": len(sources)}
+    why = _not_asked_because(ask, unattended, folder)
+    if why is not None:
+        entry.update(asked=False, why=why)
+        run.source_asks.append(entry)
+        yield from progress.checkpoint(
+            f"{point}: {len(sources)} source(s) could not be read; not asked, "
+            f"because {why}.")
+        return authorization, ""
+
+    yield from progress.checkpoint(
+        f"{point}: {len(sources)} source(s) could not be read; asking what "
+        f"to do about them.")
+    payload = wanted_sources.question(sources, point, folder)
+    payload["choices"] = list(interaction.SOURCES_CHOICES)
+    payload["options"] = [interaction.SOURCES_LABELS[choice]
+                          for choice in interaction.SOURCES_CHOICES]
+    payload["wait_s"] = config.WANTED_SOURCES_WAIT_S
+    choice, note = interaction.ask(ask, interaction.Request(
+        kind=interaction.SOURCES, payload=payload))
+    entry.update(asked=True, answer=choice, note=note)
+
+    supplied, obtained = [], []
+    if choice != interaction.SOURCES_PROCEED:
+        # The folder is read on EVERY answer but "proceed": a user who saved
+        # a file and then typed a note instead of choosing has supplied it.
+        held = authorization.supplied if authorization is not None else {}
+        supplied, skipped = wanted_sources.load_supplied(folder, held)
+        if supplied:
+            if authorization is None:
+                from core.approval import RunAuthorization
+                authorization = RunAuthorization()
+            for document in supplied:
+                authorization.supplied[document.name] = document
+                corpus.add_supplied(document.name, document.text)
+        entry["supplied"] = [d.artifact() for d in supplied]
+        if skipped:
+            entry["skipped"] = skipped
+        if choice == interaction.SOURCES_RETRY:
+            obtained = _retry_fetches(sources, corpus, point)
+            entry["retried"] = len(sources)
+            entry["obtained"] = obtained
+    pending = wanted_sources.pending_note(
+        supplied, obtained,
+        note if choice != interaction.SOURCES_PROCEED else "")
+    entry["pending"] = pending
+    run.source_asks.append(entry)
+    if pending:
+        yield from progress.checkpoint(
+            f"{point}: the answer brought {len(supplied)} supplied file(s) and "
+            f"{len(obtained)} source(s) that answer now"
+            + ("; with a note" if note else "") + ".")
+    else:
+        yield from progress.checkpoint(
+            f"{point}: " + ("proceeding without them, as answered."
+                            if choice == interaction.SOURCES_PROCEED
+                            else "the answer brought nothing new; proceeding "
+                                 "without them."))
+    return authorization, pending
+
+
+def _retry_fetches(sources, corpus, point: str) -> list:
+    """Fetch every listed source again, in code (WT5's "I've connected
+    access"). Through the registry, so the URL policy, the output policy and
+    the network meter apply exactly as to the model's own calls. Returns
+    the URLs that answer now."""
+    from tools.registry import ToolCallDenied, registry
+
+    obtained = []
+    for source in sources:
+        url = source.get("url")
+        if not isinstance(url, str) or not url.startswith(("http://",
+                                                           "https://")):
+            continue
+        params = {"url": url}
+        try:
+            result = registry.dispatch("fetch_url", params)
+        except ToolCallDenied as denied:
+            logger.info("Not retrying %s: %s", url, denied)
+            break
+        except Exception as exc:  # noqa: BLE001 -- one URL must not stop the rest
+            result = {"error": f"Could not fetch URL: {exc}"}
+        if isinstance(result, dict) and "error" not in result:
+            corpus.add("fetch_url", result)
+            corpus.note_obtained("fetch_url", params)
+            obtained.append(url)
+        else:
+            corpus.note_failure("fetch_url", params, result,
+                                f"{point} retry")
+    return obtained
+
+
+def _restore_supplied(run: PipelineRun, corpus, authorization):
+    """A resumed run's supplied files, read again from its folder: the ones
+    its answers recorded, unchanged since (by sha256). Returns the
+    authorization, made if the run had none."""
+    wanted = {}
+    for entry in run.source_asks:
+        records = entry.get("supplied") if isinstance(entry, dict) else None
+        for record in records or ():
+            if isinstance(record, dict) and record.get("name"):
+                wanted[record["name"]] = record.get("sha256")
+    if not wanted:
+        return authorization
+    found, _skipped = wanted_sources.load_supplied(
+        wanted_sources.folder(run.run_id), {})
+    kept = [d for d in found if wanted.get(d.name) == d.sha256]
+    if kept:
+        if authorization is None:
+            from core.approval import RunAuthorization
+            authorization = RunAuthorization()
+        for document in kept:
+            authorization.supplied[document.name] = document
+            corpus.add_supplied(document.name, document.text)
+    missing = sorted(set(wanted) - {d.name for d in kept})
+    if missing:
+        run.log("Resume: " + ", ".join(missing) + " in supplied/ changed or "
+                "went missing since the run read it; not read again.")
+    return authorization
+
+
+def _reground_input(claims, pending: str) -> str:
+    """Pass 3a's input for the claims the answer can help, with what it
+    brought: the same shape as the first grounding's, scoped to them."""
+    entities = sorted({e for c in claims for e in c.entities})
+    return (
+        f"Factual claims:\n{json.dumps([vars(c) for c in claims])}\n\n"
+        f"Deduplicated entities to research (search each ONCE, map results "
+        f"back to every claim referencing it):\n{json.dumps(entities)}"
+        + pending)
+
+
 def _review_stage(run: PipelineRun, progress: _Progress, model: str,
                   provider_name: str, authorization, review,
                   enabled: bool = False, effort: str | None = None,
@@ -1467,6 +1649,12 @@ def stream_deep_research_pipeline(
     # stream_deep_research_mode's signature; this is the rest of it.
     activity=None,
     resume=None,
+    # ROADMAP_v3 §113 (WT5). The channel the run asks its own question
+    # through, about the sources it could not read; None where nobody can
+    # answer. `unattended` is why it is None when the user said so, for
+    # the record.
+    ask=None,
+    unattended: bool = False,
 ):
     """The pipeline, as a generator of PipelineEvents (§22). The terminal
     `run_complete` event carries the finished PipelineRun.
@@ -1658,6 +1846,11 @@ def stream_deep_research_pipeline(
     # read from its trace instead.
     if point is None:
         progress.save_point(mark(None))
+    # ROADMAP_v3 §113 (WT3). The run's folder for supplied sources, made
+    # as the run starts so it exists before the question names it -- and
+    # only where the question can be asked.
+    supplied_folder = (wanted_sources.prepare_folder(run.run_id)
+                       if ask is not None and not unattended else None)
 
     # Entered here, with the try below as its only way out.
     tallying = usage_view.enter_run(progress.usage)
@@ -1673,6 +1866,7 @@ def stream_deep_research_pipeline(
                     f"tool result(s)"
                     + (f"; {skipped} could not be read back and were skipped"
                        if skipped else "") + ".")
+            authorization = _restore_supplied(run, corpus, authorization)
             if done("Pass 3a"):
                 _collect_sources(run, corpus)
             # The claims the run already has, so a panel and /claims show
@@ -1694,95 +1888,118 @@ def stream_deep_research_pipeline(
         # --- Pass 1: initial generation (ensemble mode: N candidates) ---
         if not done("Pass 1"):
             pass1_input = f"Original query:\n{user_query}\n\nPreliminary plan (loose context, may deviate freely):\n{json.dumps(run.plan)}"
-            effective_n = 0
-            pass1_threads = []
-            if roster:
-                # A LOOP, not a comprehension: _run_pass is a generator now
-                # (§22), and a comprehension would collect generator objects
-                # without ever running a pass.
-                #
-                # One candidate per roster entry, each on its OWN provider/model
-                # (E1). No new plumbing: _run() calls api_initialization() itself
-                # and effort_for() validates against the receiving model, so a
-                # heterogeneous roster is correct by construction -- the same way
-                # §11 already routes 3a/3b/6b to critic_provider/critic_model.
-                candidates = []
-                for entry in roster:
-                    label = f"{entry['provider_name']}/{entry['model']}"
-                    try:
-                        candidates.append((yield from _run_pass(
-                            "Pass 1", pass1_input, entry["model"], entry["provider_name"],
-                            authorization=authorization, trace=run.trace,
-                            pass_threads=run.pass_threads, effort=effort,
-                            activity=activity, **via("Pass 1"))))
-                    except Exception as e:
-                        # NAMED, TRACED, SKIPPED (E7) -- §20's containment rule.
-                        # An optional generation strategy must not flip a
-                        # ten-pass run to status='failed' because one provider
-                        # was unreachable. Same posture MCP takes per server.
-                        message = (f"Pass 1: ensemble candidate on {label} failed "
-                                   f"({type(e).__name__}: {e}) — skipped.")
-                        logger.warning("%s", message)
-                        run.log(message)
-                        continue
-                    run.log(f"Pass 1: ensemble candidate {len(candidates)} generated on {label}.")
-                    # §98: which thread holds this candidate's text, for a
-                    # resume to read back. The newest Pass 1 entry is this
-                    # candidate's: it was recorded as the pass opened.
-                    pass1_threads.append(_last_thread(run.pass_threads, "Pass 1"))
-                    # E13/#77: the record keeps every surviving candidate.
-                    # The metadata half sits beside the trace's candidate-N
-                    # lines so a stored asserted_by_candidates tag names
-                    # models this run can still identify; the text half feeds
-                    # the per-candidate artifacts and Pass 3b's input -- the
-                    # two places that must be able to check a claim against
-                    # what its number actually said. pipeline_storage strips
-                    # `text` at serialization; see PipelineRunRecord.
-                    run.candidates.append({
-                        "candidate": len(candidates),
-                        "provider_name": entry["provider_name"],
-                        "model": entry["model"],
-                        "chars": len(candidates[-1]),
-                        "text": candidates[-1],
-                    })
+            # ROADMAP_v3 §113 (WT5). A resumed run whose question was
+            # already answered redrafts with that answer, not asking again.
+            answered = _asked(run, wanted_sources.AFTER_DRAFT)
+            if answered is not None and answered.get("pending"):
+                pass1_input += answered["pending"]
+            for attempt in (1, 2):
+                effective_n = 0
+                pass1_threads = []
+                if roster:
+                    # A LOOP, not a comprehension: _run_pass is a generator now
+                    # (§22), and a comprehension would collect generator objects
+                    # without ever running a pass.
+                    #
+                    # One candidate per roster entry, each on its OWN provider/model
+                    # (E1). No new plumbing: _run() calls api_initialization() itself
+                    # and effort_for() validates against the receiving model, so a
+                    # heterogeneous roster is correct by construction -- the same way
+                    # §11 already routes 3a/3b/6b to critic_provider/critic_model.
+                    candidates = []
+                    for entry in roster:
+                        label = f"{entry['provider_name']}/{entry['model']}"
+                        try:
+                            candidates.append((yield from _run_pass(
+                                "Pass 1", pass1_input, entry["model"], entry["provider_name"],
+                                authorization=authorization, trace=run.trace,
+                                pass_threads=run.pass_threads, effort=effort,
+                                activity=activity, **via("Pass 1"))))
+                        except Exception as e:
+                            # NAMED, TRACED, SKIPPED (E7) -- §20's containment rule.
+                            # An optional generation strategy must not flip a
+                            # ten-pass run to status='failed' because one provider
+                            # was unreachable. Same posture MCP takes per server.
+                            message = (f"Pass 1: ensemble candidate on {label} failed "
+                                       f"({type(e).__name__}: {e}) — skipped.")
+                            logger.warning("%s", message)
+                            run.log(message)
+                            continue
+                        run.log(f"Pass 1: ensemble candidate {len(candidates)} generated on {label}.")
+                        # §98: which thread holds this candidate's text, for a
+                        # resume to read back. The newest Pass 1 entry is this
+                        # candidate's: it was recorded as the pass opened.
+                        pass1_threads.append(_last_thread(run.pass_threads, "Pass 1"))
+                        # E13/#77: the record keeps every surviving candidate.
+                        # The metadata half sits beside the trace's candidate-N
+                        # lines so a stored asserted_by_candidates tag names
+                        # models this run can still identify; the text half feeds
+                        # the per-candidate artifacts and Pass 3b's input -- the
+                        # two places that must be able to check a claim against
+                        # what its number actually said. pipeline_storage strips
+                        # `text` at serialization; see PipelineRunRecord.
+                        run.candidates.append({
+                            "candidate": len(candidates),
+                            "provider_name": entry["provider_name"],
+                            "model": entry["model"],
+                            "chars": len(candidates[-1]),
+                            "text": candidates[-1],
+                        })
 
-                # Labels come from the SURVIVORS, never from position in the
-                # roster (E11). Labelling by roster position leaves a gap when a
-                # candidate fails -- "Candidate 1, Candidate 3" -- so Pass 2
-                # would tag a claim both survivors asserted as [1, 3] while the
-                # denominator said 2, and a unanimous claim would be scored as
-                # dissented-against. A silently deflated confidence score is the
-                # exact failure class this section exists to remove.
-                effective_n = len(candidates)
-                if effective_n >= 2:
-                    run.raw_response = candidates[0]
-                    run.log(f"Pass 1: ensemble mode — {effective_n} candidate(s) "
-                            f"across {effective_n} model(s); consistency is measured "
-                            f"out of {effective_n}.")
-                else:
-                    # DEGRADE TO THE SINGLE-CANDIDATE PATH (E7), rather than
-                    # scoring one candidate as an ensemble of one -- which would
-                    # give every claim consistency 1.0, so none could ever be
-                    # contested, while reporting that agreement as if it had
-                    # been corroborated.
-                    # ensemble_n=0 is not a degraded formula, it is the correct
-                    # one when there is nothing to compare against.
-                    effective_n = 0
-                    if candidates:
+                    # Labels come from the SURVIVORS, never from position in the
+                    # roster (E11). Labelling by roster position leaves a gap when a
+                    # candidate fails -- "Candidate 1, Candidate 3" -- so Pass 2
+                    # would tag a claim both survivors asserted as [1, 3] while the
+                    # denominator said 2, and a unanimous claim would be scored as
+                    # dissented-against. A silently deflated confidence score is the
+                    # exact failure class this section exists to remove.
+                    effective_n = len(candidates)
+                    if effective_n >= 2:
                         run.raw_response = candidates[0]
-                        run.log("Pass 1: only one ensemble candidate survived — "
-                                "no claim can be contested, since one candidate "
-                                "cannot disagree with itself.")
+                        run.log(f"Pass 1: ensemble mode — {effective_n} candidate(s) "
+                                f"across {effective_n} model(s); consistency is measured "
+                                f"out of {effective_n}.")
                     else:
-                        raise RuntimeError(
-                            "Pass 1: every ensemble candidate failed; there is no "
-                            "response to extract claims from. See the trace for "
-                            "each provider's error."
-                        )
-            else:
-                run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, corpus=corpus, trace=run.trace, pass_threads=run.pass_threads, effort=effort, activity=activity, **via("Pass 1"))
-                pass1_threads = [_last_thread(run.pass_threads, "Pass 1")]
-                run.log("Pass 1: initial generation complete.")
+                        # DEGRADE TO THE SINGLE-CANDIDATE PATH (E7), rather than
+                        # scoring one candidate as an ensemble of one -- which would
+                        # give every claim consistency 1.0, so none could ever be
+                        # contested, while reporting that agreement as if it had
+                        # been corroborated.
+                        # ensemble_n=0 is not a degraded formula, it is the correct
+                        # one when there is nothing to compare against.
+                        effective_n = 0
+                        if candidates:
+                            run.raw_response = candidates[0]
+                            run.log("Pass 1: only one ensemble candidate survived — "
+                                    "no claim can be contested, since one candidate "
+                                    "cannot disagree with itself.")
+                        else:
+                            raise RuntimeError(
+                                "Pass 1: every ensemble candidate failed; there is no "
+                                "response to extract claims from. See the trace for "
+                                "each provider's error."
+                            )
+                else:
+                    run.raw_response = yield from _run_pass("Pass 1", pass1_input, model, provider_name, authorization=authorization, corpus=corpus, trace=run.trace, pass_threads=run.pass_threads, effort=effort, activity=activity, **via("Pass 1"))
+                    pass1_threads = [_last_thread(run.pass_threads, "Pass 1")]
+                    run.log("Pass 1: initial generation complete.")
+                # §113 (WT5): what the draft could not read, asked once;
+                # an answer that brings something writes it again.
+                if attempt == 2:
+                    break
+                authorization, pending = yield from _ask_about_sources(
+                    wanted_sources.AFTER_DRAFT, run, corpus, ask,
+                    unattended, authorization, supplied_folder, progress)
+                if _asked(run, wanted_sources.AFTER_DRAFT) is not None:
+                    # Saved now, under the stage before, so a run that
+                    # dies in the redraft is not asked this again.
+                    progress.save_point(mark("Pass 0"))
+                if not pending:
+                    break
+                run.log("Pass 1: writing the draft again with what the "
+                        "answer brought.")
+                run.candidates = []
+                pass1_input += pending
             yield from progress.checkpoint(done=mark("Pass 1"))
 
         # --- Pass 2: claim extraction & classification ---
@@ -1821,7 +2038,32 @@ def stream_deep_research_pipeline(
                 grounded = _ground_and_score(run, grounding_json, corpus, scorer,
                                              scoring_knobs, scholar,
                                              claims=factual_claims)
-                yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.", done=mark("Pass 3a"))
+                yield from progress.checkpoint(f"Pass 3a: grounded {grounded} of {len(factual_claims)} factual claim(s), across {len(unique_entities)} deduplicated entities.")
+                # ROADMAP_v3 §113 (WT5). What grounding could not read and
+                # claims cite, asked once; an answer that brings something
+                # grounds those claims again, and nothing else.
+                answered = _asked(run, wanted_sources.AFTER_GROUNDING)
+                pending = answered.get("pending") if answered else ""
+                if answered is None:
+                    authorization, pending = yield from _ask_about_sources(
+                        wanted_sources.AFTER_GROUNDING, run, corpus, ask,
+                        unattended, authorization, supplied_folder, progress)
+                    if _asked(run, wanted_sources.AFTER_GROUNDING) is not None:
+                        progress.save_point(mark("D0"))
+                if pending:
+                    needing = {c for s in wanted_sources.listed(
+                        wanted_sources.entries(corpus, run.claims),
+                        wanted_sources.AFTER_GROUNDING) for c in s["cited_by"]}
+                    regrounded = [c for c in factual_claims if c.id in needing]
+                    if regrounded:
+                        regrounding_json = _parse_json_response((yield from _run_pass_with_json_retry("Pass 3a", _reground_input(regrounded, pending), critic_model, critic_provider, run.trace, authorization=authorization, corpus=corpus, pass_threads=run.pass_threads, claim_ids=[c.id for c in regrounded], effort=effort, activity=activity, **via("Pass 3a"))))
+                        again = _ground_and_score(run, regrounding_json, corpus,
+                                                  scorer, scoring_knobs, scholar,
+                                                  claims=regrounded)
+                        yield from progress.checkpoint(
+                            f"Pass 3a: grounded {again} of {len(regrounded)} "
+                            f"claim(s) again with what the answer brought.")
+                yield from progress.checkpoint(done=mark("Pass 3a"))
                 _note_entries_outside_the_batch(
                     run, factual_claims, grounding_json, pass_id="Pass 3a",
                     scope="the factual claims", asked="factual claim(s)",
@@ -2093,6 +2335,18 @@ def stream_deep_research_pipeline(
         # The reviewer reads the report before this, the model's text alone.
         run.final_report = thin_evidence.with_section(
             run.final_report, run.claims, confidence_weights)
+
+        # --- §113 (WT1): the sources it could not read (pure code) ---
+        # After the thin-evidence section, for the same reason it is where
+        # it is: every shell's copy of the report then carries it.
+        run.wanted_sources = wanted_sources.record(
+            corpus, run.claims, run.source_asks,
+            authorization.supplied if authorization is not None else {})
+        run.final_report = wanted_sources.with_section(
+            run.final_report, run.wanted_sources["sources"])
+        closing = wanted_sources.summary(run.wanted_sources["sources"])
+        if closing:
+            run.log(closing)
 
         # §108 (PW5): the run's total, last in its trace, shown like any
         # other line before the run is announced.

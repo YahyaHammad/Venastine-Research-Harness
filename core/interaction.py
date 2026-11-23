@@ -121,6 +121,24 @@ QUESTION = "question"
 # make a shell that ignored the flag look wired up while showing the
 # passphrase in clear.
 SECRET = "secret"
+# ROADMAP_v3 §113 (WT5). The research run's own question about the sources
+# it could not read. Its own kind, not a QUESTION: the KIND tells a shell
+# how to render, and this one is a long list, a folder to put files in and
+# three fixed answers, waits as long as `wanted_sources_wait_s` says rather
+# than the approval timeout, and has no "discuss instead" -- a pass has
+# nobody to discuss it with.
+SOURCES = "sources"
+# Its answers. `note` is a typed answer with none of the three chosen.
+SOURCES_SUPPLIED = "supplied"
+SOURCES_RETRY = "retry"
+SOURCES_PROCEED = "proceed"
+SOURCES_NOTE = "note"
+SOURCES_CHOICES = (SOURCES_SUPPLIED, SOURCES_RETRY, SOURCES_PROCEED)
+SOURCES_LABELS = {
+    SOURCES_SUPPLIED: "I've put them in the run's supplied/ folder",
+    SOURCES_RETRY: "I've connected access (a VPN, a proxy): try them again",
+    SOURCES_PROCEED: "Proceed without those sources",
+}
 
 # Review decisions, moved here from core/reasoning/review.py so the decoder
 # and the pipeline cannot disagree about what a valid answer is.
@@ -168,6 +186,10 @@ SAFE_DEFAULTS = {
     # on a remote account is a step towards a lockout. None is not a
     # password, so every consumer has to notice.
     SECRET: None,
+    # Proceed, with no note: the run goes on without the sources, which is
+    # what it did before it could ask. Never "supplied" or "retry" -- either
+    # would spend a pass on an answer nobody gave.
+    SOURCES: (SOURCES_PROCEED, ""),
 }
 
 
@@ -359,6 +381,22 @@ def decode(request: "Request", raw: Any) -> Any:
             "text": str(text) if text else "",
             "defer": False,
         }
+
+    if kind == SOURCES:
+        # {"choice": one of SOURCES_CHOICES or None, "text": str}, or
+        # nothing. A choice nobody offered is no choice; typed text with no
+        # choice is a note; neither is the declining default.
+        if not isinstance(raw, dict):
+            return SAFE_DEFAULTS[SOURCES]
+        choice = raw.get("choice")
+        text = raw.get("text")
+        text = " ".join(str(text).split()) if text else ""
+        if choice not in SOURCES_CHOICES:
+            if choice is not None:
+                logger.warning("Sources answer %r was not offered; "
+                               "ignoring it.", choice)
+            return (SOURCES_NOTE, text) if text else SAFE_DEFAULTS[SOURCES]
+        return (choice, text)
 
     # REVIEW. Strict: a well-formed (decision, notes) pair or nothing.
     #

@@ -193,6 +193,8 @@ def snapshot(run: PipelineRun, stage: str, *, round_no: int = 0,
         "granted_calls": list(run.granted_calls),
         "threads": len(run.pass_threads),
         "pass1_threads": [t for t in pass1_threads],
+        # ROADMAP_v3 §113 (WT5): each point asks once, a resume included.
+        "source_asks": list(run.source_asks),
     }
 
 
@@ -290,10 +292,12 @@ def rebuild_corpus(corpus, pass_threads) -> tuple:
         except Exception:  # noqa: BLE001 -- a time is provenance, not content
             times = {}
         names = {}
+        inputs = {}
         for row in rows:
             if row.get("role") == "assistant":
                 for call in row.get("tool_calls") or ():
                     names[call.get("id")] = call.get("name")
+                    inputs[call.get("id")] = call.get("input")
                 continue
             if row.get("role") != "tool":
                 continue
@@ -306,8 +310,17 @@ def rebuild_corpus(corpus, pass_threads) -> tuple:
                     RecursionError):
                 skipped += 1
                 continue
+            params = inputs.get(row.get("tool_call_id"))
+            if isinstance(result, dict) and "error" in result:
+                # ROADMAP_v3 §113 (WT1): the failures are the corpus's
+                # record too, and a resumed run's question and report
+                # need the ones the failed run met.
+                corpus.note_failure(name, params, result,
+                                    entry.get("pass") or "")
+                continue
             added += corpus.add(name, result,
                                 retrieved_at=_stamp(times.get(row.get("tool_call_id"))))
+            corpus.note_obtained(name, params)
     return added, skipped
 
 
@@ -373,6 +386,7 @@ def _from_point(record: dict, point: dict) -> ResumePoint:
     run.assumptions = point.get("assumptions") or {}
     run.coverage_gaps = point.get("coverage_gaps") or []
     run.granted_calls = list(point.get("granted_calls") or [])
+    run.source_asks = list(point.get("source_asks") or [])
     recorded = int(point.get("threads") or 0)
     after = [e for e in run.pass_threads[recorded:] if isinstance(e, dict)]
     resume = ResumePoint(

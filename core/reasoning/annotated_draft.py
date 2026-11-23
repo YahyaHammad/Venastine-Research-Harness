@@ -38,6 +38,7 @@ import re
 import config
 from core.reasoning import thin_evidence
 from core.reasoning.confidence_scoring import FLAGGED_TIERS
+from core.reasoning.source_corpus import normalize_url
 
 logger = logging.getLogger(__name__)
 
@@ -276,21 +277,25 @@ def _drafts(run) -> list[tuple[str, str, int | None]]:
     return [("", run.raw_response or "", None)]
 
 
-def _source_line(source: dict, titles: dict) -> str:
+def _source_line(source: dict, titles: dict, unread=None) -> str:
     url = _one_line(source.get("url"))
     title = _one_line(source.get("title") or titles.get(url))
     if not url:
         return title or "?"
+    # ROADMAP_v3 §113 (WT1): a source the run never read in full says so
+    # where the claim cites it.
+    why = (unread or {}).get(normalize_url(url))
+    note = f" (not read: {_one_line(why)})" if why else ""
     # The pointy-bracket form takes a URL with spaces or brackets in it.
     target = "<" + url.replace("<", "%3C").replace(">", "%3E") + ">"
     if not title:
-        return target
+        return target + note
     title = title.replace("[", "(").replace("]", ")")
-    return f"[{title}]({target})"
+    return f"[{title}]({target}){note}"
 
 
 def _entry(claim, weights, titles: dict, candidates: bool,
-           placed: bool) -> list[str]:
+           placed: bool, unread=None) -> list[str]:
     """One claim's entry in the list after the draft."""
     tier = claim.confidence_tier or "untiered"
     breakdown = claim.score_breakdown or {}
@@ -333,7 +338,7 @@ def _entry(claim, weights, titles: dict, candidates: bool,
         item("asserted by candidates",
              ", ".join(str(n) for n in claim.asserted_by_candidates))
     if claim.grounding_sources:
-        item("sources", ", ".join(_source_line(s, titles)
+        item("sources", ", ".join(_source_line(s, titles, unread)
                                   for s in claim.grounding_sources
                                   if isinstance(s, dict)))
     return lines
@@ -395,6 +400,11 @@ def render(run, style: str | None = None, weights: dict | None = None) -> str:
         if isinstance(document, dict) and document.get("url"):
             titles[_one_line(document["url"])] = document.get("title")
 
+    # ROADMAP_v3 §113 (WT1): normalized URL -> why it was not read in full.
+    unread = {normalize_url(s["url"]): s.get("reason")
+              for s in (getattr(run, "wanted_sources", None) or {}).get(
+                  "sources", ())
+              if isinstance(s, dict) and isinstance(s.get("url"), str)}
     unplaced = [c for order, c in enumerate(claims) if order not in first_seen]
     if style == DRAFT_FIRST:
         where = (f"This is the report (`report_style: {DRAFT_FIRST}`); the "
@@ -425,13 +435,15 @@ def render(run, style: str | None = None, weights: dict | None = None) -> str:
         out += ["---", "", "## The claims, in the order they were made", ""]
         ordered = sorted(first_seen, key=lambda order: first_seen[order])
         for order in ordered:
-            out += _entry(claims[order], weights, titles, ensemble, True)
+            out += _entry(claims[order], weights, titles, ensemble, True,
+                          unread)
         if unplaced:
             out += ["", f"## Claims not found in the draft ({len(unplaced)})",
                     "", "Pass 2 recorded where each of these came from, and "
                     "no part of the draft matched what it recorded.", ""]
             for claim in unplaced:
-                out += _entry(claim, weights, titles, ensemble, False)
+                out += _entry(claim, weights, titles, ensemble, False,
+                              unread)
     return "\n".join(out).rstrip("\n") + "\n"
 
 

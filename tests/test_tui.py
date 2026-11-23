@@ -3681,6 +3681,7 @@ def _modal_cases():
         ReviewScreen,
         SecretScreen,
         SessionKillScreen,
+        SourcesScreen,
         SubagentSignoffScreen,
         ThreadPickerScreen,
         UsageRunPickerScreen,
@@ -3705,6 +3706,17 @@ def _modal_cases():
          lambda: QuestionScreen("Which database should we use?",
                                 ["postgres", "sqlite"], True, True),
          "#question-dialog"),
+        # ROADMAP_v3 §113 (WT5): a long list of URLs, bounded.
+        ("sources",
+         lambda: SourcesScreen(
+             "The run could not read 40 sources",
+             "\n".join(f"  https://pub.example/{n} -- refused access "
+                       f"(HTTP 403)" for n in range(40)),
+             ["supplied", "retry", "proceed"],
+             ["I've put them in the run's supplied/ folder",
+              "I've connected access (a VPN, a proxy): try them again",
+              "Proceed without those sources"]),
+         "#sources-dialog"),
         ("review",
          lambda: ReviewScreen({"kind": "text", "reason": "Overstates.",
                                "proposed": "Soften."}, 0),

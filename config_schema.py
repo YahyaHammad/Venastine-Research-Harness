@@ -257,6 +257,7 @@ class ToolPermissionsModel(_Model):
     write_project_doc: StrictBool
     ask_user: StrictBool
     todo_write: StrictBool
+    read_source: StrictBool
 
 
 class ToolApprovalsModel(_Model):
@@ -300,6 +301,7 @@ class ToolApprovalsModel(_Model):
     write_project_doc: StrictBool
     ask_user: StrictBool
     todo_write: StrictBool
+    read_source: StrictBool
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +514,9 @@ class HarnessConfig(_Model):
     # -- Research grants and review ---------------------------------------
     max_granted_tool_calls: NonNegativeInt
     attended_approval_timeout_s: PositiveInt
+    # ROADMAP_v3 §113 (WT5). 0 waits until the question is answered.
+    wanted_sources_wait_s: NonNegativeInt
+    research_unattended: StrictBool
     subagent_review: StrictBool
     max_review_findings: NonNegativeInt
     max_review_refinements: NonNegativeInt

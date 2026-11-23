@@ -15,6 +15,25 @@ other name.
 
 ---
 
+## What a run could not read (batch 286, ROADMAP_v3 §113)
+
+| Change | Test | Fix |
+|---|---|---|
+| **174 settable scalars** | `test_setting_every_leaf_to_its_own_value_changes_nothing`, `test_the_documented_settable_scalar_count_is_the_one_the_test_walks` | Batch 286: `wanted_sources_wait_s`, `research_unattended`, and `read_source`'s row in each tool table |
+| **32 tools in `tool_permissions`, 60 authority leaves** | `test_the_two_tool_tables_are_expanded_AND_listed`, `test_the_authority_rows_are_the_authority_keys`, `test_a_table_is_found_and_explained` | `read_source` (WT3) is in both tables |
+| **`registry.schemas`, `is_advertised` and `_advertised` take a keyword `supplied`** | `test_a_gated_tool_is_hidden_with_no_way_to_ask`, `test_a_provider_means_the_tools_are_advertised` | The loop passes `supplied=`; a stand-in for `schemas` takes it (default False) |
+| **`_authorization_kwargs` carries `supplied`**, and `RunAuthorization.supplied` / `RunInfo.supplied` exist | `test_the_loop_offers_it_from_the_runs_authorization` | The run's supplied files reach `read_source` through the bundle; `None` when it holds none |
+| **A new kind, `interaction.SOURCES`**, declining to `("proceed", "")` | `test_every_default_declines`, `test_the_payload_table_covers_every_kind` | Both shells render it; the default-declines test accepts "proceed" beside the review's "reject" |
+| **`SourcesScreen`** in `_modal_cases()` | `test_the_table_has_a_row_for_every_modal_screen` | Its row uses a forty-URL body |
+| **`--unattended`**, refused outside research and with `--attended` | `test_every_flag_has_exactly_one_answer`, `test_research_only_flags_are_refused_in_chat`, `test_attended_and_unattended_together_are_refused` | In `_REFUSED` beside `--attended` |
+| **`run_research` and `stream_deep_research_pipeline` take `ask=` and `unattended=`** | `test_research_mode_e2e_prints_report_and_trace` | The expected call carries `ask=None, unattended=False` |
+| **A report citing a source no pass fetched ends with "Sources it could not read"**, and the trace has a `Pass 3a:` "not asked" line and a `Sources:` line | `test_pipeline_6a6c_retry_loop_continues_until_max_retries_then_fallback`, `test_pipeline_trace_contains_expected_lines_in_order` | Payloads that cite a URL nothing fetched produce a real record now; assert the thin-evidence section is followed by it |
+| **The scaffolded settings.json has `research.unattended`** | `test_the_template_names_every_setting_the_loader_knows` | `_KNOWN_RESEARCH` grew the key |
+| **`resume.rebuild_corpus` replays failed fetches into `corpus.failures`**, and the resume point holds `source_asks` | `test_a_resume_rebuilds_the_failures`, `test_the_asks_are_saved_and_restored` | A stand-in row with an error result is now recorded, not skipped |
+| **`_blocking_modal(screen, *, on_timeout, timeout=None, wait_forever=False)`** | `test_the_wait_is_the_payloads` | The sources question waits `wait_s`, forever at 0; every other ask keeps the approval timeout |
+
+---
+
 ## The URL scan, and a token after an escape (batch 268)
 
 | Change | Test | Fix |

@@ -77,7 +77,10 @@ class TestTheDefaultInvariant:
     def test_every_default_declines(self, kind):
         """The asymmetry IS the design: no default may be permissive."""
         default = SAFE_DEFAULTS[kind]
-        assert default in (False, None) or default == ("reject", "")
+        # ROADMAP_v3 §113: the sources question's is going on without
+        # them, what the run did before it could ask.
+        assert default in (False, None) or default in (
+            ("reject", ""), ("proceed", ""))
 
     def test_an_unknown_kind_raises_rather_than_defaulting(self):
         """An unanswerable question fails safe; an undefined one is a bug,

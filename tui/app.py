@@ -125,6 +125,7 @@ from tui.screens import (
     ReviewScreen,
     SecretScreen,
     SessionKillScreen,
+    SourcesScreen,
     SubagentSignoffScreen,
     ThreadPickerScreen,
     UsageRunPickerScreen,
@@ -5159,6 +5160,8 @@ class VenastineApp(App):
             return self.ask_choice_blocking(request.payload)
         if request.kind == interaction.QUESTION:
             return self.ask_question_blocking(request.payload)
+        if request.kind == interaction.SOURCES:
+            return self.ask_sources_blocking(request.payload)
         if request.kind == interaction.SUBAGENT_SIGNOFF:
             return self.ask_signoff_blocking(
                 request.payload.get("agent", "this subagent"),
@@ -5253,7 +5256,8 @@ class VenastineApp(App):
                 after_line=("[answer arrived after the timeout — "
                             "nothing was written]")))
 
-    def _blocking_modal(self, screen, *, on_timeout):
+    def _blocking_modal(self, screen, *, on_timeout, timeout=None,
+                        wait_forever: bool = False):
         """Push `screen` from a worker thread and park until it dismisses.
 
         THE MECHANICS, ONCE. Four asks did this identically -- make a
@@ -5338,7 +5342,10 @@ class VenastineApp(App):
                 # returns. Paired with the answered/timed-out lines below,
                 # this orders the modal against the loop events above.
                 logger.debug("modal pushed: %s", type(screen).__name__)
-            answer = channel.get(timeout=config.ATTENDED_APPROVAL_TIMEOUT_S)
+            # ROADMAP_v3 §113 (WT5): the sources question waits as long as
+            # `wanted_sources_wait_s` says, and forever at 0. The shutdown
+            # release still unblocks it: it puts into this same queue.
+            answer = channel.get(timeout=_modal_wait(timeout, wait_forever))
         except queue.Empty:
             # NARRATION IS BEST-EFFORT; THE ANSWER IS NOT. This method's
             # contract is to return the dismissal value raw, and None here
@@ -5427,6 +5434,28 @@ class VenastineApp(App):
                     "[no answer — the model was told nobody answered]"),
                 after_line=("[answer arrived after the timeout — the model "
                             "was told nobody answered]")))
+
+    def ask_sources_blocking(self, payload: dict):
+        """A research run's question about the sources it could not
+        read (ROADMAP_v3 §113, WT5). Blocks for `wait_s` seconds, or
+        until answered at 0; returns the dismissal RAW."""
+        if self._shutting_down:
+            return None
+        screen = SourcesScreen(
+            payload.get("title", "Sources the run could not read"),
+            payload.get("body", ""),
+            payload.get("choices") or (),
+            payload.get("options") or ())
+        wait = payload.get("wait_s") or 0
+        return self._blocking_modal(
+            screen, timeout=wait or None, wait_forever=not wait,
+            on_timeout=lambda screen: self._timed_out_ask(
+                screen,
+                dismiss_with=None,
+                on_timeout_line=(
+                    "[no answer -- the run went on without those sources]"),
+                after_line=("[answer arrived after the wait ran out -- the "
+                            "run had gone on without those sources]")))
 
     def ask_signoff_blocking(self, agent: str, candidates: list,
                              asked_by: str = None, depth: int = 0):
@@ -6318,11 +6347,22 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
         parse_grant_spec,
     )
 
+    unattended_flag, args = _split_unattended(args)
     attended, review, grant_spec, query = _split_research_flags(args)
     resume = _split_resume(query)
-    if not attended:
+    if unattended_flag and attended:
+        app._transcript.write_error(
+            "/research: --attended asks about every gated call and "
+            "--unattended asks nothing; choose one.")
+        return
+    # ROADMAP_v3 §113. An explicit --attended outranks a persisted
+    # unattended; otherwise unattended, from wherever, turns asking off.
+    unattended = (not attended) and _research_unattended(
+        app, unattended_flag)
+    if not attended and not unattended:
         attended = app._settings.get("research", {}).get(
             "approval_mode") == "attended"
+    app._research_unattended = unattended
     if review is None:
         persisted = app._settings.get("research", {}).get("subagent_review")
         review = bool(persisted) if persisted is not None \
@@ -6331,7 +6371,7 @@ def _cmd_research(app: VenastineApp, args: str) -> None:
     app._research_review = review
     if not query:
         app._transcript.write_error(
-            "Usage: /research [--attended] [--review|--no-review] "
+            "Usage: /research [--attended|--unattended] [--review|--no-review] "
             "[--grant[=a,b]] <query>|--resume [run-id]")
         return
     if app.refuse_if_occupied("start a research run"):
@@ -6464,6 +6504,57 @@ def _authorization_for(app: VenastineApp, granted: set):
     )
 
 
+
+def _modal_wait(timeout, wait_forever: bool):
+    """How long `_blocking_modal` parks for an answer: None (until
+    answered) for the sources question at `wanted_sources_wait_s: 0`,
+    else its own wait, else the approval timeout every other ask has
+    always had (ROADMAP_v3 §113, WT5)."""
+    if wait_forever:
+        return None
+    return timeout or config.ATTENDED_APPROVAL_TIMEOUT_S
+
+
+#: The leading /research flags, every one: the splitters below walk the
+#: same run of tokens, so a flag written before or after another is found.
+_RESEARCH_FLAGS = ("--attended", "--unattended", "--review", "--no-review",
+                   "--grant", "--grant-tools")
+
+
+def _split_unattended(args: str):
+    """(unattended, args with it removed) -- ROADMAP_v3 §113.
+
+    Its own splitter rather than a fifth value from _split_research_flags,
+    whose four are a contract the suite pins. It walks the same run of
+    leading flags, so `--grant --unattended q` and `--unattended --grant q`
+    are one request, and `/research what does --unattended do` stays a
+    question about the flag."""
+    tokens = (args or "").strip().split(" ")
+    kept, unattended = [], False
+    index = 0
+    while index < len(tokens):
+        head = tokens[index]
+        name = head.split("=", 1)[0]
+        if head == "--unattended":
+            unattended = True
+        elif name in _RESEARCH_FLAGS:
+            kept.append(head)
+        else:
+            break
+        index += 1
+    return unattended, " ".join(kept + tokens[index:]).strip()
+
+
+def _research_unattended(app, flag: bool) -> bool:
+    """The flag, else settings.json `research.unattended`, else config.yaml."""
+    if flag:
+        return True
+    persisted = app._settings.get("research", {}).get("unattended")
+    if persisted is not None:
+        return bool(persisted)
+    return bool(config.RESEARCH_UNATTENDED)
+
+
 def _split_research_flags(args: str):
     """Strip leading /research flags off the query.
 
@@ -6517,6 +6608,13 @@ def _review_consent_for(app: VenastineApp):
     unexpressible. §23 unified the mechanism, not the two parameters.
     """
     if not getattr(app, "_research_review", False):
+        return None
+    if getattr(app, "_research_unattended", False):
+        # ROADMAP_v3 §113: nothing in an unattended run asks. The review
+        # still runs and records its findings; none is applied (V6).
+        app._transcript.write_system(
+            "Review: unattended, so its findings are recorded and none "
+            "is applied.")
         return None
     app._transcript.write_system(
         "Review: after the pipeline finishes, a reviewer checks its claims "
@@ -6575,6 +6673,7 @@ def _start_research(app: VenastineApp, query, authorization,
     app._research_progress.start_run()
     review_on = bool(getattr(app, "_research_review", False))
     consent = _review_consent_for(app)
+    unattended = bool(getattr(app, "_research_unattended", False))
 
     def work() -> None:
         from core.reasoning.orchestrator import (
@@ -6599,6 +6698,10 @@ def _start_research(app: VenastineApp, query, authorization,
                 authorization=authorization,
                 review=consent,
                 subagent_review=review_on,
+                # ROADMAP_v3 §113 (WT5): the run's own question about the
+                # sources it could not read, through the same channel.
+                ask=None if unattended else app.response_channel(),
+                unattended=unattended,
                 # §47. The sink, so the ten passes and the reviewer
                 # draw in the panel and can be opened while they run.
                 # `getattr`, matching every other span call site: a

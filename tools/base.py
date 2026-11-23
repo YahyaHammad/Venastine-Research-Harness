@@ -368,6 +368,12 @@ class ToolSpec:
     # Defaulted False, because a tool that returns text is offered wherever
     # it always was.
     returns_images: bool = False
+    # ROADMAP_v3 §113 (WT3). Reads the files the user supplied for this run
+    # (read_source), so it is offered only where the run holds some --
+    # registry.schemas(supplied=). Not an available_check, for
+    # returns_images' reason: the answer is the RUN's, and only the loop
+    # holds the run.
+    reads_supplied: bool = False
 
 
 def assert_grant_policy_declared(tools: Iterable[str], specs=None) -> None:

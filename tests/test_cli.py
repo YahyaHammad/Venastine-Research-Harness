@@ -1231,6 +1231,11 @@ _PAYLOADS = {
     # guard predicted.
     "secret": {"title": "Unlock the secrets store",
                "body": "Needed to authenticate to the remote host."},
+    # ROADMAP_v3 §113 (WT5). The research run's own question.
+    "sources": {"title": "The run could not read 1 source",
+                "body": "a.example (1)", "choices": ["proceed"],
+                "options": ["Proceed without those sources"],
+                "wait_s": 5},
 }
 
 
@@ -2067,7 +2072,8 @@ class TestTheModeValidations:
         self._refuses(["--tui", "hello"], "")
         assert "does not take a positional query" in capsys.readouterr().err
 
-    @pytest.mark.parametrize("flag", ["--attended", "--review", "--no-review"])
+    @pytest.mark.parametrize("flag", ["--attended", "--unattended",
+                                      "--review", "--no-review"])
     def test_research_only_flags_are_refused_in_chat(self, flag, startup,
                                                      capsys):
         """N8, audit #141. --review and --no-review are documented exactly
@@ -2078,6 +2084,40 @@ class TestTheModeValidations:
         other makes the guard a special case rather than a rule."""
         self._refuses([flag, "hello"], "")
         assert "apply to --mode research" in capsys.readouterr().err
+
+    def test_attended_and_unattended_together_are_refused(self, startup,
+                                                          capsys):
+        """ROADMAP_v3 §113. One asks about every gated call and the other
+        asks nothing, so the pair is a contradiction, refused at parse
+        time rather than resolved by a precedence nobody can see."""
+        self._refuses(["--mode", "research", "--attended",
+                       "--unattended", "q"], "")
+        assert "choose one" in capsys.readouterr().err
+
+    def test_an_unattended_launch_hands_on_nothing_that_asks(self, startup,
+                                                             monkeypatch):
+        """ROADMAP_v3 §113 (WT6). No sources channel, no review consent, and
+        no attended approvals even where settings.json asks for them; a
+        launch without the flag gets all three."""
+        import main
+        seen = {}
+        monkeypatch.setattr(main, "run_research",
+                            lambda *a, **k: seen.update(k))
+        monkeypatch.setattr(main, "build_sources_channel", lambda: "SOURCES")
+        monkeypatch.setattr(main, "build_review_consent", lambda: "CONSENT")
+        monkeypatch.setattr(main, "build_research_authorization",
+                            lambda spec, attended: ("AUTH", attended))
+        monkeypatch.setattr(main, "load_project_config", lambda *a, **k: {
+            "research": {"approval_mode": "attended"}})
+
+        assert main.main(["--mode", "research", "--review", "--unattended",
+                          "q"]) == 0
+        assert (seen["ask"], seen["review"], seen["unattended"],
+                seen["authorization"]) == (None, None, True, ("AUTH", False))
+        assert main.main(["--mode", "research", "--review", "q"]) == 0
+        assert (seen["ask"], seen["review"], seen["unattended"],
+                seen["authorization"]) == ("SOURCES", "CONSENT", False,
+                                           ("AUTH", True))
 
     def test_they_are_accepted_in_research_mode(self, startup):
         """The control: a guard that refused them everywhere would pass
@@ -2122,6 +2162,8 @@ _REFUSED = {
     "--grant": ["--grant"],
     "--grant-tools": ["--grant-tools", "shell"],
     "--attended": ["--attended"],
+    # ROADMAP_v3 §113. Research mode's, like --attended beside it.
+    "--unattended": ["--unattended"],
     "--review": ["--review"],
     "--no-review": ["--no-review"],
     # Bare: it lists stored runs. A value would have to survive the

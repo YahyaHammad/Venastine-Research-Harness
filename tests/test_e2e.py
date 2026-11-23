@@ -253,6 +253,10 @@ def test_research_mode_e2e_prints_report_and_trace(mocker, capsys):
         # ROADMAP_v3 §98: a query starts a NEW run. A resume id here would
         # mean run_research picked a run up that nobody named.
         resume=None,
+        # ROADMAP_v3 §113 (WT5): nobody to ask about sources, and not
+        # unattended -- the parameters' own defaults, forwarded.
+        ask=None,
+        unattended=False,
     )
 
     # --- Verify write_run_artifacts was called with the run ---

@@ -66,6 +66,7 @@ from tools.builtin import (
     pin,
     probability_stats,
     project_docs,
+    read_source,
     remember,
     shell,
     shell_sessions,
@@ -163,7 +164,7 @@ class ToolRegistry:
         self._injectable.pop(tool_name, None)
 
     def _advertised(self, name: str, spec, context,
-                    images: bool = False) -> bool:
+                    images: bool = False, *, supplied: bool = False) -> bool:
         """The two §15 filters, shared by schemas() and
         headless_hidden(): policy allowability plus the tool's own
         "nothing to act on" signal -- and, since ROADMAP_v3 §81 (IM6), a
@@ -179,6 +180,10 @@ class ToolRegistry:
         if spec.available_check is not None and not spec.available_check():
             return False
         if spec.returns_images and not images:
+            return False
+        # ROADMAP_v3 §113 (WT3): read_source, where the run has supplied
+        # files for it to read. DEFAULTS FALSE for images' reason above.
+        if spec.reads_supplied and not supplied:
             return False
         return True
 
@@ -240,6 +245,8 @@ class ToolRegistry:
         callable_only: bool = False,
         granted: Optional[set] = None,
         images: bool = False,
+        *,
+        supplied: bool = False,
     ) -> bool:
         """Whether schemas() would advertise this tool right now.
 
@@ -267,7 +274,8 @@ class ToolRegistry:
         spec = self._tools.get(tool_name)
         if spec is None:
             return False
-        if not self._advertised(tool_name, spec, context, images):
+        if not self._advertised(tool_name, spec, context, images,
+                                supplied=supplied):
             return False
         return not (callable_only
                     and self.approval_needed(tool_name, {}, context)
@@ -278,6 +286,8 @@ class ToolRegistry:
         callable_only: bool = False,
         granted: Optional[set] = None,
         images: bool = False,
+        *,
+        supplied: bool = False,
     ) -> list[dict]:
         """What gets sent to the LLM's `tools` parameter each call.
 
@@ -307,6 +317,9 @@ class ToolRegistry:
           * images (ROADMAP_v3 §81, IM6) -- whether an image in a tool
             result can reach the model in this run. A tool that declares
             `returns_images` is dropped when it cannot; see _advertised.
+          * supplied (ROADMAP_v3 §113, WT3) -- whether this run holds files
+            the user supplied. A tool that declares `reads_supplied` is
+            dropped when it does not.
 
         WHAT callable_only GUARANTEES, stated because the converse does not
         hold and #158 is what assuming it costs: it means SOME call shape
@@ -321,7 +334,7 @@ class ToolRegistry:
         """
         return [spec.schema for name, spec in self._tools.items()
                 if self.is_advertised(name, context, callable_only,
-                                      granted, images)]
+                                      granted, images, supplied=supplied)]
 
     def headless_hidden(
         self, context: Optional["ToolContext"] = None,
@@ -992,6 +1005,11 @@ registry.register(ToolSpec("read", file_ops.READ_TOOL_SCHEMA, file_ops.read_run,
 # check and the same refusal shape -- plus `returns_images`, which keeps it
 # off the schema list wherever the image could not reach the model.
 registry.register(ToolSpec("view_image", file_ops.VIEW_IMAGE_TOOL_SCHEMA, file_ops.view_image_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("view_image"), grant_policy=GRANT_NEVER, budget=BUDGET_IO, returns_images=True))
+# ROADMAP_v3 §113 (WT3). Pages through the files the user supplied for THIS
+# research run, which the harness read and redacted when they answered; it
+# opens nothing itself. `reads_supplied` keeps it off every run that holds
+# none. Ungated: it can reach only what the user put in that run's folder.
+registry.register(ToolSpec("read_source", read_source.TOOL_SCHEMA, read_source.run, grant_policy=GRANT_ANYWHERE, budget=BUDGET_IO, reads_supplied=True))
 registry.register(ToolSpec("write", file_ops.WRITE_TOOL_SCHEMA, file_ops.write_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("write"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
 registry.register(ToolSpec("edit", file_ops.EDIT_TOOL_SCHEMA, file_ops.edit_run, approval_check=file_ops._file_approval_check, refusal_check=file_ops._refusal_for("edit"), grant_policy=GRANT_NEVER, budget=BUDGET_IO))
 # §28: approval_notice carries the capability profile into the prompt.

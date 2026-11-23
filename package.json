@@ -1,6 +1,6 @@
 {
   "name": "@yahyahammad/venastine",
-  "version": "0.3.28",
+  "version": "0.3.28-b.1.wanted-sources.r23d4ed1eacfa",
   "description": "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline.",
   "keywords": [
     "agent",

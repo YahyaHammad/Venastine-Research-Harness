@@ -984,6 +984,20 @@ max_granted_tool_calls: 150
 # it.
 attended_approval_timeout_s: 600
 
+# How long a research run's question about the sources it could not read
+# waits for an answer, in seconds. 0 waits until it is answered. The run
+# asks after Pass 1 and again after Pass 3a, each once, and only where
+# someone can answer: a piped CLI and an unattended run never ask.
+wanted_sources_wait_s: 0
+
+# Whether a research run is unattended: nothing in it asks anything.
+# Gated tools are hidden as on a piped run, review findings are recorded
+# and not applied, and the sources questions are recorded and skipped. A
+# settings.json `research.unattended` outranks this; --unattended and
+# /research --unattended turn it on for one run, and it excludes
+# --attended.
+research_unattended: false
+
 # Whether a finished research run is reviewed. A settings.json
 # `research.subagent_review` outranks this; --no-review escapes it for one
 # run.
@@ -1177,6 +1191,8 @@ hf_oauth_client_id: "3a823316-767d-4abe-8e55-6c0354ce2c27"
 # view_image follows read because it reads a file
 # off disk the same way; it also needs a provider marked `accepts_images` in
 # providers.json before it is offered at all (ROADMAP_v3 §81, IM6).
+# read_source pages through the files you supplied for a research run, and
+# is offered only in a run that has some (ROADMAP_v3 §113, WT3).
 # Every registered tool must appear in BOTH tables or the harness refuses
 # to start (D24).
 tool_permissions:
@@ -1211,6 +1227,7 @@ tool_permissions:
   write_project_doc: true
   ask_user: true
   todo_write: true
+  read_source: true
 
 # AUTHORITY -- whether each tool needs a human yes before it runs. Approval ORs
 # across every layer, so a true here is a one-way ratchet that can only
@@ -1253,3 +1270,4 @@ tool_approvals:
   write_project_doc: true
   ask_user: false
   todo_write: false
+  read_source: false

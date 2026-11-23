@@ -483,6 +483,11 @@ def _authorization_kwargs(authorization) -> dict:
         "granted_tools": authorization.granted_tools or None,
         "grant_budget": authorization.budget,
         "response_channel": authorization.provider,
+        # ROADMAP_v3 §113 (WT3). What this run may read with read_source:
+        # the files the user supplied, as the harness read them. An
+        # authorization fact -- the tool reaches exactly these and nothing
+        # else -- and on the bundle so a pass's retries carry it too.
+        "supplied": authorization.supplied or None,
     }
 
 
@@ -1844,6 +1849,7 @@ class RunAgentLoop:
         compaction_mode: Optional[str] = None,
         activity=None,
         cancel=None,
+        supplied=None,
     ):
         """Generator yielding LoopEvent objects as the loop progresses.
 
@@ -1961,7 +1967,10 @@ class RunAgentLoop:
             model=model, provider_name=provider_name, effort=effort,
             granted_tools=set(granted_tools or ()),
             grant_budget=grant_budget,
-            images=_images_deliverable(provider_name, memory))
+            images=_images_deliverable(provider_name, memory),
+            # ROADMAP_v3 §113 (WT3): the files the user supplied for this
+            # research run, which read_source pages through.
+            supplied=supplied)
         headless = response_channel is None
         # The BUDGET is deliberately not consulted here. Advertisement is
         # decided once per step; R6 makes exhaustion fall back to asking
@@ -1972,7 +1981,7 @@ class RunAgentLoop:
         # tool having ceased to exist.
         tool_schemas = registry.schemas(
             context, callable_only=headless, granted=run_info.granted_tools,
-            images=run_info.images)
+            images=run_info.images, supplied=bool(run_info.supplied))
         if not run_info.images:
             unoffered = tuple(sorted(registry.image_hidden(
                 context, granted=run_info.granted_tools)))

@@ -633,6 +633,50 @@ QuestionScreen {
     align: center middle;
 }
 
+/* ROADMAP_v3 §113 (WT5). The research run's sources question. Its body is a
+   list of URLs that can run to a hundred, so the dialog takes most of the
+   terminal and the list takes what the answers leave: the decision rows are
+   sized to their content and stay inside at every size, and a bigger
+   terminal shows more of the list rather than a taller empty box. */
+SourcesScreen {
+    align: center middle;
+}
+
+#sources-dialog {
+    width: 90%;
+    max-width: 110;
+    height: 90%;
+    padding: 1 2;
+    border: thick $primary;
+    background: $surface;
+}
+
+#sources-title {
+    text-style: bold;
+    width: 100%;
+}
+
+#sources-body-box {
+    height: 1fr;
+    padding: 1 0;
+    width: 100%;
+}
+
+#sources-body {
+    height: auto;
+    width: 100%;
+}
+
+#sources-options {
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
+#sources-options Button {
+    width: 100%;
+}
+
 #question-dialog {
     width: 66;
     height: auto;

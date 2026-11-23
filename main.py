@@ -1882,6 +1882,38 @@ def build_attended_provider(honour_run_scope: bool = False,
             return None
         return {"options": [], "text": cleaned}
 
+    def _sources(request):
+        """A research run's question about the sources it could not read
+        (ROADMAP_v3 §113, WT5). Waits `wait_s` from the payload -- 0 is
+        until answered -- not this provider's approval timeout.
+
+        A number chooses one of the three answers; anything else is a note
+        the next attempt is given; a blank line is no answer, which the run
+        reads as "proceed without them"."""
+        payload = request.payload
+        choices = list(payload.get("choices") or ())
+        options = [str(o) for o in (payload.get("options") or ())]
+        visible = _Visible()
+        print(f"\n[sources] {visible(payload.get('title', ''))}")
+        body = payload.get("body", "")
+        if body:
+            print(visible(body))
+        for index, option in enumerate(options, start=1):
+            print(f"  {index}. {visible(option)}")
+        visible.warn()
+        wait = payload.get("wait_s") or 0
+        answer = reader.ask("  a number, or your own answer (blank to "
+                            "proceed without them): ", wait or None)
+        if answer is None:
+            print("  [no answer -- the run goes on without those sources]")
+            return None
+        cleaned = answer.strip()
+        if not cleaned:
+            return None
+        if cleaned.isdigit() and 1 <= int(cleaned) <= len(choices):
+            return {"choice": choices[int(cleaned) - 1], "text": ""}
+        return {"choice": None, "text": cleaned}
+
     def _signoff(request):
         """Per-tool subagent sign-off (§23 AC1b).
 
@@ -2063,6 +2095,7 @@ def build_attended_provider(honour_run_scope: bool = False,
         interaction.SECRET: _secret,
         interaction.SUBAGENT_SIGNOFF: _signoff,
         interaction.QUESTION: _question,
+        interaction.SOURCES: _sources,
         interaction.REVIEW: _review,
         interaction.CONFIRM: _confirm,
         interaction.CHOICE: _choice,
@@ -2595,6 +2628,8 @@ def run_research(
     subagent_review=None,
     effort: str | None = None,
     resume=None,
+    ask=None,
+    unattended: bool = False,
 ) -> None:
     """Run the full deep-research pipeline, write artifacts to disk,
     and print the results. ensemble_mode/ensemble_n come from
@@ -2649,7 +2684,7 @@ def run_research(
             ensemble_mode=ensemble_mode, ensemble_n=ensemble_n,
             authorization=authorization, review=review,
             subagent_review=subagent_review, effort=effort,
-            resume=run_id,
+            resume=run_id, ask=ask, unattended=unattended,
         ):
             # §26: tool calls and code stages print here too. The CLI is
             # the shell an unattended run is launched from, so a
@@ -2880,6 +2915,20 @@ def build_parser() -> argparse.ArgumentParser:
              "happens, instead of hiding those tools. Combines with "
              "--grant, which covers the tools you do not want asked about.",
     )
+    # ROADMAP_v3 §113. Nothing in the run asks: gated tools hidden, review
+    # findings recorded and not applied, the sources questions recorded
+    # and skipped. Refused with --attended, which asks about every call.
+    parser.add_argument(
+        "--unattended",
+        dest="unattended",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Research mode: ask nothing during the run. Gated tools are "
+             "hidden, review findings are recorded and not applied, and "
+             "the questions about sources it could not read are skipped. "
+             "Not with --attended.",
+    )
     # §20 (D9). Same None-default precedence as --attended, and for the
     # same reason: the MODE is persistable, so settings.json can turn the
     # review on and an explicit flag still wins either way. --no-review
@@ -3105,6 +3154,36 @@ def _prompt_review_decision(reader, finding, round_index,
     if head in ("!", "reject-all"):
         return ("reject_all", "")
     return ("reject", "")
+
+
+def build_sources_channel():
+    """The channel a research run asks about the sources it could not read
+    through (ROADMAP_v3 §113, WT5), or None when stdin is not a terminal --
+    build_review_consent's rule: a piped run has nobody to ask, so it
+    records the question and goes on."""
+    if not sys.stdin.isatty():
+        return None
+    return build_attended_provider()
+
+
+def resolve_unattended(args, settings: dict) -> bool:
+    """ROADMAP_v3 §113. --attended > --unattended > settings.json
+    research.unattended > config.yaml research_unattended.
+
+    An explicit --attended outranks a PERSISTED unattended (the two flags
+    together are refused at parse time). A persisted unattended removes
+    prompts, which a persisted mode otherwise never does -- and it is safe
+    to, because every prompt it removes is answered with its declining
+    default: a gated tool hidden, a review finding not applied, a source
+    gone without."""
+    if args.attended:
+        return False
+    if args.unattended:
+        return True
+    persisted = settings.get("research", {}).get("unattended")
+    if persisted is not None:
+        return bool(persisted)
+    return bool(config.RESEARCH_UNATTENDED)
 
 
 def build_review_consent():
@@ -3772,8 +3851,12 @@ def main(argv=None) -> int:
         parser.error(
             "--tui does not take a positional query; start the TUI and "
             "type your message, or drop --tui to send it directly.")
+    if args.attended and args.unattended:
+        parser.error("--attended asks about every gated call and "
+                     "--unattended asks nothing; choose one.")
     if (args.grant_tools is not None or args.attended is not None
-            or args.review is not None) and args.mode != "research":
+            or args.review is not None or args.unattended is not None
+            ) and args.mode != "research":
         # Chat is interactive by definition, so a pre-flight grant there
         # would be authorising up front what is about to be asked anyway --
         # and silently widening chat is not what a flag documented for
@@ -3903,20 +3986,26 @@ def main(argv=None) -> int:
             # connection time, so asking any earlier would offer a list
             # that is empty for exactly the servers this exists to reach.
             review_on = resolve_review(args, settings)
+            unattended = resolve_unattended(args, settings)
             run_research(
                 args.query, provider, model,
                 ensemble_mode=settings.get("ensemble_mode"),
                 ensemble_n=settings.get("ensemble_n"),
                 authorization=build_research_authorization(
-                    args.grant_tools, resolve_attended(args, settings)),
+                    args.grant_tools,
+                    not unattended and resolve_attended(args, settings)),
                 # Two facts, deliberately: whether the review runs, and
                 # whether anyone can be asked about it. build_review_consent
                 # returns None on a non-tty stdin, so a piped run still
                 # gets the findings and still changes nothing (V6).
                 subagent_review=review_on,
-                review=build_review_consent() if review_on else None,
+                review=(build_review_consent()
+                        if review_on and not unattended else None),
                 effort=effort,
                 resume=args.resume,
+                # ROADMAP_v3 §113 (WT5).
+                ask=None if unattended else build_sources_channel(),
+                unattended=unattended,
             )
         else:
             thread_id = args.thread

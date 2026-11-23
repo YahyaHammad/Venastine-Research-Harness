@@ -396,16 +396,19 @@ def test_pipeline_6a6c_retry_loop_continues_until_max_retries_then_fallback(mock
             f'-> kept LOW, limited by an assumption it rests on '
             f'("unsupported claim").') in d2_lines, d2_lines
 
-    # XR4: the report ends with the section, listing C2 under its reason.
+    # XR4: the report ends with the section, listing C2 under its reason --
+    # and since ROADMAP_v3 §113 (WT1) the sources section follows it,
+    # because these payloads cite a URL no pass fetched.
     assert run.final_report.startswith(
         "Hypotheses A and C are well-supported; B remains uncertain.")
     assert "## Where the evidence is thin" in run.final_report
-    assert run.final_report.endswith(
+    assert (
         "### Rests on an assumption (1)\n\n"
         f'- LOW, {config.MAX_PIPELINE_RETRIES} rounds: '
         f'"Revision {config.MAX_PIPELINE_RETRIES}"\n'
         '    - first stated as: "B seems likely."\n'
-        '    - assumption: "unsupported claim"\n')
+        '    - assumption: "unsupported claim"\n\n'
+        '## Sources it could not read\n') in run.final_report
 
 
 def _two_claims_stuck_through_retry_payloads(six_a_rounds: list):
@@ -787,7 +790,11 @@ def test_pipeline_trace_contains_expected_lines_in_order(mocker):
     # a colon-delimited prefix that doesn't apply to lines like "Final
     # synthesis complete." (no colon).
     expected_pass_starts = [
-        "Pass 0:", "Pass 1:", "Pass 2:", "D0:", "Pass 3a:", "Pass 3b:",
+        "Pass 0:", "Pass 1:", "Pass 2:", "D0:", "Pass 3a:",
+        # ROADMAP_v3 §113 (WT5): these payloads cite sources no pass
+        # fetched, and nothing here can be asked about them, so 3a says so.
+        "Pass 3a:",
+        "Pass 3b:",
         "Pass 3c:", "Pass 4:", "Pass 5:", "D1:", "Pass 6c:", "Merge:",
         "Final synthesis",
     ]
@@ -802,7 +809,9 @@ def test_pipeline_trace_contains_expected_lines_in_order(mocker):
     # STILL STRICT IN BOTH DIRECTIONS: the pass sequence must be exactly
     # this, AND every line that is not a pass line must be one of the
     # run-level prefixes below. A stray line still fails.
-    expected_run_level_starts = ["Source scoring:"]
+    # ROADMAP_v3 §113 (WT1): and the run's closing line about the sources
+    # it could not read.
+    expected_run_level_starts = ["Source scoring:", "Sources:"]
 
     # ROADMAP_v3 §108 (PW5): each LLM pass's run ends with its figures and
     # the run with its total. Told apart by `usage_view.is_usage_line`, the

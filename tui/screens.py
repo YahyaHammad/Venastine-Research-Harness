@@ -1360,3 +1360,74 @@ class SecretScreen(ModalScreen[object]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class SourcesScreen(ModalScreen[object]):
+    """ROADMAP_v3 §113 (WT5). A research run's question about the sources it
+    could not read: the list, where to put a file, and three answers.
+
+    Dismisses with {"choice": one of the offered keys, or None, "text":
+    what was typed}, or None -- Escape, and the app's shutdown release --
+    which core.interaction.decode reads as "proceed without them", the
+    answer the run gave before it could ask.
+
+    NO "discuss instead": QuestionScreen's escape is for the model's own
+    question, and a research pass has nobody to discuss it with. A typed
+    answer with none of the three chosen is a note the next attempt is
+    given.
+    """
+
+    BINDINGS = [("escape", "dismiss_unanswered", "No answer")]
+
+    def __init__(self, title: str, body: str, choices=(), labels=()):
+        super().__init__()
+        self._title = title
+        self._body = body
+        self._choices = list(choices)
+        self._labels = list(labels)
+
+    def compose(self) -> ComposeResult:
+        # The body names URLs a model asked for, so it is Text, never
+        # markup, and bounded and scrollable: 111 of them is a real list.
+        yield Vertical(
+            Label(Text(self._title), id="sources-title"),
+            ScrollBox(Static(Text(self._body), id="sources-body"),
+                      id="sources-body-box"),
+            # Compact, one row each: all three answers stay in view beside a
+            # list that takes the rest of the dialog.
+            Vertical(*[Button(Text(label), variant="primary", compact=True,
+                              id=f"sources-opt-{index}")
+                       for index, label in enumerate(self._labels)],
+                     id="sources-options"),
+            Input(placeholder="...or write your own answer (a note for the "
+                              "next attempt)", id="sources-text"),
+            Horizontal(Button("Answer", variant="success", id="sources-ok"),
+                       id="sources-buttons"),
+            id="sources-dialog")
+
+    def on_mount(self) -> None:
+        found = self.query("#sources-opt-0")
+        if found:
+            found.first().focus()
+
+    def _typed(self) -> str:
+        try:
+            return self.query_one("#sources-text", Input).value.strip()
+        except Exception:  # noqa: BLE001 -- absent only on a torn-down screen
+            return ""
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id.startswith("sources-opt-"):
+            index = int(button_id.rsplit("-", 1)[1])
+            self.dismiss({"choice": self._choices[index],
+                          "text": self._typed()})
+        elif button_id == "sources-ok":
+            self.dismiss({"choice": None, "text": self._typed()})
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if self._typed():
+            self.dismiss({"choice": None, "text": self._typed()})
+
+    def action_dismiss_unanswered(self) -> None:
+        self.dismiss(None)

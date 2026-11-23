@@ -107,6 +107,9 @@ class RunInfo:
     # handler, to refuse a call made anyway -- so the two cannot disagree.
     # False by default: a RunInfo built anywhere else delivers no images.
     images: bool = False
+    # ROADMAP_v3 §113 (WT3). name -> wanted_sources.Supplied, the files
+    # the user supplied for this research run; read_source's only source.
+    supplied: Optional[dict] = None
 
     def remember_signoff(self, tool_name: str, subject, subset) -> None:
         """Record an answer so the rest of this run need not re-ask.
