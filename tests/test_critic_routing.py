@@ -100,8 +100,8 @@ CRITIC_PASS_IDS = {"Pass 3a", "Pass 3b", "Pass 6b"}
 MAIN_PASS_IDS = {"Pass 0", "Pass 1", "Pass 2", "Pass 3c", "Pass 4", "Pass 6a", "Final synthesis"}
 
 
-def test_critic_routing_sends_3a_3b_6c_to_critic_model(mocker):
-    """With CRITIC_MODEL set, Pass 3a/3b/6c use the critic provider/model
+def test_critic_routing_sends_3a_3b_6b_to_critic_model(mocker):
+    """With CRITIC_MODEL set, Pass 3a/3b/6b use the critic provider/model
     while every other pass uses the main provider/model."""
     mocker.patch.dict(config.__dict__, {
         "CRITIC_MODEL": {"provider_name": "OPENAI", "model": "gpt-5.1"},

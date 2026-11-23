@@ -6,7 +6,7 @@ OpenAI-compatible provider, plus the replies in the same thread. The researcher,
 models are not named, and the researcher's words are paraphrased rather than quoted: the thread was a
 private conversation and this repository is public. Keep it that way in any edit. Except §101,
 §102, §103, §105 and §108, which were accepted and built (batches 277, 284, 281, 280, and
-282 and 283) and now live in `ROADMAP_v3.md`, nothing here is built
+282 and 283) and now live in `ROADMAP_v3.md`, and §110's AD1 and AD2 (batch 285), nothing here is built
 and **no decision below is locked**: every Design Decisions table is a proposal for the
 owner to accept, change or refuse, in the convention the three roadmaps already use. A section the owner
 accepts keeps its number; one refused is recorded as refused rather than renumbered, so `§N` keeps one
@@ -54,7 +54,7 @@ append-only, and a deviation is an owner decision in `DEVLOG.md`.
 
 **Research quality — what the researcher actually came for**
 
-- **§110. The draft you can read, with its checks on it** - **(NOT BUILT: proposed 2026-11-20)** (the researcher reads the raw draft and finds the report hard to use, because in a synthesis the subtle problems compound. Final synthesis is handed the atomised claims and never the draft's order, so it rebuilds a structure the draft already had. Proposes the Pass 1 draft as a first-class artifact with each claim's tier and flags marked where it was said, in pure code)
+- **§110. The draft you can read, with its checks on it** - **(AD1 and AD2 BUILT in batch 285: now `ROADMAP_v3.md` §110; AD3 still proposed here, gated on §115)** (the researcher reads the raw draft and finds the report hard to use, because in a synthesis the subtle problems compound. Final synthesis is handed the atomised claims and never the draft's order, so it rebuilds a structure the draft already had. Proposes the Pass 1 draft as a first-class artifact with each claim's tier and flags marked where it was said, in pure code)
 - **§111. Claims that know what they rest on** - **(NOT BUILT: proposed 2026-11-20)** (the researcher asked whether claims are stored as a dependency graph, so that a claim's confidence could be computed from what it depends on. They are a flat list; the thread's "local and global claims" exist in a DEVLOG ruling, not in the code. Proposes `depends_on` edges at Pass 2 and a premise floor computed in code, shown before it is ever scored)
 - **§112. Looking where the paper would not have looked: citations, both ways, and out of network** - **(NOT BUILT: proposed 2026-11-20)** (an external assessment the researcher passed on found the prior-art survey possibly circular, the seed paper's own reference list re-sorted; the researcher found the run followed citations toward the high-level work and missed the cross-disciplinary work. Proposes a citation graph built by the harness from OpenAlex, and searches written in mechanism vocabulary rather than the seed paper's, to find parallel lines of work that do not cite each other)
 - **§113. Asking for the paper instead of plowing on** - **(NOT BUILT: proposed 2026-11-20)** (the researcher would rather a run say which paper it could not get, so they can fetch it, and would prefer a light first run that lists what is needed before a full rerun. Proposes a wanted-sources record, a scouting run, a user-supplied sources folder the harness reads into the corpus, and Zotero through MCP)
@@ -381,6 +381,8 @@ worse than none").
 ---
 
 ## §110. The draft you can read, with its checks on it
+
+**AD1 and AD2 accepted and built in batch 285 (2026-11-23), and recorded as `ROADMAP_v3.md` §110.** The owner chose the short mark (the claim's id and tier, with the detail after the draft), the synthesis as the shipped `report_style`, and the annotated draft in every shell under `draft-first`, and kept `01_raw_response.md` exactly as it is. **AD3 is still a proposal here**, gated on §115; the text below is the proposal as written, and the record holds the decisions as built.
 
 **Proposed 2026-11-20, from the researcher's strongest and most repeated point.** They much prefer
 the raw Pass 1 response to `report.md`, which drops a great deal of the useful nuance and which they

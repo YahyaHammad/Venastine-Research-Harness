@@ -5786,7 +5786,10 @@ class VenastineApp(App):
         # §22: the trace is NOT re-printed here. Every line already
         # arrived as a trace_line event and was written as it happened;
         # dumping run.trace again would print the whole run twice.
-        self._transcript.write_answer(run.final_report or "")
+        # §110 (AD2): the annotated draft under report_style: draft-first,
+        # the one function the CLI and /copy report also read.
+        from core.reasoning.annotated_draft import shown_report
+        self._transcript.write_answer(shown_report(run))
         if run.claims:
             # §26. The report is a synthesis; the claims are what it was
             # synthesised from, with the tiers and grounding that decided
@@ -7306,9 +7309,12 @@ def _copy_payload(app: VenastineApp, target: str):
         # see Transcript.last_answer for what the field got wrong.
         return (app._transcript.last_answer() or None), "the last response"
     if target == "report":
+        # §110 (AD2): what the run showed as its report, so the annotated
+        # draft under report_style: draft-first.
+        from core.reasoning.annotated_draft import shown_report
         run = app._last_run
-        return ((run.final_report if run and run.final_report else None),
-                "the research report")
+        return ((shown_report(run) or None) if run and run.final_report
+                else None), "the research report"
     if target == "conversation":
         # Batch 48. `/copy all` is everything on screen, harness lines
         # included, and that is what its name promises and what #140
@@ -7337,7 +7343,8 @@ def _copy_payload(app: VenastineApp, target: str):
     parts = [app._transcript.as_text() or ""]
     run = app._last_run
     if run is not None and run.final_report:
-        parts.append("\n\n## Report\n\n" + run.final_report)
+        from core.reasoning.annotated_draft import shown_report
+        parts.append("\n\n## Report\n\n" + shown_report(run))
     claims = ([vars(c) for c in run.claims] if run is not None and run.claims
               else list(app._live_claims.values()))
     if claims:

@@ -425,6 +425,17 @@ authority_adjustment_cap: 0.15
 persist_source_text: true
 
 # ======================================================================
+# The report
+# ======================================================================
+
+# Which file a research run's report.md is: `synthesis`, the report written
+# from the claims, or `draft-first`, the Pass 1 draft with each claim's
+# tier marked where it was made (01_annotated_draft.md), with the synthesis
+# kept as report_synthesis.md. Every run writes both; this picks the one
+# the shells show.
+report_style: synthesis
+
+# ======================================================================
 # Scholarly authority (OpenAlex)
 # ======================================================================
 

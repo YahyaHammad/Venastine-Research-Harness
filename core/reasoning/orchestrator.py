@@ -1580,6 +1580,9 @@ def stream_deep_research_pipeline(
     # pure function of its arguments, and a run's numbers cannot change
     # halfway through it.
     confidence_weights = effective_confidence(warn=True)
+    # §110 (AD1): kept on the run, so the annotated draft, written after
+    # the run, gives a flagged claim the reason this run's scoring gave it.
+    run.confidence_weights = confidence_weights
 
     # §25 audit trail: ONE list, shared, not two kept in step. The run and
     # the authorization bundle now refer to the same object, so a granted
@@ -1702,7 +1705,7 @@ def stream_deep_research_pipeline(
                 # (E1). No new plumbing: _run() calls api_initialization() itself
                 # and effort_for() validates against the receiving model, so a
                 # heterogeneous roster is correct by construction -- the same way
-                # §11 already routes 3a/3b/6c to critic_provider/critic_model.
+                # §11 already routes 3a/3b/6b to critic_provider/critic_model.
                 candidates = []
                 for entry in roster:
                     label = f"{entry['provider_name']}/{entry['model']}"

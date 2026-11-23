@@ -184,6 +184,7 @@ list which is a decision rather than an omission.
 - [Embedder routing (ROADMAP_v2 §45, SQ2/SQ7)](#embedder-routing-roadmap_v2-45-sq2sq7)
 - [Source authority: domain classes (ROADMAP_v2 §45, SQ4)](#source-authority-domain-classes-roadmap_v2-45-sq4)
 - [The sources/ artifact (ROADMAP_v2 §45, SQ8)](#the-sources-artifact-roadmap_v2-45-sq8)
+- [The report (ROADMAP_v3 §110, AD2)](#the-report-roadmap_v3-110-ad2)
 - [Scholarly authority: OpenAlex (ROADMAP_v2 §45, SQ5/SQ9)](#scholarly-authority-openalex-roadmap_v2-45-sq5sq9)
 - [Reasoning effort (ROADMAP_v2 §16; default changed batch 25, #139)](#reasoning-effort-roadmap_v2-16-default-changed-batch-25-139)
 - [Database](#database)
@@ -475,7 +476,7 @@ OpenAI-compatible gateway, which still sends whatever it is given.
 
 ### `critic_model`
 
-Route the critic/grounding passes (3a, 3b, 6c) to a different model than
+Route the critic/grounding passes (3a, 3b, 6b) to a different model than
 the generator, so a model isn't checking its own output for errors.
 None means every pass uses the same provider/model — no special routing.
 Example to enable: {"provider_name": "OPENAI", "model": "gpt-5.1"}
@@ -619,6 +620,32 @@ it cuts now, so the halves never exist.
 It is new data at rest, so it has a switch and PRIVACY.md says what it
 holds. Turning it off costs the audit trail, not the scores: the corpus
 still exists in memory for the run that computes them.
+
+## The report (ROADMAP_v3 §110, AD2)
+
+### `report_style`
+
+Which file a research run's `report.md` is, and so what the TUI's answer,
+`/copy report` and the CLI's printout show when the run ends.
+
+`synthesis`, the default, is the report final synthesis writes from the
+claims, as before §110, opening now with a link to `01_annotated_draft.md`.
+`draft-first` makes `report.md` the annotated draft itself -- the Pass 1
+draft with each claim's id and tier marked where it was made, and an entry
+per claim after it -- and keeps the synthesis as `report_synthesis.md`.
+Every run writes both files and `01_raw_response.md`, whichever this says;
+the setting only picks which one is "the report".
+
+The synthesis stays the default because the two serve different readers.
+The researcher §110 was built for reads the draft, because it sets its
+assumptions out one at a time and the synthesis hides how its points lean
+on each other; an annotated draft is also long, and the same researcher
+said a reader skimming would count that against it. The owner chose the
+default (batch 285).
+
+A cosmetic key, and not an authority key: it changes which of two files a
+run already wrote is called the report, and nothing the harness may call
+or run.
 
 ## Scholarly authority: OpenAlex (ROADMAP_v2 §45, SQ5/SQ9)
 
