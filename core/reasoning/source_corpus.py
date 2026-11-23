@@ -53,7 +53,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
 
@@ -233,6 +233,14 @@ class SourceCorpus:
 
     documents: dict = field(default_factory=dict)
     dropped: int = 0
+    # ROADMAP_v3 §113 (WT1). Every fetch that failed, by normalized URL:
+    # {"url", "error", "passes"}. The COMPLEMENT of `documents`, kept here
+    # because this module owns URL identity: "the run never read this" has
+    # to mean the same URL that "the run read this" means.
+    failures: dict = field(default_factory=dict)
+    # Normalized URLs a fetch was ASKED for and answered, which a redirect
+    # stores under another key. A failure here is no longer wanted.
+    resolved: set = field(default_factory=set)
 
     # -- ingest ----------------------------------------------------------
 
@@ -418,6 +426,77 @@ class SourceCorpus:
             next_offset=(offset + len(text)) if offset is not None else 0,
         )
         return 1
+
+    # -- §113 (WT1): what the run asked for and did not get ---------------
+
+    def note_failure(self, tool_name: str, params, result,
+                     where: str = "") -> bool:
+        """Record one failed `fetch_url`. Returns whether it was recorded.
+
+        Only fetch_url: a failed search is not a source anyone could supply,
+        and `arxiv_search`'s and `web_search`'s errors name a query, not a
+        document. `params` is the call's input, because an error result
+        does not say which URL it was for."""
+        if tool_name != "fetch_url" or not isinstance(params, dict):
+            return False
+        url = params.get("url")
+        key = normalize_url(url) if isinstance(url, str) else ""
+        if not key:
+            return False
+        error = result.get("error") if isinstance(result, dict) else None
+        entry = self.failures.setdefault(
+            key, {"url": url.strip(), "error": "", "passes": []})
+        # The LATEST error: a 429 that became a 403 on the retry is a 403.
+        entry["error"] = redact_output_text(str(error or ""))[:300]
+        if where and where not in entry["passes"]:
+            entry["passes"].append(where)
+        return True
+
+    def note_obtained(self, tool_name: str, params) -> None:
+        """A fetch of `params["url"]` answered. Its text is stored under the
+        URL that ANSWERED, so the one asked for is noted here too."""
+        if tool_name != "fetch_url" or not isinstance(params, dict):
+            return
+        url = params.get("url")
+        key = normalize_url(url) if isinstance(url, str) else ""
+        if key:
+            self.resolved.add(key)
+
+    def add_supplied(self, name: str, text: str,
+                     retrieved_at: str | None = None,
+                     url: str | None = None) -> int:
+        """A file the user supplied (§113, WT3), under `supplied/<name>`.
+        Redacted and bounded like every other document.
+
+        `url` is the address the file was matched to (WT8): the same text is
+        held under it too, so a claim citing that address is checked against
+        the user's copy, replacing a search snippet or an abstract but never
+        a page a fetch read."""
+        added = self._store(url=f"supplied/{name}", text=text, title=name,
+                            tool="supplied", retrieved_at=retrieved_at)
+        held = self.documents.get(normalize_url(f"supplied/{name}"))
+        key = normalize_url(url) if isinstance(url, str) else ""
+        if held is None or not key:
+            return added
+        current = self.documents.get(key)
+        if current is not None and current.tool not in (
+                "web_search", "arxiv_search"):
+            return added
+        if current is None and len(self.documents) >= MAX_DOCUMENTS:
+            self.dropped += 1
+            return added
+        self.documents[key] = replace(held, url=key)
+        return added + 1
+
+    def reading(self, url: str) -> str:
+        """How much of `url` this run read: "full", "snippet" (a search
+        result's), "abstract" (arXiv's), or "none"."""
+        key = normalize_url(url) if isinstance(url, str) else ""
+        document = self.documents.get(key)
+        if document is None:
+            return "full" if key in self.resolved else "none"
+        return {"web_search": "snippet",
+                "arxiv_search": "abstract"}.get(document.tool, "full")
 
     # -- read ------------------------------------------------------------
 

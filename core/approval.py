@@ -135,3 +135,8 @@ class RunAuthorization:
     # runs most worth auditing; unit 9 mutated the share into `list(...)`
     # and it went red.
     granted_calls: list = field(default_factory=list)
+    # ROADMAP_v3 §113 (WT3). name -> wanted_sources.Supplied: the files the
+    # user supplied for this run, as the harness read and redacted them when
+    # the user answered. read_source reads these and nothing else. Filled
+    # mid-run, by reference, so every pass after the answer can read them.
+    supplied: dict = field(default_factory=dict)

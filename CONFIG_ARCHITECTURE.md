@@ -1552,6 +1552,45 @@ away from an attended run degrades it rather than wedging it, so nine
 completed passes are not lost to one unanswered question. Generous by
 default because the whole point of the mode is that someone is there.
 
+### `wanted_sources_wait_s`
+
+ROADMAP_v3 §113 (WT5). How long a research run's question about the
+sources it could not read waits for an answer, in seconds. **0, the
+shipped value, waits until it is answered** (the owner's choice): the
+question is asked at two points, after Pass 1 and after Pass 3a, each
+once, and an answer that brings a file or a fetch that now answers
+redrafts or grounds again with it, which is worth waiting for. Its own
+key rather than `attended_approval_timeout_s`, because the two answer
+different questions: an approval left unanswered denies one call, and
+this one, left unanswered, sends the run on without the sources. A run
+nobody can be asked in -- a piped CLI, an unattended run -- never asks,
+so this never stalls one.
+
+### `wanted_sources_retry_parallel`
+
+ROADMAP_v3 §113 (WT9). How many of the sources a run could not read are
+fetched at once when the answer to its question is "I've connected access:
+try them again". **4 by default** (the owner's choice of a key over a
+constant): 111 addresses one at a time, each allowed `fetch_url`'s
+timeout, was minutes after the answer. Each fetch still goes through the
+registry, so the URL policy, the output policy and the network meter apply
+as to the model's own calls; this sets only how many run side by side. The
+results are recorded in the listed order, so the record is the same
+whatever order they answer in. At least 1.
+
+### `research_unattended`
+
+ROADMAP_v3 §113 (WT6). Whether a research run asks anything at all.
+`true` hides gated tools as on a piped run, records review findings and
+applies none (V6), and records and skips the sources questions; no
+`supplied/` folder is made. A settings.json `research.unattended`
+outranks it, `--unattended` and `/research --unattended` turn it on for
+one run, and an explicit `--attended` outranks a persisted `true` (the
+two flags together are refused). It is the one persisted research mode
+that removes prompts, and R12 still holds: every prompt it removes is
+answered with its declining default, so it can make a run ask nothing
+and change nothing, never do more.
+
 ### `subagent_review`
 
 ROADMAP_v2 §20 (D9). Whether a finished research run gets a reviewer pass
@@ -2122,6 +2161,14 @@ response channel, which the tool itself checks.
 §23 slice 2. Thread-scoped, reversible, and it asks nobody -- so it is
 allowed and ungated for `pin`'s reasons (J9).
 
+#### `tool_permissions.read_source`  -- ships `true`
+
+ROADMAP_v3 §113 (WT3). Pages through the files the user supplied for
+THIS research run, as the harness read and redacted them when the user
+answered the run's question; it opens nothing and takes no path. It is
+offered only in a run that holds such files (`reads_supplied`), so
+shipping it on puts it in front of no model that has nothing to read.
+
 ### `tool_approvals`
 
 #### `tool_approvals.fetch_url`  -- ships `false`
@@ -2254,3 +2301,9 @@ from `remember`. A todo list is thread-scoped and reversible, and
 rewriting it costs some prompt budget inside a conversation the user
 can see. Gating it would also make it invisible in every research pass
 (§13), which is where a checklist across ten passes helps most.
+
+#### `tool_approvals.read_source`  -- ships `false`
+
+ROADMAP_v3 §113 (WT3): UNGATED. Everything it can return is what the
+user put in that run's folder, and gating it would hide it from the
+research passes it exists for (§13), which cannot ask.

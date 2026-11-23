@@ -54,6 +54,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280)** (D2 overwrote the tier of every claim that ran out of revision rounds with UNVERIFIED, so a partly grounded claim scoring 0.45 (LOW) was published as one nothing supports beside a breakdown still saying 0.45. D2 keeps the tier 6b scored and records `loop_exhausted`; a flagged claim names its largest deduction; an exhausted claim publishes the revision 6b scored with what it was first stated as beside it; and every shell's report ends with a code-rendered "Where the evidence is thin" section, built after the review; XR1-XR4)
 - **§108. A research pass you can watch** - **(PW1-PW4, PW6 and PW7 BUILT in batch 282; PW5 in batch 283)** (a pass that streamed 40,000 characters of thinking and 3,000 of text announced 2,000 and its view, which reads the archive, showed its task alone until the call ended; a finished pass could not be opened from the TUI at all. Thinking is activity, every run's view streams the step in progress from a live record the loop writes, a running pass row says how long, what and how much, research rows open their pass, finished subagents stay in the agent panel, running rows spin, and the CLI says when a pass has waited a minute on the model. Batch 283: a run's and each pass's calls, tokens and time are stored on its record and shown in its trace, the panel's foot and `/usage --run`)
 - **§110. The draft you can read, with its checks on it** - **(AD1 and AD2 BUILT in batch 285; AD3 stays a proposal in `ROADMAP_v3_researcher_feedback.md`, gated on §115)** (final synthesis is handed the claims and never the draft, so the report rebuilt a structure the draft already had, and the researcher it was built for reads the draft. Every run now writes `01_annotated_draft.md`, the draft with each claim's id and tier marked where it was made and an entry per claim after it, and `report_style: draft-first` makes it the report)
+- **§113. Asking for the paper instead of plowing on** - **(WT1, WT3, WT5 and WT6 BUILT in batch 286; WT2 and WT7-WT10 BUILT in batch 287; WT4 stays a proposal in `ROADMAP_v3_researcher_feedback.md`)** (a 403 was a failed tool call the model worked around, and nothing kept that a source was wanted, by which claim, and not obtained. Every run now records what it could not read, in `wanted_sources.json` and the report; asks after Pass 1 and after Pass 3a, with three set answers and the user's own; redrafts or grounds again with files put in the run's `supplied/` folder and read with `read_source`, a file matched by identifiers to the address it stands for; and `--unattended` turns every question off. `--scout` stops after Pass 1 on the list, and resuming it is the rest of the run)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -3073,6 +3074,177 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §113. Asking for the paper instead of plowing on
+
+**Proposed 2026-11-20 in `ROADMAP_v3_researcher_feedback.md`. WT1 accepted, WT3 and WT5 reshaped by the
+owner, and WT6 added by the owner, all built in batch 286 (2026-11-23). WT2 (`--scout`) built in batch
+287 (2026-11-23) as the owner shaped it, with WT7-WT10, the owner's answers to four entries of batch
+286's gap register. WT4 (Zotero through MCP) stays a proposal there.** The researcher would rather a run said which paper it
+could not get than carry on as if it had: where a paper matters to a line of evidence it is worth
+digging up, and nobody accepts an answer whose excuse is a missing source. The owner asked for the
+run to stop and ask, with a few set answers and room for their own, and to wait for the answer; and for
+one flag that turns every question off for a run left alone. The proposal's §113 is this section; the
+feedback document now points here.
+
+### What the code did (main `9f07e6c`, 0.3.28)
+
+- **A failed fetch was a failed tool call the model worked around.** `SourceCorpus.add` ignores an
+  error result, `_translate` forwards only `ok` and the error string, and nothing recorded that a
+  source was wanted, by which claim, and not obtained. A claim citing a page the run never read carries
+  `quote_verified: None` and nothing else says so.
+- **Nothing in a research run could stop and ask.** A pass is headless; the review's consent route
+  (§20) is the pipeline's only question, and it comes after the report.
+- **Measured: what the two complete stored runs with claims on the owner's machine wanted and did not
+  get** (counts only; the runs' content and hosts stay there). Read from the pass threads, failed
+  results matched to their calls by id:
+
+  | | run A (98 claims) | run B (113 claims) |
+  |---|---|---|
+  | `fetch_url` calls answered / failed | 634 / 160 | 218 / 18 |
+  | failures by kind | 101 refused (403), 23 timed out, 9 not found, 8 rate limited, 5 server errors, 14 other | 9 refused (403), 7 not found, 1 timed out, 1 other |
+  | distinct URLs never obtained (a later success clears one) | 111, across 32 hosts | 10 |
+  | of those, failed in Pass 1 itself | 97 (and 8 in Pass 0, which may overlap) | 0 (all in 3a, 3c, 6a, 6b) |
+  | cited sources never read in full | 23 of 36: 5 failed fetches, 8 search snippets only, 10 never retrieved at all | 1 of 22 |
+  | claims citing one | 26 | 1 |
+
+  By the authority table's classes, run A's 111 were 40 generic `.org` hosts, 30 restricted
+  registries (`.edu`, `.gov`), 23 publishers, 9 preprint servers and 9 unknown: a "scholarly host"
+  filter would have dropped 40 and kept 30 blocked institutional pages. Neither run's draft links a
+  single URL (both cite by name), so after Pass 1 a run cannot yet tell which sources its claims will
+  cite; after Pass 3a it can.
+
+### Decisions (WT1, WT3, WT5, WT6)
+
+| # | Decision |
+|---|---|
+| **WT1** | **Every run records, in code, the sources it wanted and did not read in full** (owner: any host, cited ones first). The corpus, which owns URL identity, keeps every failed `fetch_url` beside every text it holds, and the URL a redirected fetch was asked for; the record is derived from the two: a URL no fetch obtained, and a source a claim cites with less than its full text (a failed fetch, a search snippet, an abstract, or nothing). Each entry says why in a few words, read off `fetch_url`'s own error text ("refused access (HTTP 403)", "timed out", "refused by the URL policy"), which passes failed it, and which claims cite it. `wanted_sources.json` holds the record, every question the run asked or would have asked, and every file it read from `supplied/`; it is written only when there is something in it, §25's rule. The report gets a section after "Where the evidence is thin", **"Sources it could not read"**: the cited ones, each with why and who cites it, and the rest as a count that points at the file, because 111 failed fetches no claim relied on is a log, not a report section. Each annotated-draft entry marks such a source "(not read: …)", and the run's trace ends with one line. **No score changes** |
+| **WT3** | **The run's own folder, read by the harness, and `read_source`** (owner: the files go in the run's folder, not the workspace, so the tool is not a `read` clone). `output/<run_id>/supplied/` is made as a run that can ask starts, so it exists before the question names it. The harness reads it when the user answers: PDF in the killable child `fetch_url` reads a PDF in, HTML as its text, plain text, Markdown and the like as they are; anything else, a link, a folder, an empty file or one over `fetch_max_*_mb` is skipped and recorded with why; a link is never followed. Each file is redacted, held to 200,000 characters (`fetch_url`'s window) and added to the corpus as `supplied/<name>`, at most 50 files. `read_source(name, offset)` pages through what the harness read, 5,000 characters at a time, from the run's authorization; it opens nothing and takes no path. It is advertised only in a run that holds supplied files (`ToolSpec.reads_supplied`, `registry.schemas(supplied=)`), ships permitted and ungated, and a file added after the answer is not seen |
+| **WT5** | **The run asks, after Pass 1 and after Pass 3a, each once, and waits** (owner: both points; wait until answered; once per point). After Pass 1 it names every source not obtained so far, grouped by host; after Pass 3a, the sources claims cite that grounding could not read in full. Three set answers and a typed one (owner): "I've put them in the run's supplied/ folder", "I've connected access (a VPN, a proxy): try them again" (the harness fetches every listed URL again, through the registry, so the URL policy, the output policy and the network meter apply), "Proceed without those sources", or the user's own words, which the next attempt is given as a note. An answer that brings something new **redrafts Pass 1** at the first point (owner), with `read_source` offered and the files, the URLs that answer now and the note named in its input, and **grounds again only the claims that cite those sources** at the second (owner). One that brings nothing is traced and the run goes on as if told to proceed (owner: once per point). A new kind, `interaction.SOURCES`, in both shells: the TUI's `SourcesScreen` and the CLI's prompt; its declining default is to proceed. `wanted_sources_wait_s`, shipped 0, waits until answered. A run with nobody to ask (a piped CLI) records the question and goes on. Each answer is saved in the resume point, so a resumed run never asks a point twice and redrafts with the answer it was given |
+| **WT6** | **`--unattended`: a research run that asks nothing** (owner: a flag that skips the questions from the start rather than waiting to be told to proceed; research runs only, asking stays the default). `--unattended` at a research launch, `/research --unattended` in the TUI, settings.json `research.unattended` and config.yaml `research_unattended` (false). Gated tools are hidden as on a piped run, review findings are recorded and none applied (V6), and the sources questions are recorded and skipped; no `supplied/` folder is made. Refused with `--attended` in both shells; an explicit `--attended` outranks a persisted unattended. It is the one persisted research mode that removes prompts, and R12 still holds: every prompt it removes is answered with its declining default, so a hostile settings.json can make a run ask nothing and change nothing, never do more |
+| **WT2** | **`--scout`: Pass 0 and Pass 1, then the list; the scout run resumed for the rest** (owner: the light first run the researcher preferred, continued by resuming the scout rather than by a fresh run, so the run's folder stays one place; with nobody to ask on the resume, the folder's files are the answer). `--scout` at a research launch and `/research --scout` in the TUI run Pass 0 and Pass 1 and stop. A scout asks nothing, makes its `supplied/` folder whoever can be asked, and ends with status `scouted`: resumable, with `finished_at` set, and its resume point at Pass 1 carrying `scout: true`. Its report is the list, grouped as the question groups it, with where to put the files and the command that resumes it in both shells' spellings; it writes the plan, the draft, `sources/`, `wanted_sources.json`, `pass_threads.json`, `trace.md` and that `report.md`, and no claim files. `--resume` takes it up at the after-Pass-1 question, which lists the same sources and reads what was put in the folder since; an answer that brings something writes the draft again, and the rest of the run follows as a full run. With nobody to ask (a piped resume, or `--unattended`) the folder is read as the answer, and a scout whose draft wanted nothing still reads it, unasked. A scout stopped before its draft finished goes on as a scout. A new run's mode: refused with `--resume` in both shells, and research-only like its siblings |
+| **WT7** | **An ensemble candidate's fetches reach the corpus.** Each candidate's pass is handed the run's corpus, as the single draft's is. A resume already replayed every candidate's thread into it, so before this a live ensemble run and its own resume scored against different corpora, and a candidate's failed fetches were in no record |
+| **WT8** | **A supplied file is matched to the address it stands for, by identifiers** (owner). It matches when its name, less the extension and a browser's " (1)", is the address's last part that names the work (`/full`, `/pdf` and their like skipped; at least six characters), or when the DOI or arXiv id in the address is in its name or in the first 5,000 characters of its text, whitespace removed. A file that matches two addresses, and each of two files that match one, is matched to none and recorded as ambiguous: a wrong match would check a claim against the wrong paper. A matched file's text is held under the address too, replacing a search snippet or an abstract and never a page a fetch read, so a claim citing the address is checked against the user's copy and keeps the address's authority class; the pass is told whose copy it is, the record says `stands_for`, and a resume restores it. Any other file is cited by its name, as before |
+| **WT9** | **The retry fetches several at once** (owner: a config key). `wanted_sources_retry_parallel`, shipped 4. The fetches run in threads, each in a copy of the run's context, and are recorded on the run's thread in the listed order, so the record reads the same on every run; a refusal by policy ends the recording at that address |
+| **WT10** | **A 404 says the address may be wrong** (owner: separate them). Its reason reads "not found (HTTP 404): the address may be wrong", and the question and a scout's report list those sources last, under "Not found: the address may be wrong", so nobody hunts for a paper the model may have made up before the ones that were refused. They stay in the record |
+
+### What §113 deliberately does not change
+
+- **No score, no tier.** A claim whose source was never read scores as it did; WT1 is a record.
+- **`fetch_url` and the network.** The retry is `fetch_url` itself, through the registry; nothing
+  reaches a host a pass could not.
+- **`read` stays off,** and nothing hands the model a path. `read_source` reads the harness's copy.
+- **`01_raw_response.md` is the draft the run went on with.** After a redraft that is the second
+  draft; the first stays in its pass thread, named in `pass_threads.json`.
+- **WT4 (Zotero through MCP)** stays a proposal.
+- **A scout is not a setting.** There is no settings.json or config.yaml key for it: it is a run you
+  choose to make light, and a persisted one would quietly cut every run short.
+- **A match is never a guess.** An ambiguous file is matched to nothing, and a file the identifiers do
+  not name is cited by its own name, as before WT8.
+- **Chat turns.** `--unattended` is a research flag.
+
+### Built (batch 286)
+
+- **`core/reasoning/wanted_sources.py`** (new): the reason words, the record and its entries, the
+  report section and the closing line, the question's text, the folder, reading `supplied/`.
+- **`core/reasoning/source_corpus.py`**: `note_failure`, `note_obtained`, `add_supplied`, `reading`.
+- **`core/reasoning/orchestrator.py`**: `_translate` records failures; the two questions, the Pass 1
+  redraft and the re-grounding; the retry; the folder at the start; the record, section and line at
+  the end; supplied files restored on resume. **`resume.py`**: failures replayed into the corpus, the
+  asks in the resume point.
+- **`tools/builtin/read_source.py`** (new) and **`tools/registry.py`** / **`tools/base.py`**
+  (`reads_supplied`); **`core/approval.py`**, **`core/loop.py`** and **`tools/context.py`** carry the
+  files from the run's authorization to the tool.
+- **`core/interaction.py`**: `SOURCES` and its answers. **`tui/screens.py`** (`SourcesScreen`),
+  **`tui/app.tcss`**, **`tui/app.py`** (the branch, the wait, `/research --unattended`);
+  **`main.py`** (the prompt, `build_sources_channel`, `--unattended`, `resolve_unattended`).
+- **`core/reasoning/output_writer.py`** (`wanted_sources.json`) and **`annotated_draft.py`** (the mark).
+- **`config.yaml`**, **`config_schema.py`**, **`core/config_loader.py`** and the scaffolded settings:
+  `wanted_sources_wait_s`, `research_unattended`, `research.unattended`, `read_source` in both tool
+  tables.
+
+Tests: `tests/test_wanted_sources.py` (154): every reason; the corpus's record, a redirect and a
+snippet; the entries, their order and their spellings; the section, singular and plural, and its
+links; the question's text at each point; the folder; reading `supplied/`, a link, an oversized file,
+redaction, the window, a changed file, a PDF in the child; `read_source`'s paging and its
+advertisement; the answer's decoding; whole runs through the pass doubles, a failed fetch arriving as
+a real tool result: proceed, a supplied file redrafting, a note, nothing new, a retry that answers,
+fails, or is refused by policy, nobody to ask, unattended, the folder refused, the record closing the
+run, both points, re-grounding only the citing claims, once per point and on resume; the resume point;
+the file and the draft's mark; the TUI's modal, its buttons, Enter, Escape and its wait; the TUI's
+flag; the CLI's prompt, flags, precedence and channel; the setting; and the wiring a whole run
+reaches: a redirect `_translate` notes, each answer saved under the stage before, only the citing
+claims grounded again, an ensemble redraft keeping its own candidates, and a resumed run reading its
+files back and reusing its answers. Existing tests grew rows for the new kind, screen, flag, tool
+and keys. A hundred and eight mutations, one per line that carries a decision, were each killed by
+a failed assertion. The first pass left three alive, all gaps in the tests: no error text put a
+port, three digits that are not a status, before the status; the non-fetch failure the corpus
+refuses had no URL, so it was refused for the wrong reason; and the draft's citation was already
+in normalised form. bandit's B107 (a parameter named `pass_id` with a default, read as a
+password) was renamed away rather than baselined.
+
+### Built (batch 287)
+
+- **`core/reasoning/wanted_sources.py`**: `NOT_FOUND`, `not_found` and `grouped` (WT10, shared by the
+  question and the scout's report); `identifiers`, `match` and `MATCHING` (WT8), and `Supplied.url`
+  with `stands_for` in its record; `scout_report` and `scout_line` (WT2).
+- **`core/reasoning/source_corpus.py`**: `add_supplied(url=)`, the copy under its address.
+- **`core/reasoning/orchestrator.py`**: `scout=`; the scout's stop after Pass 1 and its resume at the
+  question, the question now opening Pass 1's second attempt; the corpus for each candidate (WT7); the
+  match on each answer and on resume (WT8); `_retry_fetches` in a pool (WT9); and `citing`, below.
+- **`core/reasoning/resume.py`** (`scout` in the point, `ResumePoint.scout`, the listing's and the
+  refusal's words), **`pipeline_storage.py`** (`SCOUTED`, resumable, `finished_at`), **`base.py`**
+  (`PipelineRun.scouted`), **`output_writer.py`** (a scout's files) and **`annotated_draft.py`**
+  (`shown_report` shows a scout's list).
+- **`main.py`** (`--scout`, its refusals, the header line), **`tui/app.py`** (`/research --scout`,
+  `_split_flag`), **`tui/screens.py`** (the picker's words); **`config.yaml`** and
+  **`config_schema.py`** (`wanted_sources_retry_parallel`).
+
+**Found while testing it, and fixed: after Pass 3a, the claims to ground again were read after the
+answer.** Batch 286 picked them as the claims citing a source still wanted once the answer was in, so
+an answer that made a source readable -- a retry that answered, and now a file matched to its address
+-- left its claims out, and none was grounded again; WT8's own test found it, with
+`quote_verified` still `None` on a claim whose copy the run held. The claims the question lists are
+now recorded as it is asked (`citing` in the answer's record, saved in the resume point), and those
+are the claims grounded again.
+
+Tests: `tests/test_wanted_sources.py` grew from 154 to 253: the 404's words, order and heading; what an
+address is known by, each way a file matches (a DOI in capitals and an old arXiv id among them), the
+first page's limit, both kinds of ambiguity, and the note and record; the copy under its address, a snippet and an abstract replaced, a fetched page
+kept, the cap; a matched file in a whole run after the draft and after grounding, with the claim
+checked against the copy beside one that is not matched, an ambiguous one, a retry that answers
+grounding its claims again, and a resume holding the copy again; the retry's width, its threads, its
+order, its context, a fetch that raises and a refusal; a candidate's failure and later answer; the
+scout's stop, status, point, folder and report, its files and shown report, and refusing a resume;
+resuming it attended, told to proceed, with nobody to ask, unattended, with an empty folder and with
+nothing wanted, beside a full run that reads nothing unasked, and with no folder; one stopped before
+its draft; a point whose flag is not True, a stand-in's included; the point's
+flag; the listing; and both shells' flag, refusals, header, usage and splitter. `test_cli.py` grew
+by four: the census row, the refusal in chat, the refusal with `--resume`, and the launch. Existing
+tests whose contract changed are listed in `tests/BREAKING_CHANGES.md`.
+
+### Gap register (§113)
+
+- **Matching is by identifiers only.** A file named otherwise and holding no DOI or arXiv id on its
+  first page (a preprint under another title, a scan with no text layer) is read as it is and cited
+  by its name; an ambiguous one is left to the pass.
+- **A scout knows only what the draft fetched.** Pass 1's draft cites by name, so a scout's list has
+  no cited sources in it; what grounding wants is asked on the resume, after Pass 3a.
+- **A scout's report is replaced when its resume finishes.** The list stays in the trace and in
+  `wanted_sources.json`'s questions, and the resumed run's record is the run's whole one.
+- **Bounds.** Past 200,000 characters a supplied file is not held, the corpus keeps its first 20,000
+  (§106's limit, for fetched pages too), and a file under 16 characters is readable but not in the
+  corpus.
+- **A 404 is still wanted.** WT10 words and orders it; nothing tells a moved paper from an address
+  the model made up.
+- **The hosted demo** shows the question, and nobody there can put a file in the server's folder, so
+  a scout there has nothing to resume with.
+- **The link test is skipped on Windows** (creating a link needs privilege there); CI runs it on
+  Linux.
+- **The wiki** (a separate repository) does not yet describe `wanted_sources.json`, the question,
+  `supplied/`, `--unattended` or `--scout`.
+
 ---
 
 ## §110. The draft you can read, with its checks on it

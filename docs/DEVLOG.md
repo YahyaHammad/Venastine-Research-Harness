@@ -33449,3 +33449,183 @@ shows the annotated draft.
 - A run stored before this batch has no annotated draft, and no command renders one.
 - AD3, final synthesis given the draft's outline, stays a proposal gated on §115.
 - The wiki does not describe the annotated draft or `report_style`.
+
+## Batch 286 -- asking for the paper instead of plowing on (ROADMAP_v3 §113, WT1, WT3, WT5, WT6) (2026-11-23)
+
+**Asked.** Take another roadmap item. The owner chose §113's wanted sources from the
+researcher-feedback proposals, then reshaped it: not only a record, but a question the run stops to
+ask, with set answers and the user's own, waiting for the answer; and a flag that turns every
+question off for a run left alone.
+
+**Checked first.**
+- **A failed fetch was a failed tool call the model worked around.** `SourceCorpus.add` ignores an
+  error result, and nothing kept that a source was wanted, by which claim, and not obtained.
+- **Measured on the two complete stored runs with claims on the owner's machine** (counts only; the
+  content and hosts stay there), read from the pass threads with failed results matched to their
+  calls by id. Run A: 160 of 794 fetches failed (101 of them 403s), 111 distinct URLs never obtained
+  across 32 hosts, 97 of them failing in Pass 1 itself; 23 of the 36 cited sources never read in
+  full (5 failed fetches, 8 search snippets, 10 never retrieved), cited by 26 of 98 claims. Run B: 18
+  of 236 failed, 10 never obtained, all in 3a, 3c, 6a and 6b, and 1 cited source unread.
+- **A "scholarly" host filter would have been wrong** for run A: by the authority table it would have
+  dropped 40 generic `.org` hosts and kept 30 blocked `.edu`/`.gov` pages.
+- **Neither draft links a URL**; both cite by name. So after Pass 1 the run cannot tell which sources
+  its claims will cite, and after Pass 3a it can.
+- **The pipeline already asks once, for the review**, through a channel the shell builds, None off a
+  terminal (V6), and an attended ask waits `attended_approval_timeout_s`.
+
+**Settled with the owner.** Four rounds. §113 over §115's ME1 and ME2, §104's OC1 and §109. Any host,
+cited ones first. The question after Pass 1 and after Pass 3a, each once, waiting until answered;
+the presets "I've put them in the run's supplied/ folder", "I've connected access: try them again",
+"proceed without them" and a typed answer. Pass 1 redrafts with what the answer brought; after 3a
+only the claims citing those sources are grounded again. A `read_source` tool rather than inlining
+the files. The owner's reshaping of WT3: the run's own folder, `output/<run_id>/supplied/`, made as
+the run starts, so the tool reads the run's files and is not a `read` clone. The folder is
+`supplied/`, since `sources/` is the corpus's. `--unattended` for research runs, asking staying the
+default.
+
+**Built.**
+- `core/reasoning/wanted_sources.py` (new): `reason` (a failure in a few words, from `fetch_url`'s
+  own error text), `entries` and `record`, the report `section` and the closing `summary`,
+  `question` (the list grouped by host, and the folder), `pending_note`, the folder, and
+  `load_supplied` (PDF in the isolated child, HTML as its text, text as it is; never a link; redacted;
+  200,000 characters; 50 files).
+- `core/reasoning/source_corpus.py`: `note_failure`, `note_obtained` (a redirect's asked-for URL),
+  `add_supplied`, `reading`.
+- `core/reasoning/orchestrator.py`: `_translate` records each failure with the call's input;
+  `_ask_about_sources`, once per point, saved under the stage before so a crash never asks again;
+  the Pass 1 block runs twice when an answer brings something, and the re-grounding runs 3a for the
+  citing claims; `_retry_fetches` through `registry.dispatch`; the folder at the start;
+  `_restore_supplied` on resume; the record, the section and the line at the end. `resume.py`
+  replays failures and keeps the asks in the resume point.
+- `tools/builtin/read_source.py` (new), registered with `reads_supplied`, advertised by
+  `registry.schemas(supplied=)` only where the run holds files; the files ride on
+  `RunAuthorization.supplied` to `RunInfo.supplied`.
+- `interaction.SOURCES` (declining default: proceed); `SourcesScreen` and a `_blocking_modal` wait
+  in the TUI (`_modal_wait`: forever at 0); the CLI prompt and `build_sources_channel`;
+  `--unattended`, `/research --unattended`, `research.unattended`, `research_unattended`.
+- `wanted_sources.json`, the report's "Sources it could not read", and the annotated draft's
+  "(not read: …)".
+
+**Changed in the tests.** Rows for the new kind, screen, flag, tool and keys in the tables that pin
+them (`test_cli`, `test_tui`, `test_interaction`, `test_config_edit`, the settings template);
+`test_attended`'s stand-ins for `registry.schemas` take `supplied`; the e2e call carries `ask` and
+`unattended`; two orchestrator tests whose payloads cite a URL no pass fetched now see the record
+that produces (BREAKING_CHANGES lists each).
+
+**Verified.**
+- Full suite on Windows with `AGENT_WORKSPACE` unset, run on a clean checkout of the commit: 10547 passed, 89 skipped (10636) in 2:09. Its one warning is the deliberately duplicated name in a hostile test archive; the 89th skip is the link test, which needs privilege on Windows.
+- The first full run on the working tree failed 21 of 10469, each a table, count or document the change
+  grows, or one of two orchestrator tests whose payloads cite a URL no pass fetched and so now see a
+  record. Each is updated, and `tests/BREAKING_CHANGES.md` lists them.
+- The first run on a clean checkout of the commit failed 4, all `SourcesScreen` in the modal
+  geometry tests: 90 columns and 30 rows started it off-screen on 80x24, and the body and answers
+  could take more rows than the dialog had, pushing the Answer button out at every size. The
+  dialog is now 90% of the terminal (at most 110 columns), the list takes what the answers leave,
+  and the three answers are compact buttons, one row each.
+- 108 deliberate breaks of the new code, one per line that carries a decision, were each killed by a
+  failed assertion. The first pass left three alive, all gaps in the tests: no error text put a port
+  before the status, the refused non-fetch failure had no URL, and the draft's citation was already
+  normalised. Writing the mutants first found five wiring paths no test reached (a redirect noted in
+  `_translate`, the saved answers, the citing subset, the ensemble redraft, the resume's files and
+  answers), and tests were added before the run.
+- ruff is clean. bandit finds nothing outside the baseline, and `scripts/bandit-count-check.py` reports
+  that no count grew, after a B107 (a parameter named `pass_id` with a default) was renamed away
+  rather than baselined. gitleaks 8.30.1 with CI's config finds nothing in an export of the
+  commit. pip-audit finds nothing in either requirements file.
+- No workflow or requirements file is in the diff.
+
+**Not done** (§113's gap register):
+- Ensemble candidates' fetches never reach the corpus (true since §45), so their failures are not
+  recorded.
+- A supplied file is not matched to the URL it stands for; the pass is told both.
+- Past 200,000 characters a supplied file is not held; the corpus keeps 20,000 (§106).
+- The retry is one URL at a time, at 8 s a request.
+- A guessed URL's 404 is listed as wanted.
+- The hosted demo shows the question and has no way to supply a file.
+- WT2 (`--scout`) and WT4 (Zotero) stay proposals.
+- The wiki does not describe any of it yet.
+
+## Batch 287 -- the scout, and what batch 286 left in its gap register (ROADMAP_v3 §113, WT2, WT7, WT8, WT9, WT10) (2026-11-23)
+
+**Asked.** Continue with more of §113's open items. The owner chose WT2 (`--scout`) and the run-side
+entries of batch 286's gap register; WT4 (Zotero through MCP) and the wiki were left for later.
+
+**Checked first.**
+- **Most of what a run could not read, it failed to read in Pass 1.** On the owner's largest stored
+  run, 97 of the 111 addresses never obtained had failed by the end of Pass 1 (batch 286's
+  measurement), so a run that stops there sees most of what it will want.
+- **A resume already picks a run up at a stage** (§98), and batch 286's question after Pass 1 already
+  reads the run's folder and redrafts. A scout is the first half of a run, with its question left for
+  the resume.
+- **A live ensemble run and its own resume read different corpora.** `_run_pass` was not handed the
+  corpus for a candidate, while `resume.rebuild_corpus` replays every recorded thread, a candidate's
+  included.
+- **`fetch_url` already runs on several threads at once** inside spawned subagents; the body cache and
+  the network meter each hold a lock. The loop's parallel calls run each in `copy_context()`, and the
+  retry needs the same, or a fetch would run outside the run's context.
+
+**Settled with the owner.** Two rounds. WT2 and the run-side gap fixes over WT4 and the wiki. The scout
+run is resumed, not rerun. On a resume with nobody to ask, the folder's files are the answer. A
+supplied file is matched by identifiers, not by a name the question suggests. The retry's width is a
+config key, `wanted_sources_retry_parallel` (4). A 404 is separated, listed last under "Not found:
+the address may be wrong".
+
+**Built.**
+- **WT2.** `--scout` (CLI) and `/research --scout` (TUI) run Pass 0 and Pass 1 and stop, asking
+  nothing, with the folder made whoever can be asked. The run ends `scouted` (resumable, with
+  `finished_at`), its resume point at Pass 1 carrying `scout: true`, and its report is the list:
+  grouped as the question groups it, the folder, and the resuming command in both shells' spellings.
+  It writes the plan, the draft, `wanted_sources.json`, `pass_threads.json`, `trace.md` and that
+  report, and no claim files. Resumed, the run enters Pass 1's loop at its second attempt: the
+  question now opens that attempt, so the draft is written again only when the answer brings
+  something. With nobody to ask there, the folder is read as the answer, even when the draft wanted
+  nothing; a scout stopped before its draft finished goes on as one. Refused with `--resume`.
+- **WT7.** Each ensemble candidate's pass gets the corpus.
+- **WT8.** `identifiers` and `match`: the address's last part that names the work, its DOI, its arXiv
+  id, against the file's name and the first 5,000 characters of its text. A file that matches two
+  addresses, or two files that match one, are matched to nothing and recorded as ambiguous. A matched
+  file is held under its address too (`add_supplied(url=)`), replacing a snippet or an abstract and
+  never a fetched page; the note says whose copy it is, the record says `stands_for`, and a resume
+  restores it.
+- **WT9.** `_retry_fetches` fetches in a pool of `wanted_sources_retry_parallel` threads, each in a
+  copy of the run's context, and records the results in the listed order on the run's thread.
+- **WT10.** A 404 reads "not found (HTTP 404): the address may be wrong", listed last.
+
+**Found and fixed: after Pass 3a, the claims to ground again were read after the answer.** Batch 286
+chose them as the claims citing a source still wanted once the answer was in. An answer that made a
+source readable -- a retry that answered, or now a file matched to its address -- therefore left its
+claims out, and none was grounded again. WT8's whole-run test found it: `quote_verified` stayed `None`
+on a claim whose copy the run held. The claims the question lists are now recorded as it is asked
+(`citing`, saved in the resume point), and those are the claims grounded again. Batch 286 is not
+pushed, so no released build has the defect.
+
+**Changed in the tests.** The 404 row of the reason table; the policy-refused retry test, renamed
+because both fetches are now sent; the resumed re-grounding's stand-in answer, which carries `citing`;
+`--scout` in the flag census and the chat refusal; the e2e call's `scout=False`; the resume listing's
+empty line; and the settable-scalar count, 175. `tests/BREAKING_CHANGES.md` lists each.
+
+**Verified.**
+- Full suite on Windows with `AGENT_WORKSPACE` unset, run on a clean checkout of the commit: 10650
+  passed, 89 skipped (10739), in 2:06. The 89th skip is the link test, which needs privilege on
+  Windows; the one warning is the duplicate name in the hostile archive.
+- 110 deliberate breaks of this batch's code, one per line that carries a decision, were each killed
+  by a failed assertion. The first run left one alive: a resume point whose `scout` is merely truthy,
+  which only the suite's stand-in points produce, was not pinned; a test now is. That test's first
+  form failed for its own reason (the stand-in helper had set the flag to True), so its kill was the
+  false red the harness warns about; the clean-checkout run caught it, and the mutant was run again
+  against a green baseline and killed. Writing the list
+  first found four gaps the tests then covered (a DOI in capitals, an old-style arXiv id, a flag
+  written after `--scout`, a scout resumed with no folder) and one dead call: a scout wrote the
+  `sources/` index, which lists the pages claims cite, before any claim existed.
+- ruff is clean. bandit finds nothing outside the baseline, and
+  `scripts/bandit-count-check.py` reports that no count grew. gitleaks 8.30.1 finds no leaks in an export of the tree. pip-audit finds
+  nothing in either requirements file.
+- No workflow or requirements file is in the diff.
+
+**Not done** (§113's gap register):
+- A file named otherwise, with no DOI or arXiv id on its first page, is not matched.
+- A scout knows only what the draft fetched; what grounding wants is asked on the resume.
+- A scout's report is replaced when its resume finishes.
+- The hosted demo cannot be given files, so a scout there has nothing to resume with.
+- A 404 is still wanted; nothing tells a moved paper from a made-up address.
+- WT4 (Zotero) stays a proposal. The wiki does not describe §113 yet.

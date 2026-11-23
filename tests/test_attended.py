@@ -114,7 +114,7 @@ class TestHeadlessIsAboutBeingUNABLEToAsk:
         calls = []
         mocker.patch("core.loop.registry.schemas",
                      side_effect=lambda ctx, callable_only=False, granted=None,
-                     images=False:
+                     images=False, supplied=False:
                          calls.append((callable_only, granted, images)) or [])
         _drive("mcp__a__gated", mocker=mocker)
         # ROADMAP_v3 §81 (IM6): `images` is recorded too. `_drive` pins the
@@ -127,7 +127,7 @@ class TestHeadlessIsAboutBeingUNABLEToAsk:
         calls = []
         mocker.patch("core.loop.registry.schemas",
                      side_effect=lambda ctx, callable_only=False, granted=None,
-                     images=False:
+                     images=False, supplied=False:
                          calls.append((callable_only, granted, images)) or [])
         provider, _ = _recording_provider([True])
         _drive("mcp__a__gated", provider=provider, mocker=mocker)

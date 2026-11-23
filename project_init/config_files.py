@@ -185,6 +185,8 @@ def _defaults() -> dict:
             # for the same reason as everything else here.
             "approval_mode": config_loader.RESEARCH_APPROVAL_MODES[0],
             "subagent_review": config.SUBAGENT_REVIEW,
+            # ROADMAP_v3 §113.
+            "unattended": config.RESEARCH_UNATTENDED,
         },
         "confidence": confidence,
         "source_scoring": shipped["source_scoring"],

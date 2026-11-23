@@ -31,7 +31,7 @@ import os
 from typing import TYPE_CHECKING
 
 import config
-from core.reasoning import annotated_draft
+from core.reasoning import annotated_draft, wanted_sources
 
 if TYPE_CHECKING:
     from core.reasoning.base import PipelineRun
@@ -79,6 +79,17 @@ def write_run_artifacts(run: PipelineRun) -> str:
       05_confidence.json      Pass 5 tier + score breakdown per claim
       06_revisions.json       6a/6b revisions (only if any claim was revised)
       07_review.json          §20 review findings + decisions (only if reviewed)
+      wanted_sources.json     §113 sources the run could not read in full,
+                              the questions it asked about them and the
+                              files it read from supplied/ (only if any)
+      supplied/               §113 files you put here in answer to the
+                              run's question; made as a run that can ask
+                              starts, and read only by the harness
+
+    A scout (§113, WT2) stopped after Pass 1, so it writes what it has:
+    00_plan.md, the draft(s), wanted_sources.json, pass_threads.json,
+    trace.md and report.md, which is the list of what the draft could not
+    read. Resumed and finished, the run writes the whole layout over it.
       granted_calls.json      §25 audit trail (only if a grant was spent)
       pass_threads.json       §27 one entry per pass, {"pass", "thread_id"}
       confidence_chart.svg    Tier distribution bar chart (batch 212)
@@ -130,6 +141,9 @@ def write_run_artifacts(run: PipelineRun) -> str:
                   entry.get("text", ""))
     else:
         write("01_raw_response.md", run.raw_response)
+    if getattr(run, "scouted", False):
+        _write_scout(run, write)
+        return output_dir
     write("02_claims.json", json.dumps([vars(c) for c in run.claims], indent=2))
     write("03_grounding.json", json.dumps(
         [{"claim_id": c.id, "sources": c.grounding_sources, "status": c.grounding_status}
@@ -178,6 +192,13 @@ def write_run_artifacts(run: PipelineRun) -> str:
 
     _write_sources(run, output_dir)
 
+    # ROADMAP_v3 §113 (WT1). Written only when the run wanted something
+    # or asked about it, §25's rule: its presence says the run could not
+    # read some of what it went for.
+    wanted = run.wanted_sources or {}
+    if wanted.get("sources") or wanted.get("asks") or wanted.get("supplied"):
+        write(wanted_sources.FILENAME, json.dumps(wanted, indent=2))
+
     # §27 AC6: which thread each pass ran in. Written unconditionally
     # (unlike the two above), because it is not a signal about how the run
     # was configured -- every run has pass threads, and an empty file here
@@ -195,6 +216,21 @@ def write_run_artifacts(run: PipelineRun) -> str:
     _try_write_pdf(report, output_dir)
 
     return output_dir
+
+
+def _write_scout(run: PipelineRun, write) -> None:
+    """The rest of a scout's files (ROADMAP_v3 §113, WT2). No claim files:
+    it extracted none, and empty ones would read as a run that found
+    nothing. Its report is the list, whatever `report_style` says. No
+    sources/ index either: that lists the pages claims cite, and a scout's
+    claims are not extracted yet."""
+    wanted = run.wanted_sources or {}
+    if wanted.get("sources") or wanted.get("asks") or wanted.get("supplied"):
+        write(wanted_sources.FILENAME, json.dumps(wanted, indent=2))
+    write("pass_threads.json",
+          json.dumps(getattr(run, "pass_threads", []) or [], indent=2))
+    write("trace.md", "\n".join(f"- {line}" for line in run.trace))
+    write("report.md", run.final_report)
 
 
 def _write_reports(run: PipelineRun, write) -> str:

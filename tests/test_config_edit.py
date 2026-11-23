@@ -109,7 +109,7 @@ class TestTheCatalogueCoversTheFile:
 
         names = set(rows)
         tools = list(config_schema.ToolPermissionsModel.model_fields)
-        assert len(tools) == 31
+        assert len(tools) == 32
         for tool in tools:
             assert f"tool_permissions.{tool}" in names
             if tool in APPROVAL_BY_SHELL_MODE:
@@ -139,8 +139,8 @@ class TestTheCatalogueCoversTheFile:
         marked = {row.name for row in config_edit.catalogue() if row.authority}
         expected = set(config_schema.HARNESS_AUTHORITY_KEYS)
         leaves = {name for name in marked if "." in name}
-        assert len(leaves) == 58, (
-            "tool_permissions holds all 31 tools and tool_approvals holds "
+        assert len(leaves) == 60, (
+            "tool_permissions holds all 32 tools and tool_approvals holds "
             "all but the four whose approval lives solely in "
             "shell_approval_mode")
         assert marked - leaves == expected
@@ -323,8 +323,11 @@ class TestTheRoundTripIsLossless:
         # batch 248: ROADMAP_v3 §56's ten `shell_classifier_*` keys.
         # 169 since batch 284: `model_call_read_timeout_s` (ROADMAP_v3
         # §102, MW2). 170 since batch 285: `report_style` (ROADMAP_v3
-        # §110, AD2).
-        assert touched == 170, f"{touched} settable scalars, expected 170"
+        # §110, AD2). 174 since batch 286: ROADMAP_v3 §113's
+        # `wanted_sources_wait_s` and `research_unattended`, and
+        # read_source's row in each tool table. 175 since batch 287:
+        # `wanted_sources_retry_parallel` (§113, WT9).
+        assert touched == 175, f"{touched} settable scalars, expected 175"
         assert config_edit._dump(tree) == text
 
     def test_a_one_value_change_is_a_one_line_diff(self, tmp_path,
@@ -438,7 +441,7 @@ class TestTheTablesCanBeAskedAbout:
     def test_a_table_is_found_and_explained(self):
         row = config_edit.find("tool_permissions")
         assert row is not None
-        assert "31 tools" in row.values
+        assert "32 tools" in row.values
         lines = " ".join(config_edit.explain("tool_permissions"))
         assert "not a key" not in lines
         assert "AUTHORITY" in lines

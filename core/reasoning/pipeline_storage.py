@@ -43,6 +43,10 @@ from storage import THREAD_KIND_CHAT, THREAD_KIND_RESEARCH_PASS
 
 logger = logging.getLogger(__name__)
 
+#: ROADMAP_v3 §113 (WT2). A scout that stopped after Pass 1, as asked: a
+#: finished state of its own, and resumable.
+SCOUTED = "scouted"
+
 
 class PipelineRunRecord(SQLModel, table=True):
     """One row per stream_deep_research_pipeline() invocation. `status` is
@@ -62,7 +66,8 @@ class PipelineRunRecord(SQLModel, table=True):
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     user_query: str = Field(index=True)
-    status: str = Field(default="running")  # "running" | "complete" | "failed"
+    # "running" | "complete" | "failed" | "scouted" (ROADMAP_v3 §113, WT2)
+    status: str = Field(default="running")
     claims_json: str = "[]"
     trace_json: str = "[]"
     coverage_gaps_json: str = "[]"
@@ -154,7 +159,7 @@ def update_pipeline_run(
             raise ValueError(f"No pipeline run found with id {run_id}")
         if status is not None:
             record.status = status
-            if status in ("complete", "failed"):
+            if status in ("complete", "failed", SCOUTED):
                 record.finished_at = datetime.now(UTC)
         record.claims_json = json.dumps([vars(c) for c in run.claims])
         record.trace_json = json.dumps(run.trace)
@@ -219,8 +224,10 @@ def reopen_pipeline_run(run_id: UUID) -> None:
 #: The statuses a resume is offered for (ROADMAP_v3 §98, RS1). 'running'
 #: is a run that was abandoned -- a quit or a kill leaves it there, §22 --
 #: or one still running in another process sharing app.db, and nothing in
-#: the record can tell those apart, so the listing says both.
-RESUMABLE_STATUSES = ("failed", "running")
+#: the record can tell those apart, so the listing says both. 'scouted' is
+#: a scout that stopped after Pass 1 as asked (§113, WT2), whose resume is
+#: the rest of the run.
+RESUMABLE_STATUSES = ("failed", "running", SCOUTED)
 
 
 def list_resumable_runs(limit: int = 50) -> list[dict]:

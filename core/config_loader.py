@@ -108,6 +108,12 @@ _KNOWN_RESEARCH = {
     # about corrections it wants to make, which is more friction and never
     # more authority. --no-review escapes it for one run.
     "subagent_review": bool,
+    # ROADMAP_v3 §113. The one persisted mode that REMOVES prompts, and R12
+    # still holds: every prompt it removes is answered with its declining
+    # default -- a gated tool hidden, a review finding not applied, a source
+    # gone without -- so the worst a hostile settings.json can do is make a
+    # run ask nothing and change nothing. --attended outranks it for one run.
+    "unattended": bool,
 }
 RESEARCH_APPROVAL_MODES = ("none", "attended")
 _KNOWN_COMPACTION = {
