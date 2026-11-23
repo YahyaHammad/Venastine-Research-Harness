@@ -2620,6 +2620,7 @@ def run_research(
     instead of starting `query`. A run that fails, this time or that one,
     ends with the command that resumes it, because the id is otherwise
     printed only by a run that completed."""
+    from core.reasoning.annotated_draft import shown_report
     from core.reasoning.orchestrator import stream_deep_research_pipeline
     from core.reasoning.output_writer import write_run_artifacts
     from core.reasoning.resume import ResumeRefused, find_run
@@ -2742,7 +2743,8 @@ def run_research(
     # as it happened, above; reprinting them would show the whole run
     # twice, with the second copy looking like a different artifact.
     print("\n--- Report ---")
-    print(ansi.for_display(run.final_report))
+    # §110 (AD2): the annotated draft under report_style: draft-first.
+    print(ansi.for_display(shown_report(run)))
 
     if run.run_id:
         print(f"\n[run id: {run.run_id}]")

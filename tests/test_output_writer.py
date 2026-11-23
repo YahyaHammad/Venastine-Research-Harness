@@ -27,6 +27,7 @@ from uuid import uuid4
 import pytest
 
 import config
+from core.reasoning.annotated_draft import LINK_LINE
 from core.reasoning.base import Claim, PipelineRun
 from core.reasoning.output_writer import (
     _axis_step,
@@ -95,6 +96,7 @@ def test_write_run_artifacts_creates_all_expected_files(tmp_path, monkeypatch):
         "04_assumptions.json",
         "05_confidence.json",
         "06_revisions.json",  # C2 has revision_text
+        "01_annotated_draft.md",  # ROADMAP_v3 §110, AD1: every run
         "trace.md",
         "report.md",
         "confidence_chart.svg",
@@ -148,9 +150,10 @@ def test_write_run_artifacts_file_contents(tmp_path, monkeypatch):
     assert "- Pass 0: plan produced." in trace_content
     assert "- Final synthesis complete." in trace_content
 
-    # report.md: the final report verbatim.
+    # report.md: the final report verbatim, under the line linking the
+    # annotated draft (ROADMAP_v3 §110, AD2).
     with open(os.path.join(output_dir, "report.md"), encoding="utf-8") as f:
-        assert f.read() == "# Report\n\nThe answer is 42."
+        assert f.read() == f"{LINK_LINE}\n\n# Report\n\nThe answer is 42."
 
     # 05_confidence.json: tier + score_breakdown per claim.
     with open(os.path.join(output_dir, "05_confidence.json"), encoding="utf-8") as f:

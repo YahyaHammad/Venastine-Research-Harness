@@ -31,6 +31,7 @@ import os
 from typing import TYPE_CHECKING
 
 import config
+from core.reasoning import annotated_draft
 
 if TYPE_CHECKING:
     from core.reasoning.base import PipelineRun
@@ -66,6 +67,10 @@ def write_run_artifacts(run: PipelineRun) -> str:
                                A run degraded to one survivor names its
                                file 01_raw_response.md like any other
                                single-candidate run.
+      01_annotated_draft.md   ROADMAP_v3 §110 (AD1): the draft(s) above
+                              with each claim's id and tier marked where
+                              it was made, then one entry per claim;
+                              pure code (core/reasoning/annotated_draft.py)
       02_claims.json          Pass 2 extracted claims (full vars(c))
       03_grounding.json       Pass 3a grounding per claim
       03_critic.json          Pass 3b critic per claim
@@ -78,8 +83,12 @@ def write_run_artifacts(run: PipelineRun) -> str:
       pass_threads.json       §27 one entry per pass, {"pass", "thread_id"}
       confidence_chart.svg    Tier distribution bar chart (batch 212)
       trace.md                Full trace log
-      report.md               Final synthesis report
-      report.pdf              PDF rendering (only if markdown+weasyprint installed)
+      report.md               Final synthesis report, opening with a link to
+                              01_annotated_draft.md; under report_style:
+                              draft-first, the annotated draft itself (AD2)
+      report_synthesis.md     The synthesis, under draft-first only
+      report.pdf              PDF rendering of report.md (only if
+                              markdown+weasyprint installed)
       sources/index.json      §45 one entry per URL this run retrieved text
                               from: url, title, tool, retrieved_at, sha256,
                               chars. Always written when anything was
@@ -179,13 +188,44 @@ def write_run_artifacts(run: PipelineRun) -> str:
     # Essential human-readable artifacts first -- a supplementary-file
     # failure (chart, PDF) must not prevent these from being written.
     write("trace.md", "\n".join(f"- {line}" for line in run.trace))
-    write("report.md", run.final_report)
+    report = _write_reports(run, write)
 
     # Supplementary artifacts -- failure here is non-fatal.
     _write_confidence_chart(run, output_dir)
-    _try_write_pdf(run.final_report, output_dir)
+    _try_write_pdf(report, output_dir)
 
     return output_dir
+
+
+def _write_reports(run: PipelineRun, write) -> str:
+    """The annotated draft and the report, and returns what report.md
+    holds (ROADMAP_v3 §110, AD1/AD2).
+
+    Every run writes `01_annotated_draft.md`, beside `01_raw_response.md`,
+    which is unchanged. Under `report_style: synthesis` report.md is the
+    synthesis, opening with a link to the draft; under `draft-first` it is
+    the annotated draft, and the synthesis is `report_synthesis.md`.
+
+    The draft degrades loudly, never fatally (#81): one that cannot be
+    rendered is skipped with a warning, and report.md is then the synthesis
+    whatever the style says, with no link to a file that was not written."""
+    style = getattr(config, "REPORT_STYLE", "synthesis")
+    try:
+        draft = annotated_draft.render(run, style)
+    except Exception as e:
+        logger.warning("Annotated draft skipped (render failed): %s", e)
+        draft = None
+    if draft is None:
+        write("report.md", run.final_report)
+        return run.final_report
+    write(annotated_draft.FILENAME, draft)
+    if style == annotated_draft.DRAFT_FIRST:
+        write(annotated_draft.SYNTHESIS_FILENAME, run.final_report)
+        write("report.md", draft)
+        return draft
+    report = f"{annotated_draft.LINK_LINE}\n\n{run.final_report}"
+    write("report.md", report)
+    return report
 
 
 def _write_sources(run: PipelineRun, output_dir: str) -> None:

@@ -186,6 +186,9 @@ ClassifierUrl = Annotated[str, BeforeValidator(_http_url_or_empty)]
 #: `settings.json` or a `/compact --strength N` supplied against this list.
 CompactionStrategy = Literal["rederive", "chain"]
 
+#: ROADMAP_v3 §110 (AD2): which file a research run's report.md is.
+ReportStyle = Literal["synthesis", "draft-first"]
+
 
 class _Model(BaseModel):
     """Common posture: no unknown keys, no mutation after validation."""
@@ -371,6 +374,9 @@ class HarnessConfig(_Model):
 
     # -- The sources/ artifact --------------------------------------------
     persist_source_text: StrictBool
+
+    # -- The report (ROADMAP_v3 §110, AD2) --------------------------------
+    report_style: ReportStyle
 
     # -- Scholarly authority (OpenAlex) -----------------------------------
     scholar_lookup: StrictBool

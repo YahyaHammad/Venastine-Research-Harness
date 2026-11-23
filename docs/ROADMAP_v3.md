@@ -53,6 +53,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(BUILT in batch 281)** (every write scrolled the transcript to the bottom, because `RichLog.auto_scroll` follows every write: a reader at row 5 was at the bottom again after five streamed rows, and the run and session viewers, which repaint whole, did the same on every new entry. A drag selected nothing, because `RichLog` implements none of the selection the pinned textual's screen supports. A transcript now follows only while its reader is at the bottom, follows again there or on any submit, and counts in its border what arrived below them; all four panes keep a scrolled-up reader's place through a repaint; and a drag selects the rows as drawn, copied with ctrl+c; SV1-SV4)
 - **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280)** (D2 overwrote the tier of every claim that ran out of revision rounds with UNVERIFIED, so a partly grounded claim scoring 0.45 (LOW) was published as one nothing supports beside a breakdown still saying 0.45. D2 keeps the tier 6b scored and records `loop_exhausted`; a flagged claim names its largest deduction; an exhausted claim publishes the revision 6b scored with what it was first stated as beside it; and every shell's report ends with a code-rendered "Where the evidence is thin" section, built after the review; XR1-XR4)
 - **§108. A research pass you can watch** - **(PW1-PW4, PW6 and PW7 BUILT in batch 282; PW5 in batch 283)** (a pass that streamed 40,000 characters of thinking and 3,000 of text announced 2,000 and its view, which reads the archive, showed its task alone until the call ended; a finished pass could not be opened from the TUI at all. Thinking is activity, every run's view streams the step in progress from a live record the loop writes, a running pass row says how long, what and how much, research rows open their pass, finished subagents stay in the agent panel, running rows spin, and the CLI says when a pass has waited a minute on the model. Batch 283: a run's and each pass's calls, tokens and time are stored on its record and shown in its trace, the panel's foot and `/usage --run`)
+- **§110. The draft you can read, with its checks on it** - **(AD1 and AD2 BUILT in batch 285; AD3 stays a proposal in `ROADMAP_v3_researcher_feedback.md`, gated on §115)** (final synthesis is handed the claims and never the draft, so the report rebuilt a structure the draft already had, and the researcher it was built for reads the draft. Every run now writes `01_annotated_draft.md`, the draft with each claim's id and tier marked where it was made and an entry per claim after it, and `report_style: draft-first` makes it the report)
 - **§95. A reply that was all reasoning** - **(BUILT in batch 256)** (a reply with readable reasoning and no text or tool call ended the turn as `complete` and said nothing: measured on one OpenAI-compatible provider, 33 of 316 turns came back that way, each with the model's tool call written inside its reasoning, which the server only turns into a call after the model's delimiter. The loop now asks once through a harness row that opens no turn, a second such reply ends the turn with a notice, and a replay showed echoing the reasoning back took the shape from 8 of 23 to 0 of 23)
 - **§93. uv where pip was slow: CI, and the installers when it is there** - **(BUILT in batch 241)** (every CI job that ran the suite spent 18-29 s on Ubuntu and 49-54 s on Windows in `pip install`, and a first install from GitHub took 37-41 s on Linux and 256 s on Windows. uv installs the same 76 distributions at the same versions; CI now uses it at the repo's one pin, and both installers and the npm launcher use it when it is on PATH -- copying, never linking, out of its cache -- with pip as the fallback)
 - **§92. A page read as its text, and a PDF read at all** - **(BUILT in batch 240)** (`fetch_url` returned raw HTML -- 80-96% markup on the first page of seven live sites, Wikipedia refused by its user agent and cut before its article, a PDF returned as binary -- and `web_search` spent 14% of a result on fields that were always null or false)
@@ -3072,6 +3073,95 @@ leaked PID.
   because MCP is the only dynamic registrant and the composed name is its
   fact. A bound in the registry would be the fix-at-the-consumer shape
   `AGENTS.md` names by name.
+---
+
+## §110. The draft you can read, with its checks on it
+
+**Proposed 2026-11-20 in `ROADMAP_v3_researcher_feedback.md`; AD1 and AD2 accepted by the owner and
+built in batch 285 (2026-11-23). AD3 stays a proposal there, gated on §115.** The researcher reads
+the raw Pass 1 draft and finds `report.md` hard to use: the draft sets its assumptions out one at a
+time, so a reader can reject one and know which conclusions to drop, while in a synthesis each point
+leans on others out of sight and the subtle problems compound. The owner kept the unannotated draft
+exactly as it is: every run still writes `01_raw_response.md` (or `01_candidate_N.md`). The
+proposal's §110 is this section; the feedback document now points here.
+
+### What the code did (main `e642b22`, 0.3.27)
+
+- **Final synthesis never saw the draft.** `_synthesis_input` hands it the query, the claims as JSON
+  and the coverage gaps, and `final_synthesis.md` asks for a report that does not talk about the
+  claims, so the report rebuilt from a flat list a structure the draft already had. `report.md` was
+  that text and §105's section.
+- **Nothing put a claim back where it was made.** Every claim carries Pass 2's `source_span`, which
+  `claim_extraction.md` asks for as an "approximate location or quote from the raw response". It
+  reached `02_claims.json` and the later passes' input, and nothing compared it with the draft.
+- **Measured: how often a span can be found in its draft**, on the two stored runs with claims on the
+  owner's machine, 90 claims (counts only; the runs' text stays there):
+
+  | the span, matched to the draft | claims |
+  |---|---|
+  | verbatim | 33 |
+  | once whitespace runs, quotes, Markdown marks, dashes and case are set aside | 42 |
+  | by every fragment either side of an ellipsis | 9 |
+  | by one such fragment | 1 |
+  | by one verbatim run of most of the span | 1 |
+  | not at all | 4 |
+
+  The four were written in different notation from the draft's (mathematics the draft set as
+  LaTeX), or reworded. Placed in order, the claims ran forward through the draft with 2 steps back in
+  66, and one span occurred twice. The 81-claim run's annotated draft renders in 0.16 s.
+
+### Decisions (AD1, AD2)
+
+| # | Decision |
+|---|---|
+| **AD1** | **Every research run writes `01_annotated_draft.md` in code, beside `01_raw_response.md`, which is unchanged** (owner). It is the draft, each surviving candidate under its own heading in ensemble mode, with every claim marked where it was made: the claim's id and tier as a code span, `` `c012 LOW` ``, at the end of the sentence its span ends in (owner: this short mark, over the reason inline and over Markdown footnotes). A span is placed by the first of three steps that answers: normalised, which places a verbatim span too; the fragments either side of an ellipsis; one verbatim run covering most of the span (60%, and at least 20 characters). A span that occurs twice is the one after the claim before it, and a claim is looked for only in the candidates that asserted it. A mark never goes inside a code span or a fenced block (it follows the fence, on a line of its own) and never past a table cell's closing `|`. After the draft, one entry per claim in the order they were made: id, tier, score and type, the published text, the first statement when it differs, the rounds when they ran out, what limited a flagged claim (§105's reason, with the weights the run was scored with, which the run now keeps), grounding, the critic's findings, what it rests on, the candidates that asserted it, and its sources with their titles. A claim no step places is listed after them under a count, with what Pass 2 recorded, so a placement failure is never silent |
+| **AD2** | **`report_style` in `config.yaml`, `synthesis` as shipped or `draft-first`** (owner: the synthesis stays the default). Under `synthesis`, `report.md` is the synthesis, opening with a link to the annotated draft. Under `draft-first` it is the annotated draft, the synthesis is `report_synthesis.md`, and every shell shows the annotated draft as the run's report: the TUI's answer, `/copy report` and `/copy all`, and the CLI's printout (owner), through one function, `annotated_draft.shown_report`. `report.pdf` renders whatever `report.md` is. A draft that cannot be rendered is skipped with a warning and the synthesis is the report, whatever the style (#81). Not an authority key: it names one of two files the run already wrote |
+
+AD1's mark and AD2's default and shells are the owner's choices; the rest of AD1 is the proposal's,
+with the placement ladder taken from the measurement above.
+
+### What §110 deliberately does not change
+
+- **The synthesis, its prompt and its input.** AD3, handing final synthesis the draft's outline,
+  changes the report's text, and §115 gates such a change.
+- **`01_raw_response.md` and `01_candidate_N.md`**, byte for byte.
+- **The database.** The annotated draft is derived when the files are written, from the claims and
+  the draft the run holds, and is not stored. `PipelineRun.confidence_weights` is in-memory working
+  data, like `source_documents`; a resumed run resolves its own at its start.
+- **Coverage gaps are not in the annotated draft, nor is "Where the evidence is thin".** Pass 3c has
+  not seen the draft (its prompt says so), so its gaps are what a complete answer would need rather
+  than what this draft left out, and listing them under the draft as omissions would say something
+  untrue. Every flagged claim's reason is in its own entry.
+- **No model call**, here or anywhere the files are written.
+
+### Built (batch 285)
+
+- **`core/reasoning/annotated_draft.py`** (new): the placement ladder, where a mark goes, `render`,
+  and `shown_report`.
+- **`core/reasoning/output_writer.py`**: `_write_reports` writes the annotated draft and the report
+  for the style; the PDF renders `report.md`.
+- **`core/reasoning/base.py`** and **`orchestrator.py`**: `PipelineRun.confidence_weights`, set where
+  the pipeline resolves the weights once.
+- **`config.yaml`**, **`config_schema.py`** (`ReportStyle`) and **`CONFIG_ARCHITECTURE.md`**:
+  `report_style`.
+- **`main.py`** and **`tui/app.py`**: `shown_report` at the CLI's printout, the TUI's answer,
+  `/copy report` and `/copy all`.
+
+Tests: `tests/test_annotated_draft.py` (63): each placement step and its bounds, on drafts built so the steps after it cannot answer instead; a repeated span; where a mark goes after a sentence, a quote, in a table row, past a code span and after a fence; marks that only add; every line of an entry; the ensemble sections; both styles on disk and in the PDF; a draft that cannot render; the CLI's printout, `/copy report` and `/copy all`, and the TUI's answer under each style; and the run keeping its weights. Sixty-six mutations, one per line that carries a decision, were each killed by a failed assertion. The first pass left four alive, all gaps in the tests: a dash and a re-wrapped line were each placed anyway by the longest-run step, so those tests now split the span in the middle; the code-span test never put a sentence end inside one; and a multi-line claim was caught only by its first-statement line.
+
+### Gap register (§110)
+
+- **Placement is approximate, as the span is.** A span Pass 2 reworded or wrote in other notation is
+  listed unplaced. A short span that also occurs before the claim before it is placed at the first
+  occurrence after that claim, which is usually right and can be wrong.
+- **Only code, fences and table cells are avoided.** A mark can land inside display mathematics or
+  an HTML block, as any text added there would.
+- **A draft with CRLF line ends** gets an LF before a mark that follows a fenced block.
+- **A run stored before this batch has no annotated draft**, and nothing renders one for a stored run
+  from the shells.
+- **The wiki's Research Runs page** (a separate repository) does not yet describe the annotated
+  draft or `report_style`.
+
 ---
 
 ## §108. A research pass you can watch

@@ -215,6 +215,14 @@ class PipelineRun:
     # names the fields it writes and this is not among them, so a run's
     # fetched pages reach output/<run_id>/sources/ and never the database.
     source_documents: list[dict] = field(default_factory=list)
+    # ROADMAP_v3 §110 (AD1): the confidence constants this run was scored
+    # with, `effective_confidence()` as the pipeline resolved it once at the
+    # start. The annotated draft gives each flagged claim the reason the
+    # report's "Where the evidence is thin" section gives it, and resolving
+    # the settings again when the files are written would read whatever
+    # they say by then. In-memory working data, like source_documents: not
+    # persisted, and a resumed run resolves its own at its start.
+    confidence_weights: dict = field(default_factory=dict)
     final_report: str = ""
     # ROADMAP_v3 §108 (PW5): the run's calls, tokens and wall time, by pass
     # and then by model -- `usage_view.RunUsage.to_dict`'s form, refreshed

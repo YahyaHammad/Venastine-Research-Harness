@@ -33365,3 +33365,87 @@ real loop, with the read timeout cut to a second so a count took seconds:
 - Google's one figure covers its connect too.
 - The researcher's seven minutes is still not known to be a read timeout.
 - The wiki does not describe the key or the border.
+
+## Batch 285 -- the draft with its checks on it, and six README statements the code had moved past (ROADMAP_v3 §110, AD1-AD2) (2026-11-23)
+
+**Asked.** Take another roadmap item, and in the same batch correct the six README statements the
+wiki rewrite found out of date. The owner chose §110's annotated draft from the researcher-feedback
+proposals, adding that the unannotated draft must still be written as it is now.
+
+**Checked first.**
+- **Final synthesis never saw the draft.** `_synthesis_input` gives it the query, the claims and the
+  coverage gaps, so the report rebuilt from a flat list a structure the draft already had.
+- **Nothing put a claim back where it was made.** Pass 2 records a `source_span` per claim, "an
+  approximate location or quote", and nothing compared it with the draft.
+- **Measured on the two stored runs with claims on the owner's machine** (90 claims; counts only):
+  33 spans were in the draft verbatim, 42 more once whitespace, quotes, Markdown marks, dashes and
+  case were set aside, 9 by every fragment either side of an ellipsis, 1 by one fragment, and 1 by
+  one verbatim run of most of the span. 4 were not found, written in other notation (LaTeX) or
+  reworded. The claims ran forward through the draft with 2 steps back in 66.
+- **Pass 3c has not seen the draft.** `completeness.md` says so, so its gaps are what a complete
+  answer needs, not what this draft left out, and they are not listed under the draft as omissions.
+
+**Settled with the owner.** Two rounds, the recommended option each time. §110 over §104's OC1,
+§115's ME1 and ME2, and §109. The mark is the claim's id and tier, `` `c012 LOW` ``, at the end of
+the sentence, with everything else in an entry after the draft (over the reason inline, and over
+Markdown footnotes). The synthesis stays the shipped `report_style`. Under `draft-first` every shell
+shows the annotated draft.
+
+**Built.**
+- `core/reasoning/annotated_draft.py` (new):
+  - `_Draft.place`: the ladder the measurement found, normalised, then the ellipsis fragments, then
+    one verbatim run of 60% of the span and at least 20 characters. A repeated span is the one after
+    the claim before it.
+  - `_mark_point`: the end of the sentence, past a closing quote or emphasis. Never inside a code
+    span, never inside a fenced block (after it, on a line of its own), never past a table cell's
+    `|`.
+  - `render`: the intro with the counts, the draft (each survivor under its own heading in ensemble
+    mode, a claim looked for only where it was asserted), the entries in the order the claims were
+    made, and the claims no step placed under a count.
+  - `shown_report`: the one function the shells read.
+- `core/reasoning/output_writer.py`: `_write_reports`. `report.md` opens with a link to the draft, or
+  under `draft-first` is the draft, with `report_synthesis.md` beside it. The PDF renders
+  `report.md`. A draft that cannot render is skipped with a warning and the synthesis is the report.
+- `core/reasoning/base.py` and `orchestrator.py`: `PipelineRun.confidence_weights`, kept where the
+  pipeline resolves them once. A flagged claim's "limited by" is then the reason the report's
+  section gives it, not a second reading of settings that may have changed during the run.
+- `config.yaml`, `config_schema.py` (`ReportStyle`) and `CONFIG_ARCHITECTURE.md`: `report_style`.
+- `main.py` and `tui/app.py`: the CLI's printout, the TUI's answer, `/copy report` and `/copy all`.
+
+**The six README statements**, each checked against the code first:
+- `/critic` routes passes 3a, 3b and **6b** (two places). 6c is templated and makes no model call.
+  The same wrong list was in `CONFIG_ARCHITECTURE.md`, `AGENTS.md`, `docs/ARCHITECTURE.md`, a comment
+  in `orchestrator.py` and a test's name and docstring (`test_critic_routing.py`, which asserts 6b).
+  `ROADMAP.md` §11's acceptance criterion keeps its wording, as a built section's record.
+- While background sessions run you **can** type (SS2 as amended in batch 265); the commands that
+  would change what the wait is waiting for are held.
+- The chat compaction trigger is **90%** of the window (`compaction_trigger_fraction: 0.90`), 180k on
+  200k, with the 16k floor and the quarter cap below about 160k.
+- `/config`'s "all 133" and "nine AUTHORITY keys" were counts that drift: the catalogue has 192 rows
+  and there are 21 authority keys. The row now says what the sets are instead of a number.
+- `05_confidence.json`, not `04_`: the writer has used 05 since the Pass 4/5 renumbering.
+- The environment table has `AGENT_ENV_FILE`: the tool-key file, the nearest `.env` from the
+  launch directory upward by default, never a source of provider keys or `AGENT_`/`VENASTINE_` names.
+
+**Changed in the tests.**
+- `report.md`'s exact content in `test_output_writer.py` opens with the link line, and the run's
+  file list has the annotated draft.
+- The settable-scalar count is 170, and so is ARCHITECTURE.md's sentence.
+- The critic routing test is named for the passes it asserts.
+- `tests/BREAKING_CHANGES.md` has a row for each.
+
+**Verified.**
+- Full suite on Windows with `AGENT_WORKSPACE` unset, run on a clean checkout of the commit: 10376 passed, 88 skipped (10464) in 3:23. Its one warning is the deliberately duplicated name in a hostile test archive.
+- The first full run on the working tree failed 1 of 10464, the docs gate on `read_project_doc`'s reach: 6.01 MB against a stated ceiling of 6, with the file count unchanged at 66. This batch's record was all of it, and the ceiling is 7 MB now, recorded in AGENTS.md beside the last two raises.
+- 66 deliberate breaks of the new code, one per line that carries a decision, were each killed by a failed assertion, none by an error. The first pass left four alive, all gaps in the tests: a dash and a re-wrapped line were placed anyway by the longest-run step, the code-span test never put a sentence end inside one, and a multi-line claim was caught only by its first-statement line. Four tests close them. Two branches the mutations showed could never be reached came out of the code first: a verbatim step the normalised one covers, and a mark at the start of a line.
+- The annotated draft of the owner's 81-claim run (in the scratchpad, not the repository): 77 claims marked, 4 listed, 0.16 s, and with every mark taken out the draft is byte for byte the one Pass 1 wrote.
+- ruff is clean. bandit finds nothing outside the baseline, and `scripts/bandit-count-check.py` reports that no (file, test) count grew. gitleaks 8.30.1 with CI's config finds nothing in an export of the commit. pip-audit finds nothing in either requirements file.
+- No workflow or requirements file is in the diff.
+
+**Not done** (§110's gap register):
+- Placement is approximate, as the span is.
+- A mark can land inside display mathematics or an HTML block.
+- A CRLF draft gets an LF before a mark that follows a fence.
+- A run stored before this batch has no annotated draft, and no command renders one.
+- AD3, final synthesis given the draft's outline, stays a proposal gated on §115.
+- The wiki does not describe the annotated draft or `report_style`.
