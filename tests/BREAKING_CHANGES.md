@@ -15,6 +15,22 @@ other name.
 
 ---
 
+## A rule for each answer from OpenAlex, and its key (batch 288, ROADMAP_v3 §107)
+
+| Change | Test | Fix |
+|---|---|---|
+| **176 settable scalars** | `test_setting_every_leaf_to_its_own_value_changes_nothing`, `test_the_documented_settable_scalar_count_is_the_one_the_test_walks` | Batch 288: `scholar_retry_base_delay_s` (OA3) |
+| **The unindexed-DOI test drives the real `_http_get`** | `test_an_unindexed_doi_returns_nothing_without_disabling_the_lookup` | It takes the `openalex` fixture, answers a real 404, and asserts `usable` and one request. Its injected `fetch` raised a RuntimeError nothing ships and asserted only the return value, so it was green while a real 404 ended the lookups |
+| **`_FakeApi(work=None)` is no 404** | `_FakeApi` in `test_scholar.py` | A work lookup with no record given raises AssertionError. A status is read in `_http_get`, which an injected `fetch` skips: a test of a status uses `openalex` and `_not_found()` |
+| **`_http_get` raises `scholar.OpenAlexStatus` for every non-2xx**, not httpx's `HTTPStatusError` | `TestA404IsNoRecord`, `TestARefusalEndsLookupsAtOnce`, `TestAnyOther4xxIsNoAnswer` | It reads `response.status_code` itself (OA5). The exception carries `status_code`, `path`, `response` and, for a 429, the body's `reason` |
+| **A failed lookup waits before its next attempt** | `test_it_is_retried_before_it_is_believed`, `test_a_persistent_failure_disables_it_for_the_rest_of_the_run` | Through `provider_errors.wait`, so `test_scholar.py`'s autouse `waits` patches `core.provider_errors.sleep` and zeroes the jitter. A test elsewhere that injects a failing `fetch` and does not patch it sleeps about three seconds |
+| **`failed_reason` is the harness's own sentence** | `TestTheCauseQuotesNoQueryString`; `test_the_scholar_lookup_stops_at_a_refusal_rather_than_retrying` is unchanged | A status reads `HTTP 503 Service Unavailable from OpenAlex for works/doi:...`, not httpx's message with the URL; a URL policy refusal reads `URLRefused: ...` (a RuntimeError subclass) and is not retried; a meter refusal still reads `NetworkLimitReached: ...` |
+| **The transport reads `OPENALEX_API_KEY` before it asks the meter** | `test_the_scholar_transport_goes_through_the_meter` | It points `env_secrets.ENV_FILE` at an empty file, so a developer's `.env` is not read |
+| **`tests/conftest.py`'s autouse `no_openalex_key` removes the variable** | every test | A test that wants a key sets it in its own body (`monkeypatch.setenv`) or through `openalex.key`, after the fixture has run |
+| **`ScholarLookup.calls` counts a 404 and any other no-answer status** | `test_it_is_remembered_so_a_doi_cited_twice_is_asked_once` | It is the lookups OpenAlex answered, as the trace's `in N lookup(s)` reads it; a cached 404 is not counted again |
+
+---
+
 ## The scout, a file matched to its address, the retry side by side (batch 287, ROADMAP_v3 §113)
 
 | Change | Test | Fix |

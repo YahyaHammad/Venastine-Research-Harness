@@ -774,6 +774,10 @@ def _apply_scholar(run, claims, scholar) -> None:
                 _clamp(authority + scored.get("authority_adjustment", 0.0)), 4)
             upgraded += 1
 
+    # ROADMAP_v3 §107 (OA1): what the lookup has to say about itself, such
+    # as a key it would not send, written once however many passes score.
+    for notice in scholar.take_notices():
+        run.log(f"Source scoring: {notice}")
     if upgraded:
         run.log(f"Source scoring: {upgraded} cited paper(s) scored from "
                 f"OpenAlex (venue, citation percentile within their own "

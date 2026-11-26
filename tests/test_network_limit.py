@@ -741,9 +741,16 @@ class TestTheTools:
         assert tried == ["works/x"]
         assert lookup.failed_reason.startswith("NetworkLimitReached")
 
-    def test_the_scholar_transport_goes_through_the_meter(self, monkeypatch):
+    def test_the_scholar_transport_goes_through_the_meter(
+            self, monkeypatch, tmp_path):
+        import env_secrets
         from core.reasoning import scholar
 
+        # §107 (OA1): the transport reads OPENALEX_API_KEY before it asks
+        # the meter, so a developer's own `.env` is kept out of it.
+        empty = tmp_path / "empty.env"
+        empty.write_text("", encoding="utf-8")
+        monkeypatch.setattr(env_secrets, "ENV_FILE", str(empty))
         _fill_tools(monkeypatch)
         lookup = scholar.ScholarLookup(enabled=True)
         with pytest.raises(NetworkLimitReached):

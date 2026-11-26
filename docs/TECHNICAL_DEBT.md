@@ -3308,6 +3308,8 @@ re-breaks; and the `usecwd=True` fix it carries is correct and worth keeping.
 
 **CLOSED (batch 223), the first answer above, on the owner's choice.** The three present-tense claims now say `.env` is for a future tool: AGENTS.md's credentials paragraph, PRIVACY.md's local-storage row, and `.env.example`, which now opens by saying no shipped tool reads it and that a key put there is stored for nothing. PRIVACY's deletion section names `.env`. The module, its `usecwd=True` fix and its two pinned tests are unchanged.
 
+**The second answer arrived in batch 288, for one name** (ROADMAP_v3 §107, OA1). `core/reasoning/scholar.py` asks `get_env_secret` for `OPENALEX_API_KEY`, so this entry's title is no longer true of the code: `.env` is read by the scholarly lookup while `scholar_lookup` is on. Still by no shipped TOOL, and the three documents above now say both: AGENTS.md's credentials paragraph, PRIVACY.md's local-storage row and deletion section, and `.env.example`, which lists the key first and calls the other two names stored for nothing.
+
 ## 57. `env_secrets` turns an untrusted `.env` into process environment at import (closed, batch 160 -- read, never loaded)
 
 **Issue:** #211.

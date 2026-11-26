@@ -449,8 +449,14 @@ scholar_api_url: https://api.openalex.org
 # Per-request timeout, in seconds.
 scholar_timeout_s: 8.0
 
-# Retries per request; total attempts is this plus one.
+# Retries per request; total attempts is this plus one. A 404 (no record),
+# a 401 or 403, and a spent daily budget are never retried.
 scholar_max_retries: 2
+
+# Seconds before the first retry of a failed lookup, doubled for each one
+# after it, a quarter either way. A rate limit's Retry-After can make a
+# wait longer, never shorter, up to 60 seconds.
+scholar_retry_base_delay_s: 1.0
 
 # How long a lookup is cached in-process, in seconds.
 scholar_cache_ttl_s: 900
