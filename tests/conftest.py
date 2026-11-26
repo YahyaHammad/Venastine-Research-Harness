@@ -1006,6 +1006,21 @@ def clear_scholar_cache():
 
 
 @pytest.fixture(autouse=True)
+def no_openalex_key(monkeypatch):
+    """ROADMAP_v3 §107 (OA1): no developer's real OpenAlex key in a test.
+
+    The lookup reads `OPENALEX_API_KEY` from the environment first, so a
+    key exported in the shell that runs the suite would ride in a test's
+    request headers and decide whether it is keyed -- a result set by
+    machine state nobody wrote down. The `.env` half is pinned by the
+    tests that reach the real transport (`test_scholar.py`'s `openalex`
+    fixture), because pinning `env_secrets.ENV_FILE` here would make the
+    tests that read a `.env` from their working directory pass unread.
+    """
+    monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def clear_network_tool_caches():
     """Drop the three built-in network tools' caches between tests.
 

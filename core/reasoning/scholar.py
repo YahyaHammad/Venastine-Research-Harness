@@ -41,6 +41,29 @@ and stay off until someone turns it on.
 EVERY SCORING FUNCTION HERE IS PURE and takes a plain dict, so the whole
 of it is testable against fixtures with no network -- which is not a
 convenience, it is the suite's contract.
+
+WHAT EACH ANSWER MEANS (ROADMAP_v3 §107, OA3 and OA4, batch 288). Measured
+on 0.3.29: every failure was retried twice at once and then ended lookups
+for the run, so one cited DOI OpenAlex has no record of -- a 404 -- cost
+three requests and turned the lookup off for every paper after it. Now:
+
+  404             no record. Not retried, remembered for the cache's
+                  lifetime, and the lookup stays on.
+  401, 403        ends lookups for the run at once: a refused key or a
+                  refused query shape answers every request alike.
+  429 daily_budget  ends lookups for the run, naming the reset (00:00 UTC).
+  any other 429   a pace: waits the server's Retry-After, or the backoff
+                  if that is longer, and counts as an attempt.
+  408, 409, 5xx,  backs off exponentially (`provider_errors.backoff_delay`,
+  a transport     from `scholar_retry_base_delay_s`); out of attempts, it
+  failure         ends lookups, as §45 always did for an outage.
+  any other       no answer for that one request; the lookup stays on.
+
+THE KEY GOES IN A HEADER, AND ONLY TO OPENALEX (OA1). `OPENALEX_API_KEY`,
+through `env_secrets`, is sent as `Authorization: Bearer` and never as a
+query parameter, so it is in no URL -- not one a model chose, and not the
+one an error message quotes -- and only when `scholar_api_url` names
+https://api.openalex.org.
 """
 
 from __future__ import annotations
@@ -48,9 +71,12 @@ from __future__ import annotations
 import logging
 import math
 import re
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from http import HTTPStatus
+from urllib.parse import urlsplit
 
 import config
+from core import provider_errors
 from tools.builtin import _net_common
 from tools.builtin._net_common import NetworkLimitReached, TTLCache
 
@@ -205,6 +231,115 @@ def _age_days(work: dict, today: date | None = None) -> int | None:
 # ---- The client -----------------------------------------------------------
 # ---------------------------------------------------------------------------
 
+#: The environment or `.env` name of the OpenAlex key (§107, OA1).
+KEY_NAME = "OPENALEX_API_KEY"
+
+#: The one host the key is sent to, over https on its default port (OA1).
+#: A key is a bearer credential: a mistyped or proxied `scholar_api_url`
+#: still gets every lookup, without it.
+KEY_HOST = "api.openalex.org"
+
+#: Answered alike for every request, so the first one ends lookups (OA4).
+_ENDING_STATUSES = frozenset({401, 403})
+
+#: Weather, so they are backed off and tried again (OA3): the statuses
+#: `provider_errors` retries for a model call (408 and 409; 5xx is tested
+#: apart), less 429, which has its own rule here.
+_TRANSIENT_STATUSES = provider_errors.RETRYABLE_STATUSES - {429}
+
+#: The 429 `reason` that cannot be waited out before midnight UTC (OA3).
+DAILY_BUDGET = "daily_budget"
+
+#: Stored in the cache for a 404, so an unindexed DOI cited by several
+#: claims is asked once (OA4). A sentinel rather than `{}`, so a cache hit
+#: is told apart from a record that happened to be empty.
+_NO_RECORD = object()
+
+# A URL's query string, wherever an exception message quotes one: it is
+# where `mailto` travels, and no part of it belongs in a trace (OA5).
+_QUERY_RE = re.compile(r"(\bhttps?://[^\s?#'\"<>]*)\?[^\s'\"<>]*")
+
+
+def _utc_now() -> datetime:
+    """Now, in UTC. A function so a test can hold the clock still."""
+    return datetime.now(UTC)
+
+
+class OpenAlexStatus(Exception):
+    """An answer from OpenAlex that is not a 2xx (§107).
+
+    Carries `status_code` and `response` under the names
+    `provider_errors.retry_after_s` reads, so a 429's `Retry-After` is read
+    by the same function a model call's is. Its message is the harness's
+    own sentence -- status, phrase and path, never the query string (OA5).
+    """
+
+    def __init__(self, status: int, path: str, response=None,
+                 reason: str | None = None) -> None:
+        self.status_code = status
+        self.path = path.split("?", 1)[0].lstrip("/")
+        self.response = response
+        self.reason = reason
+        try:
+            phrase = f" {HTTPStatus(status).phrase}"
+        except ValueError:
+            phrase = ""
+        line = f"HTTP {status}{phrase} from OpenAlex for {self.path}"
+        super().__init__(f"{line} ({reason})" if reason else line)
+
+
+class URLRefused(RuntimeError):
+    """`is_url_permitted` said no: the same answer on every attempt."""
+
+
+def _reason(response) -> str | None:
+    """A 429 body's `reason`, which is how OpenAlex says which limit it was."""
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 - an unreadable body names no reason
+        return None
+    reason = body.get("reason") if isinstance(body, dict) else None
+    return reason if isinstance(reason, str) and reason else None
+
+
+def _describe(exc: BaseException) -> str:
+    """A failure as one line for the trace, with no query string in it."""
+    if isinstance(exc, OpenAlexStatus):
+        return str(exc)
+    text = " ".join(_QUERY_RE.sub(r"\1", str(exc)).split())
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _key_host_ok(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return False
+    return (parts.scheme.lower() == "https" and parts.hostname == KEY_HOST
+            and port in (None, 443))
+
+
+def _budget_line(key_state: str, now: datetime) -> str:
+    """The trace's words for a spent daily budget (OA3): when it resets."""
+    reset = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    seconds = int((reset - now).total_seconds())
+    hours, minutes = seconds // 3600, seconds % 3600 // 60
+    if seconds < 60:
+        left = "under a minute"
+    elif hours:
+        left = f"{hours}h{minutes:02d}m"
+    else:
+        left = f"{minutes}m"
+    which = {
+        "keyed": f"with {KEY_NAME}",
+        "withheld": f"keyless, since {KEY_NAME} goes only to {KEY_HOST}",
+    }.get(key_state, f"keyless; {KEY_NAME} raises it")
+    return (f"OpenAlex's daily budget is spent ({which}); it resets at "
+            f"00:00 UTC on {reset.date().isoformat()}, in {left}.")
+
+
 class ScholarLookup:
     """OpenAlex, cached and bounded, or a no-op when disabled.
 
@@ -221,12 +356,44 @@ class ScholarLookup:
         self.calls = 0
         self._fetch = fetch or self._http_get
         self._cohorts: dict = {}
+        # §107 (OA1). Resolved at the first request, not here: the
+        # pipeline builds one of these for every run, lookup on or off.
+        # "keyed", "keyless" or "withheld" once resolved.
+        self.key_state: str | None = None
+        self._key = ""
+        # Lines for the run's trace that are about the lookup rather than
+        # a paper; `_apply_scholar` writes them, each once.
+        self.notices: list[str] = []
 
     @property
     def usable(self) -> bool:
         return self.enabled and self.failed_reason is None
 
+    def take_notices(self) -> list[str]:
+        """The notices not yet written, emptied as they are handed over."""
+        taken, self.notices = self.notices, []
+        return taken
+
     # -- transport -------------------------------------------------------
+
+    def _credential(self, url: str) -> str:
+        """The key to send to `url`, or "" (OA1). Read once per lookup."""
+        if self.key_state is None:
+            from env_secrets import get_env_secret
+
+            key = get_env_secret(KEY_NAME, required=False).strip()
+            if not key:
+                self.key_state = "keyless"
+            elif _key_host_ok(url):
+                self.key_state, self._key = "keyed", key
+            else:
+                self.key_state = "withheld"
+                host = urlsplit(url).hostname or "an unreadable host"
+                self.notices.append(
+                    f"{KEY_NAME} is set but not sent: scholar_api_url in "
+                    f"config.yaml names {host}, and the key goes only to "
+                    f"https://{KEY_HOST}. The lookups go keyless.")
+        return self._key
 
     def _http_get(self, path: str, params: dict):
         """The only place this module touches the network.
@@ -238,54 +405,106 @@ class ScholarLookup:
         `_net_common.get` is `httpx.get`, admitted and counted against the
         tool meter (ROADMAP_v3 §53), which imports httpx lazily for the
         reason this function used to.
+
+        THE STATUS IS READ HERE, not raised by `raise_for_status` (§107):
+        httpx's error names the whole URL with its query string, and the
+        rule for each status is `_get`'s, which needs the status itself.
         """
         from safety.policy_enforcement import is_url_permitted
 
         url = f"{config.SCHOLAR_API_URL.rstrip('/')}/{path.lstrip('/')}"
         refusal = is_url_permitted(url, resolve=False)
         if refusal:
-            raise RuntimeError(refusal)
+            raise URLRefused(refusal)
         if config.SCHOLAR_MAILTO:
             # Only ever what the user configured. An address taken from a
             # git config or an environment variable is not a rate-limit
             # optimisation, it is an unasked-for disclosure.
             params = {**params, "mailto": config.SCHOLAR_MAILTO}
+        headers = {"User-Agent": _net_common.USER_AGENT}
+        key = self._credential(url)
+        if key:
+            # A header, never `api_key=`: OpenAlex reads both alike, and a
+            # header is in no URL (OA1). httpx drops it on a redirect to
+            # another host, which `TestTheKey` holds.
+            headers["Authorization"] = f"Bearer {key}"
         response = _net_common.get(
             url, params=params, timeout=config.SCHOLAR_TIMEOUT_S,
-            headers={"User-Agent": _net_common.USER_AGENT},
-            follow_redirects=True)
-        response.raise_for_status()
-        return response.json()
+            headers=headers, follow_redirects=True)
+        status = response.status_code
+        if 200 <= status < 300:
+            return response.json()
+        raise OpenAlexStatus(status, path, response,
+                             _reason(response) if status == 429 else None)
 
     def _get(self, path: str, params: dict):
-        """Cached, retried, and terminal on exhaustion. None on failure."""
+        """Cached, and answered by status (§107). None when there is no
+        answer; `failed_reason` is set only when the lookups are over."""
         if not self.usable:
             return None
         key = f"{path}|{sorted(params.items())}"
         hit = _cache.get(key)
+        if hit is _NO_RECORD:
+            return None
         if hit is not None:
             return hit
 
+        attempts = config.SCHOLAR_MAX_RETRIES + 1
         last = None
-        for _ in range(config.SCHOLAR_MAX_RETRIES + 1):
+        for attempt in range(1, attempts + 1):
             try:
                 payload = self._fetch(path, params)
-            except NetworkLimitReached as exc:
-                # §53. Refused the same way on every attempt, so not
-                # retried; the lookup degrades for this run as an outage
-                # does, and the meter has already said why, once.
+            except OpenAlexStatus as exc:
+                status = exc.status_code
+                if status == 404:
+                    # Plenty of cited DOIs are not indexed works. A
+                    # missing record, not an outage (OA4).
+                    self.calls += 1
+                    _cache.set(key, _NO_RECORD)
+                    return None
+                if status in _ENDING_STATUSES:
+                    reason = _describe(exc)
+                    if status == 401 and self.key_state == "keyed":
+                        reason += f"; OpenAlex did not accept {KEY_NAME}"
+                    self.failed_reason = reason
+                    return None
+                if status == 429 and exc.reason == DAILY_BUDGET:
+                    self.failed_reason = _budget_line(self.key_state, _utc_now())
+                    return None
+                if not (status == 429 or status in _TRANSIENT_STATUSES
+                        or status >= 500):
+                    # A malformed query is malformed every time, and is
+                    # about this request alone (OA4).
+                    self.calls += 1
+                    logger.info("Scholar lookup: no answer for %s: %s",
+                                exc.path, exc)
+                    return None
                 last = exc
-                break
+            except (NetworkLimitReached, URLRefused) as exc:
+                # §53 and the URL policy. Refused the same way on every
+                # attempt, so not retried; the lookup degrades for this
+                # run as an outage does.
+                self.failed_reason = _describe(exc)
+                return None
             except Exception as exc:  # noqa: BLE001 - degraded, never fatal
                 last = exc
-                continue
-            self.calls += 1
-            _cache.set(key, payload)
-            return payload
-        # A 404 is not an outage -- plenty of cited URLs are not indexed
-        # works -- so only a repeated failure disables the lookup, and the
-        # caller distinguishes "no record" from "could not ask".
-        self.failed_reason = f"{type(last).__name__}: {last}"
+            else:
+                self.calls += 1
+                _cache.set(key, payload)
+                return payload
+            if attempt == attempts:
+                break
+            # OA3: a server's Retry-After lengthens the wait, never
+            # shortens it, up to provider_errors' 60 s cap.
+            delay = provider_errors.backoff_delay(
+                attempt, config.SCHOLAR_RETRY_BASE_DELAY_S,
+                provider_errors.retry_after_s(last))
+            logger.info("Scholar lookup for %s failed (%s); retrying in "
+                        "%.1f s.", path.split("?", 1)[0], _describe(last),
+                        delay)
+            provider_errors.wait(delay)
+        # Out of attempts: an outage stays down for the run (§45).
+        self.failed_reason = _describe(last)
         return None
 
     # -- lookups ---------------------------------------------------------

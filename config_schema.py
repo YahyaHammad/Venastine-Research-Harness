@@ -385,6 +385,7 @@ class HarnessConfig(_Model):
     scholar_api_url: str
     scholar_timeout_s: PositiveNumber
     scholar_max_retries: NonNegativeInt
+    scholar_retry_base_delay_s: NonNegativeNumber
     scholar_cache_ttl_s: NonNegativeInt
     scholar_mailto: str
     scholar_venue_weight: Unit

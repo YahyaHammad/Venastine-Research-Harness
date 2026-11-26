@@ -659,11 +659,35 @@ preprint-server or publisher domain class and nothing else.
 
 ### `scholar_api_url`
 
+`OPENALEX_API_KEY` (in the environment or `.env`, never in this file) is
+sent only when this names `https://api.openalex.org` (ROADMAP_v3 §107,
+OA1). A key is a bearer credential, so a mirror, a proxy or a typo here
+gets every lookup without it, and the run's trace says so once.
+
 ### `scholar_timeout_s`
 
 ### `scholar_max_retries`
 
+Counts the attempts a failure is worth, and a 429 that is a pace rather
+than a spent budget is one of them (§107, OA3). A 404 is an answer -- no
+record -- and is never retried; neither is a 401, a 403 or a spent daily
+budget, each of which ends the lookups for the run (OA4).
+
+### `scholar_retry_base_delay_s`
+
+ROADMAP_v3 §107 (OA3). One second, then two, a quarter either way:
+OpenAlex's own guidance is 1 s, 2 s, 4 s, and the model calls'
+`model_call_retry_base_delay_s` is the same shape at three seconds. The
+lower figure is deliberate: these waits sit inside a scoring pass someone
+is waiting on, and OpenAlex's per-second limit is a second. A 429's
+`Retry-After` can lengthen a wait, never shorten it, up to 60 seconds.
+Until §107 every failure was retried at once, so a rate limit was met
+with two more requests in the same instant.
+
 ### `scholar_cache_ttl_s`
+
+Also how long a 404 is remembered (§107, OA4), so an unindexed DOI cited
+by several claims costs one request.
 
 ### `scholar_mailto`
 

@@ -6,7 +6,8 @@ OpenAI-compatible provider, plus the replies in the same thread. The researcher,
 models are not named, and the researcher's words are paraphrased rather than quoted: the thread was a
 private conversation and this repository is public. Keep it that way in any edit. Except §101,
 §102, §103, §105 and §108, which were accepted and built (batches 277, 284, 281, 280, and
-282 and 283) and now live in `ROADMAP_v3.md`, and §110's AD1 and AD2 (batch 285), nothing here is built
+282 and 283) and now live in `ROADMAP_v3.md`, §110's AD1 and AD2 (batch 285), and §107's OA1 and
+OA3 (batch 288), nothing here is built
 and **no decision below is locked**: every Design Decisions table is a proposal for the
 owner to accept, change or refuse, in the convention the three roadmaps already use. A section the owner
 accepts keeps its number; one refused is recorded as refused rather than renumbered, so `§N` keeps one
@@ -45,7 +46,7 @@ append-only, and a deviation is an owner decision in `DEVLOG.md`.
 **Cost — where the 4.6 M input tokens went**
 
 - **§106. A source is read once per run, and checked against all of itself** - **(NOT BUILT: proposed 2026-11-20)** (the corpus keeps 20,000 characters of a document `fetch_url` now holds 200,000 of, so a verbatim quote from character 40,000 of a paper the run read is recorded `quote_verified: false` -- "the fabricated-citation signal" -- and embedding windows cover the first ~5,700 characters, measured. Every pass re-downloads and re-pages the same paper because offset 0 never reads the cache and passes outlive its 300 s; paging an 80,000-character paper one 5,000-character page per step re-sends about 760,000 characters of input in one pass)
-- **§107. OpenAlex with a key, a pace and a backoff** - **(NOT BUILT: proposed 2026-11-20)** (OpenAlex has required an API key since 2026-02-13 and bills keyless use at a tenth or less of a free key's $1/day; `scholar.py` sends a `mailto` and no key, retries immediately, ignores `Retry-After` and treats a `daily_budget` 429 as worth two more tries. No network tool in the harness paces requests per host, which matters now that §100's background subagents can fetch concurrently)
+- **§107. OpenAlex with a key, a pace and a backoff** - **(OA1 and OA3 BUILT in batch 288, with the owner's OA4 and OA5: now `ROADMAP_v3.md` §107; OA2 still proposed here)** (OpenAlex has required an API key since 2026-02-13 and bills keyless use at a tenth or less of a free key's $1/day; `scholar.py` sends a `mailto` and no key, retries immediately, ignores `Retry-After` and treats a `daily_budget` 429 as worth two more tries. No network tool in the harness paces requests per host, which matters now that §100's background subagents can fetch concurrently)
 
 **Visibility — a run whose inside cannot be seen**
 
@@ -237,6 +238,8 @@ corpus the harness owns, which is what §45 already does for scoring.
 ---
 
 ## §107. OpenAlex with a key, a pace and a backoff
+
+**OA1 and OA3 accepted and built in batch 288 (2026-11-26), and recorded as `ROADMAP_v3.md` §107, with two decisions of the owner's this proposal did not have: a 404 is no record and a 401 or 403 ends the lookups (OA4), and the trace's cause line quotes no query string (OA5).** The owner chose the key as a header, sent only to `api.openalex.org`, and a new `scholar_retry_base_delay_s` at one second, with a rate-limit 429 counting as an attempt. Measuring the retry found a defect the proposal did not have: one cited DOI OpenAlex does not index turned the lookup off for the run. **OA2, the per-host pace, is still a proposal here**; the text below is the proposal as written, and the record holds the decisions as built.
 
 **Proposed 2026-11-20, from the thread.** The researcher turned on `scholar_lookup` and asked whether
 the harness backs off, since some services block a client for a day without exponential backoff.
@@ -753,9 +756,9 @@ is reasoning from them.
 |---|---|---|
 | "If you use --tui you can't use any other flags" | `--provider` and `--model` work; `--effort` and `--thread` were silently dropped, a bug fixed in batch 277 | §101 |
 | UNVERIFIED "means it could not find anything that supports the claim even with low confidence" | D2 publishes every claim that exhausts its rounds as UNVERIFIED, whatever it scored; their reading was right | §105 |
-| No exponential backoff | model calls back off exponentially with jitter; OpenAlex lookups retry immediately | §107 |
+| No exponential backoff | model calls back off exponentially with jitter; OpenAlex lookups retried immediately until batch 288, which backs them off and honours `Retry-After` | §107 |
 | "The script that communicates with APIs already supports client-side rate limiting" | no network tool paces requests | §107 |
-| An OpenAlex API key "unlocks" scholarly scoring | there is no key setting; `scholar.py` sends `mailto` only, and OpenAlex has required a key since 2026-02-13 | §107 |
+| An OpenAlex API key "unlocks" scholarly scoring | there was no key setting; `scholar.py` sent `mailto` only, and OpenAlex has required a key since 2026-02-13. Since batch 288 `OPENALEX_API_KEY` raises the lookup's daily budget, though scoring works keyless | §107 |
 | `remember` is "off by default" | on, approval-gated, never grantable to a research run | §109 |
 | "Local claims" and "global claims" exist | claims are a flat list; the phrase is from a DEVLOG ruling | §111 |
 | "That's supported too" (an adversarial pass) | the nearest are 3b, Pass 4, `critic_model` and §20's reviewer; none is a falsification pass | §114 |

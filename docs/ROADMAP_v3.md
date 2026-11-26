@@ -52,6 +52,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§102. A model call that never answers is reported before half an hour has passed** - **(BUILT in batch 284)** (a stalled OpenAI-compatible or Anthropic endpoint took fifteen requests a turn, because the SDKs' two retries sat inside each of the harness's three attempts and inside the lookups before them, all at the call's 600 s, so the first warning came an hour in and the failure after two and a half; google-genai had no timeout at all; and a stop pressed while a call was silent still sent every remaining attempt and ended the turn failed. The SDKs retry nothing now, the harness reads the two headers they read, every provider waits `model_call_read_timeout_s` (600) for each byte and a lookup 30 s, a stop is never retried past, and a waiting chat turn says `waiting 4m12s` in both shells; MW1-MW4)
 - **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(BUILT in batch 281)** (every write scrolled the transcript to the bottom, because `RichLog.auto_scroll` follows every write: a reader at row 5 was at the bottom again after five streamed rows, and the run and session viewers, which repaint whole, did the same on every new entry. A drag selected nothing, because `RichLog` implements none of the selection the pinned textual's screen supports. A transcript now follows only while its reader is at the bottom, follows again there or on any submit, and counts in its border what arrived below them; all four panes keep a scrolled-up reader's place through a repaint; and a drag selects the rows as drawn, copied with ctrl+c; SV1-SV4)
 - **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280)** (D2 overwrote the tier of every claim that ran out of revision rounds with UNVERIFIED, so a partly grounded claim scoring 0.45 (LOW) was published as one nothing supports beside a breakdown still saying 0.45. D2 keeps the tier 6b scored and records `loop_exhausted`; a flagged claim names its largest deduction; an exhausted claim publishes the revision 6b scored with what it was first stated as beside it; and every shell's report ends with a code-rendered "Where the evidence is thin" section, built after the review; XR1-XR4)
+- **§107. OpenAlex with a key and a backoff** - **(OA1, OA3, OA4 and OA5 BUILT in batch 288; OA2 stays a proposal in `ROADMAP_v3_researcher_feedback.md`)** (one cited DOI OpenAlex has no record of cost three requests and turned the scholarly lookup off for the rest of the run, because every failure was retried twice in the same instant and then believed; a rate limit met the same, a spent daily budget was tried twice more, and no key could be set. Each answer now has its rule: a 404 is no record, asked once; a pace waits its Retry-After; weather backs off from `scholar_retry_base_delay_s`; a 401, a 403 or a spent budget ends the lookups, the budget with one line naming 00:00 UTC; and `OPENALEX_API_KEY` goes in a header, to api.openalex.org only)
 - **§108. A research pass you can watch** - **(PW1-PW4, PW6 and PW7 BUILT in batch 282; PW5 in batch 283)** (a pass that streamed 40,000 characters of thinking and 3,000 of text announced 2,000 and its view, which reads the archive, showed its task alone until the call ended; a finished pass could not be opened from the TUI at all. Thinking is activity, every run's view streams the step in progress from a live record the loop writes, a running pass row says how long, what and how much, research rows open their pass, finished subagents stay in the agent panel, running rows spin, and the CLI says when a pass has waited a minute on the model. Batch 283: a run's and each pass's calls, tokens and time are stored on its record and shown in its trace, the panel's foot and `/usage --run`)
 - **§110. The draft you can read, with its checks on it** - **(AD1 and AD2 BUILT in batch 285; AD3 stays a proposal in `ROADMAP_v3_researcher_feedback.md`, gated on §115)** (final synthesis is handed the claims and never the draft, so the report rebuilt a structure the draft already had, and the researcher it was built for reads the draft. Every run now writes `01_annotated_draft.md`, the draft with each claim's id and tier marked where it was made and an entry per claim after it, and `report_style: draft-first` makes it the report)
 - **§113. Asking for the paper instead of plowing on** - **(WT1, WT3, WT5 and WT6 BUILT in batch 286; WT2 and WT7-WT10 BUILT in batch 287; WT4 stays a proposal in `ROADMAP_v3_researcher_feedback.md`)** (a 403 was a failed tool call the model worked around, and nothing kept that a source was wanted, by which claim, and not obtained. Every run now records what it could not read, in `wanted_sources.json` and the report; asks after Pass 1 and after Pass 3a, with three set answers and the user's own; redrafts or grounds again with files put in the run's `supplied/` folder and read with `read_source`, a file matched by identifiers to the address it stands for; and `--unattended` turns every question off. `--scout` stops after Pass 1 on the list, and resuming it is the rest of the run)
@@ -3517,6 +3518,129 @@ status listed newest first, the limit, and an old run reading `{}`. The mutation
   nothing until it answers.~~ Closed in batch 284 (§102, MW3): a chat turn prints it too, and the
   TUI's prompt border says `waiting 4m12s`.
 - **The wiki's user guide** (a separate repository) does not describe the sidebar's new figures.
+
+---
+
+## §107. OpenAlex with a key and a backoff
+
+**Proposed 2026-11-20 in `ROADMAP_v3_researcher_feedback.md`; OA1 and OA3 accepted by the owner and
+built in batch 288 (2026-11-26), with two decisions of the owner's the proposal did not have (OA4,
+OA5). OA2, a per-host pace, stays a proposal there.** The researcher turned on `scholar_lookup` and
+asked whether the harness backs off, since some services block a client for a day without it. It
+did not: every failure was retried twice at once. Measuring that found a worse defect, which the
+proposal did not have: a cited DOI OpenAlex has no record of turned the lookup off for the rest of
+the run. The proposal's §107 is this section; the feedback document now points here.
+
+### What the code did (main `87ecbe1`, 0.3.29)
+
+Measured by driving the real `ScholarLookup._http_get`, with only `_net_common.get` replaced by a
+stand-in that returns real httpx responses:
+
+| OpenAlex answers | requests | the lookup after it |
+|---|---|---|
+| a 404 for one cited DOI | 3, in the same instant | off for the run: the next indexed paper got None, with no request |
+| a per-second 429, then 200 | 2, in the same instant; `Retry-After` unread | on |
+| a `daily_budget` 429 | 3 | off, with a cause naming no reset time |
+| a 503, three times | 3, in the same instant | off |
+
+- **The status was raised, not read.** `_http_get` called `raise_for_status()`, and `_get` retried
+  every exception `scholar_max_retries` times and then set `failed_reason`, which makes `usable`
+  False. The comment beside it said a 404 "is not an outage"; the code treated it as one.
+- **The test named for the 404 passed for a reason that does not ship.**
+  `test_an_unindexed_doi_returns_nothing_without_disabling_the_lookup` injected a `fetch` that raised
+  a RuntimeError, which skips `_http_get`, and asserted the return value, never `usable`.
+- **The cause line quoted httpx's error**, which names the whole request URL with its query string,
+  so a configured `scholar_mailto` reached the run's trace.
+- **No key could be set.** OpenAlex has required one since 2026-02-13. Its documentation, read
+  2026-11-25: a 429's JSON `reason` is `requests_per_second` for the per-second limit (with
+  `Retry-After`, usually one second) or `daily_budget` for a spent day, which resets at midnight UTC;
+  a key goes in the `api_key` parameter or `Authorization: Bearer`, read alike; a 4xx or 5xx costs
+  nothing. Measured live and keyless on 2026-11-26: an unindexed DOI is a 404, `{"error": "Not
+  Found", ...}`, at zero cost, and this address's day is `x-ratelimit-limit-usd: 0.1`, with
+  `x-ratelimit-reset` counting down to midnight UTC. The documentation's two pages say $0.10 and
+  $0.01 for keyless use; a free key's day is $1.
+
+### Decisions (OA1, OA3, OA4, OA5)
+
+| # | Decision |
+|---|---|
+| **OA1** | **`OPENALEX_API_KEY`, held by the harness and sent only as a header, only to `api.openalex.org`** (owner: the header over the documented `api_key=` parameter; one host over whatever `scholar_api_url` names). Read through `env_secrets.get_env_secret`, the environment before `.env`, once per lookup object at its first request, so a run with the lookup off reads no key. Sent as `Authorization: Bearer`, never as a query parameter, so it is in no URL: not one a model chose (the proposal's reason) and not one an error quotes. Only when `scholar_api_url` is https on the default port at `api.openalex.org`; any other host gets every lookup without the key, and the run's trace says so once. httpx drops the header on a redirect to another host, which a test drives through real httpx. A blank value is no key. |
+| **OA3** | **`Retry-After` honoured, exponential backoff otherwise, and a spent daily budget ends the run's lookups with one trace line naming the reset** (owner: a new key; a pace counts as an attempt; the reset from the clock, with the key state). Weather -- 408, 409, any 5xx, a transport failure -- waits `provider_errors.backoff_delay(retry, scholar_retry_base_delay_s, retry-after)`, the model calls' own function and jitter: one second, then two, at the shipped 1.0 and two retries. A 429 whose `reason` is not `daily_budget` (none, `requests_per_second`, `first_dollar`, a query-type sub-limit) is a pace: it waits the larger of its `Retry-After`, capped at 60 s as for a model call, and the backoff, and counts against `scholar_max_retries`. Out of attempts, the lookups end for the run, as §45 always did for an outage. A `daily_budget` 429 is asked once and ends them, and `failed_reason` reads, e.g., `OpenAlex's daily budget is spent (keyless; OPENALEX_API_KEY raises it); it resets at 00:00 UTC on 2026-11-26, in 5h12m.` The reset is the next 00:00 UTC by the clock, which OpenAlex documents for every budget, so no header has to be present. |
+| **OA4** | **A 404 is no record; a 401 or 403 ends the lookups at once; any other answer is no answer for that request** (owner; new, since the proposal did not have it). A 404 is not retried, leaves the lookup on, and is remembered for `scholar_cache_ttl_s` beside found records, so an unindexed DOI cited by several claims costs one request (owner). A 401 or 403 answers every request alike -- a key OpenAlex will not take, a query shape it refuses -- so it is not retried and ends the run's lookups, and a 401 with a key sent says the key was refused. Any other status outside 2xx -- 400, 410, 422, a final 3xx -- is malformed every time and about that request alone: not retried, not remembered, and the lookup stays on. A refusal of the harness's own, the URL policy beside §53's meter, is not retried either. |
+| **OA5** | **The cause line is the harness's own sentence, with no query string in it** (owner; new). A status is read in `_http_get` rather than raised, and reads `HTTP 503 Service Unavailable from OpenAlex for works/doi:10.1234/x`, with a 429's `reason` after it. A transport failure keeps its type and message, with the query string cut from any URL quoted in it, so neither `scholar_mailto` nor any parameter reaches the trace. |
+
+OA1 and OA3 are the proposal's in substance. The header and the one host (OA1), the new key, the
+pace's accounting and the reset line's source and wording (OA3), and OA4 and OA5 are the owner's
+choices (batch 288).
+
+### What §107 deliberately does not change
+
+- **A per-host pace (OA2).** Nothing paces requests per host, across a run's passes or §100's background subagents.
+  It stays a proposal in `ROADMAP_v3_researcher_feedback.md`.
+- **The model's own `fetch_url` calls to `api.openalex.org`.** They stay keyless: the key is never
+  placed in a URL the model chose. §112's citation tool is the proposal that replaces them.
+- **`scholar_lookup` off by default**, `scholar_max_retries` at 2, and `scholar_mailto`, still sent
+  only when set.
+- **§45's "an outage stays down".** Out of attempts, the lookups still end for the run.
+- **The scoring.** No weight, percentile or authority figure moves.
+
+### Measured after (batch 288)
+
+The same stand-in on the branch:
+
+| OpenAlex answers | requests | waits | the lookup after it |
+|---|---|---|---|
+| a 404 | 1 | none | on; the next paper scored |
+| a per-second 429 (`Retry-After: 1`), then 200 | 2 | 1.0 s | on |
+| a `daily_budget` 429 | 1 | none | off, `... it resets at 00:00 UTC on 2026-11-27, in 17h31m.` |
+| a 503, three times | 3 | 1.0 s, then 2.4 s (jitter) | off, `HTTP 503 Service Unavailable from OpenAlex for works/doi:10.9999/x` |
+
+And live, keyless, through the harness's own lookup: an unindexed DOI then an indexed arXiv paper
+was two requests, `usable` stayed True, and the second paper was found.
+
+### Built (batch 288)
+
+- **`core/reasoning/scholar.py`**: `OpenAlexStatus`, read from the response in `_http_get`; the
+  rules in `_get`; `_budget_line` and `_utc_now`; `_describe` and its query cut; `_credential`,
+  `_key_host_ok`, `KEY_NAME`, `KEY_HOST`; `notices` and `take_notices`; `URLRefused`.
+- **`core/reasoning/source_scoring.py`**: `_apply_scholar` writes the lookup's notices to the
+  trace, once.
+- **`config.yaml`**, **`config_schema.py`** and **`CONFIG_ARCHITECTURE.md`**:
+  `scholar_retry_base_delay_s`, a `NonNegativeNumber`.
+- **`.env.example`**: `OPENALEX_API_KEY`, the first name in it something reads.
+
+Tests: `tests/test_scholar.py` (133, from 77), through the real `_http_get` with real httpx responses
+and `_net_common.get` replaced. A 404 asked once, not retried at five retries, remembered, and the
+next paper scored; a pace waiting its `Retry-After`, never less than the backoff and never more than
+a minute, for each reason but the budget, and ending the lookups when its attempts run out; a spent
+budget asked once, its line at four clock positions and each key state, and one trace line across
+two scoring passes; 401 and 403 ending at once, and a refused key named; 400, 410, 422 and a final
+304 as no answer, not remembered; 408, 409 and 5xx backing off from the configured base, a recovery,
+a `Retry-After` on a 503, a transport failure, and the URL policy not retried; no query string in a
+cause line; and the key in a header and never a URL, from `.env` or the environment, blank as none,
+for two spellings of the host, withheld from five other hosts with one trace line, read once and not
+at all when off, and dropped on a redirect off the host, through real httpx. The rewritten 404 test
+keeps its name. `tests/conftest.py` removes an exported `OPENALEX_API_KEY` from every test. The
+mutation result is in `DEVLOG.md`.
+
+### Gap register (§107)
+
+- **Nothing paces requests per host** (OA2 is not built): a run's passes and background subagents can still send OpenAlex a burst,
+  each waiting out its own 429.
+- **A stop does not cut a wait short.** The backoff is about three seconds at the shipped figures, but
+  a `Retry-After` can hold a scoring pass for up to a minute before a stop lands. §102's MW4 is the
+  model calls'.
+- **A spent budget is asked again by the next run**, one 429 that costs nothing, since a lookup's
+  state is one run's.
+- **`X-RateLimit-Remaining` is not read**, so a run does not stop short of the budget; it learns from
+  the 429.
+- **A 403 ends every lookup**, though OpenAlex now also uses 403 for a refused filter: the counting
+  queries share one shape, so one refusal would refuse them all, but the work lookups after it stop
+  too.
+- **Other 4xx answers are not remembered**, so a malformed query asked twice is two requests.
+- **Nothing has seen a live 429.** The 429 rules rest on OpenAlex's documentation and offline tests;
+  the live check was a 404 and a 200, keyless.
+- **The wiki** (a separate repository) does not describe the key or `scholar_retry_base_delay_s`.
 
 ---
 
