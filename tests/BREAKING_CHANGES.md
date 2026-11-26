@@ -24,6 +24,7 @@ other name.
 | **`_check_not_truncated` takes `json_answer`** | `test_a_cut_json_pass_is_left_to_the_json_loop` | Default False, so a positional caller is unchanged. `_run_pass_with_json_retry` passes True, and a JSON pass's cut text is left to `stream_until_json` with no `TRUNCATED` line |
 | **An Anthropic `tool_use` that is the last block of a `max_tokens` reply is refused** | `TestACutAnthropicCallIsRefused` | It gets §33 W4's error and `input={}` (OC5). A fake final message with no `stop_reason` attribute reads as not cut, so `test_client_streaming.py`'s doubles need nothing |
 | **Google candidates are read for `finish_reason`** | `TestEachBranchSaysItWasCut` | Through `getattr`, so a bare `SimpleNamespace` candidate is not cut; the root conftest's `google.genai` stub has no `FinishReason`, so the real enum is driven in `test_sdk_conformance.py` |
+| **`max_tokens` is line 51 of config.yaml** | `test_a_one_line_change_is_one_line` | Two comment lines above the key say what a reply that reaches it does; the test reads the shipped file's line numbers |
 | **`FakeStorage` reconstructs `finish_reason`** | `TestTheCutIsStored`, `TestAResumedCutPass` | It mirrors `storage._to_neutral`: present on an assistant row only when the row was written with it (OC6) |
 
 ---
