@@ -33629,3 +33629,100 @@ empty line; and the settable-scalar count, 175. `tests/BREAKING_CHANGES.md` list
 - The hosted demo cannot be given files, so a scout there has nothing to resume with.
 - A 404 is still wanted; nothing tells a moved paper from a made-up address.
 - WT4 (Zotero) stays a proposal. The wiki does not describe §113 yet.
+
+## Batch 288 -- a DOI OpenAlex does not index no longer switches the scholarly lookup off, and each answer has its rule (ROADMAP_v3 §107, OA1, OA3, OA4, OA5) (2026-11-26)
+
+**Asked.** Fix the scholar lookup's retry handling as the researcher-feedback document's §107 OA3
+proposes, and the measured 404 defect with it, asking the owner about OA1 (the key). On 2026-11-25
+the owner had been offered this fix and chose the wiki pages first, so it was open, not declined.
+
+**Checked first.** Measured on `main` (`87ecbe1`, 0.3.29) by driving the real
+`ScholarLookup._http_get`, with only `tools.builtin._net_common.get` replaced by a stand-in that
+returns a real `httpx.Response`:
+- **A 404 for one cited DOI cost three requests in the same instant and turned the lookup off** for
+  the rest of the run. `_http_get` called `raise_for_status()`, and `_get` retried every exception
+  `scholar_max_retries` times and then set `failed_reason`. The comment beside that code said a 404
+  "is not an outage".
+- **The test named for it passed for a reason that does not ship.**
+  `test_an_unindexed_doi_returns_nothing_without_disabling_the_lookup` injected a fetch raising
+  RuntimeError, which skips `_http_get`, and asserted only the return value.
+- A per-second 429 was retried at once with its `Retry-After` unread; a `daily_budget` 429 was
+  tried twice more; a 503 three times in one instant.
+- **The cause line was httpx's own message**, which names the request URL with its query string,
+  so a configured `scholar_mailto` reached the trace.
+- **The earlier probe had a bug of its own**: its "next indexed DOI" was `10.1/ok`, which `doi_for`
+  does not read as a DOI (it needs four digits after `10.`), so "the next DOI got None with no
+  request" was true for two reasons. With `10.1234/ok` the defect stands as recorded.
+- OpenAlex's documentation, read 2026-11-25: a 429 body's `reason` is `requests_per_second` (with
+  `Retry-After`, usually 1 s) or `daily_budget` (resets at midnight UTC); `X-RateLimit-Reset` counts
+  the seconds to it; the key goes as `api_key=` or `Authorization: Bearer`, read alike; a 4xx or 5xx
+  costs nothing. Silent on what an unindexed DOI returns.
+- **Live and keyless, 2026-11-26, two requests through the harness's own lookup**: an unindexed DOI
+  is a 404, `{"error": "Not Found", ...}`, at zero cost, and this address's day is
+  `x-ratelimit-limit-usd: 0.1` (1000 credits), with `x-ratelimit-reset` at 62484 s, which is
+  midnight UTC. The question put to the owner quoted the documentation's other figure, $0.01 a
+  day; the measured one is ten times that, about a thousand counting queries.
+
+**Settled with the owner.** Two rounds, the recommended option each time:
+- OA1: build the key in this batch, sent only as `Authorization: Bearer`, never as `api_key=`, and
+  only to `api.openalex.org`.
+- OA3: a new `scholar_retry_base_delay_s` at 1.0 s through `provider_errors.backoff_delay`; a
+  rate-limit 429 counts as an attempt, waiting the larger of its `Retry-After` (capped at 60 s) and
+  the backoff; the reset line's time from the clock, naming the key state.
+- OA4 (new): a 404 is cached for `scholar_cache_ttl_s`; a 401 or 403 ends the lookups at once; any
+  other 4xx is no answer for that request.
+- OA5 (new): the cause line is the harness's own, status and path, no query string.
+
+**Built.**
+- `core/reasoning/scholar.py`: `OpenAlexStatus`, raised by `_http_get` for every non-2xx it reads;
+  the rules in `_get`; `_budget_line` and `_utc_now`; `_describe` with its query cut; `_credential`
+  and `_key_host_ok`; `notices` and `take_notices`; `URLRefused`, so the URL policy is not retried,
+  as §53's meter refusal was not (an application of that rule's reason, not a new decision).
+- `core/reasoning/source_scoring.py`: `_apply_scholar` writes the notices once.
+- `config.yaml`, `config_schema.py`, `CONFIG_ARCHITECTURE.md`: `scholar_retry_base_delay_s`.
+- `.env.example`: `OPENALEX_API_KEY`, the first name in it something reads.
+
+**Changed in the tests.**
+- The 404 test drives the real `_http_get` and asserts `usable` and one request; `_FakeApi(work=None)`
+  no longer stands for a 404.
+- `test_scholar.py`'s autouse `waits` records the backoff instead of sleeping, at zero jitter.
+- `test_the_scholar_transport_goes_through_the_meter` pins `env_secrets.ENV_FILE`.
+- `tests/conftest.py`'s autouse `no_openalex_key` removes an exported key from every test. Pinning
+  `ENV_FILE` there instead was rejected: two hosted-mode tests read a `.env` from their working
+  directory and would have passed unread.
+- The settable-scalar count is 176.
+- `tests/BREAKING_CHANGES.md` has a row for each.
+
+**Verified.**
+- Full suite on Windows with `AGENT_WORKSPACE` unset, in a venv built from the pins, on the
+  batch's first commit `098c1c3`: 10706 passed, 89 skipped (10795) in 2:47. Its one warning is the
+  deliberately duplicated name in a hostile test archive. The final commit adds the mutation
+  pass's two tests and three sharpened ones, all in `test_scholar.py` (135 there).
+- 49 deliberate breaks, one per line of the new code that carries a decision. 48 were killed by
+  failed assertions on the first pass, none by an error. The survivor was the key's `.strip()`:
+  the blank-key test wrote its blank to `.env`, which python-dotenv already trims, so it never
+  reached the lookup. It sets the environment now, and the row is killed. Writing the table found
+  four gaps first, closed before it ran: a cached 404 that `_get` could hand back as the cache's
+  marker, a no-answer not counted, a final 3xx that could be taken for a record, and the shipped
+  one-second base unpinned.
+- ruff is clean. bandit 1.9.4 finds nothing outside the baseline, and
+  `scripts/bandit-count-check.py` reports that no (file, test) count grew. gitleaks 8.30.1 with
+  CI's config finds nothing in an export of the tracked files. pip-audit finds nothing in either
+  requirements file. No workflow or requirements file is in the diff.
+- Against `87ecbe1`'s `scholar.py` and `source_scoring.py`, the 56 new and rewritten tests all
+  failed on assertions; the rewritten 404 test on `assert lookup.usable and lookup.failed_reason is
+  None`.
+- The probe again on the branch: a 404 is one request and the lookup stays on; a per-second 429
+  waits 1.0 s; a spent budget is one request and `... it resets at 00:00 UTC on 2026-11-27, in
+  17h31m.`; a 503 waits 1.0 s and then 2.4 s and ends the lookups with
+  `HTTP 503 Service Unavailable from OpenAlex for works/doi:10.9999/x`.
+
+**Not done** (§107's gap register):
+- OA2, the per-host pace, is not built.
+- A stop does not cut a wait short; a `Retry-After` can hold a pass for up to a minute.
+- A spent budget is asked again by the next run.
+- `X-RateLimit-Remaining` is not read.
+- A 403 ends every lookup, though OpenAlex also uses it for a refused filter.
+- Other 4xx answers are not remembered.
+- Nothing has seen a live 429.
+- The wiki does not describe the key or the new setting.

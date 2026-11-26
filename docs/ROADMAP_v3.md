@@ -3609,19 +3609,26 @@ was two requests, `usable` stayed True, and the second paper was found.
   `scholar_retry_base_delay_s`, a `NonNegativeNumber`.
 - **`.env.example`**: `OPENALEX_API_KEY`, the first name in it something reads.
 
-Tests: `tests/test_scholar.py` (133, from 77), through the real `_http_get` with real httpx responses
-and `_net_common.get` replaced. A 404 asked once, not retried at five retries, remembered, and the
-next paper scored; a pace waiting its `Retry-After`, never less than the backoff and never more than
-a minute, for each reason but the budget, and ending the lookups when its attempts run out; a spent
-budget asked once, its line at four clock positions and each key state, and one trace line across
-two scoring passes; 401 and 403 ending at once, and a refused key named; 400, 410, 422 and a final
-304 as no answer, not remembered; 408, 409 and 5xx backing off from the configured base, a recovery,
-a `Retry-After` on a 503, a transport failure, and the URL policy not retried; no query string in a
-cause line; and the key in a header and never a URL, from `.env` or the environment, blank as none,
-for two spellings of the host, withheld from five other hosts with one trace line, read once and not
-at all when off, and dropped on a redirect off the host, through real httpx. The rewritten 404 test
-keeps its name. `tests/conftest.py` removes an exported `OPENALEX_API_KEY` from every test. The
-mutation result is in `DEVLOG.md`.
+Tests: `tests/test_scholar.py` (135, from 77), through the real `_http_get` with real httpx responses
+and `_net_common.get` replaced:
+- a 404 asked once, not retried at five retries, remembered (and handed back as None, never the
+  cache's marker), and the next paper scored;
+- a pace waiting its `Retry-After`, never less than the backoff and never more than a minute, for
+  each reason but the budget, and ending the lookups when its attempts run out;
+- a spent budget asked once, its line at four clock positions and in each key state, and one trace
+  line across two scoring passes;
+- 401 and 403 ending at once, and a refused key named; 400, 410, 422 and a final 304 as no answer,
+  counted and not remembered;
+- 408, 409 and 5xx backing off from the configured base, a recovery, a `Retry-After` on a 503, a
+  transport failure, the URL policy not retried, and the shipped base pinned at a second;
+- no query string in a cause line;
+- the key in a header and never a URL, from `.env` or the environment, blank (from the environment)
+  as none, sent for two spellings of the host and withheld from five other hosts with one trace
+  line, read once and not at all when off, and dropped on a redirect off the host, through real
+  httpx.
+
+The rewritten 404 test keeps its name. `tests/conftest.py` removes an exported `OPENALEX_API_KEY`
+from every test. The mutation result is in `DEVLOG.md`.
 
 ### Gap register (§107)
 

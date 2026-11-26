@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "venastine-research-harness"
-version = "0.3.29b0+openalex.key.backoff.r07e18669c445"
+version = "0.3.29b1+openalex.key.backoff.r07e18669c445"
 description = "A from-scratch agentic harness: tool-using chat plus a ten-pass self-critiquing research pipeline."
 readme = "README.md"
 # The same words as package.json's `keywords`, in the same order: what a

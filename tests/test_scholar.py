@@ -477,6 +477,12 @@ class TestTheLookupIsOffAndDegradesWell:
         lookup.authority_for("https://arxiv.org/abs/1706.03762")
         assert len(api.requests) == before
 
+    def test_the_shipped_backoff_starts_at_a_second(self):
+        """§107 (OA3): OpenAlex's own guidance is 1 s, 2 s, 4 s, and these
+        waits sit inside a scoring pass someone is waiting on."""
+        assert config.SCHOLAR_RETRY_BASE_DELAY_S == 1.0
+        assert config.SCHOLAR_MAX_RETRIES == 2
+
     def test_it_is_retried_before_it_is_believed(self):
         lookup, api = _lookup(work=GPT3, error=RuntimeError("timeout"))
         lookup.authority_for("https://arxiv.org/abs/2005.14165")
@@ -703,6 +709,17 @@ class TestA404IsNoRecord:
         assert len(openalex.sent) == 1
         assert lookup.calls == 1, "a 404 is a lookup OpenAlex answered"
 
+    def test_a_remembered_404_is_none_and_not_the_caches_marker(
+            self, openalex):
+        """`_get`'s callers read None as "no answer"; the marker the cache
+        keeps for a 404 must never reach one of them."""
+        openalex.answer("10.1234/x", _not_found())
+        lookup = ScholarLookup(enabled=True)
+        params = {"select": "id"}
+        assert lookup._get("works/doi:10.1234/x", params) is None
+        assert lookup._get("works/doi:10.1234/x", params) is None
+        assert len(openalex.sent) == 1
+
     def test_the_paper_after_it_is_still_scored(self, openalex):
         openalex.answer("10.1234/x", _not_found())
         openalex.answer("2005.14165", (200, {}, GPT3))
@@ -887,6 +904,7 @@ class TestAnyOther4xxIsNoAnswer:
         lookup = ScholarLookup(enabled=True)
         assert lookup.work(PAPER) is None
         assert len(openalex.sent) == 1
+        assert lookup.calls == 1, "an answer, if not a record"
         assert waits == []
         assert lookup.usable and lookup.failed_reason is None
         assert lookup.work(OTHER)["id"] == GPT3["id"]
@@ -903,6 +921,8 @@ class TestAnyOther4xxIsNoAnswer:
         lookup = ScholarLookup(enabled=True)
         assert lookup.work(PAPER) is None
         assert len(openalex.sent) == 1 and lookup.usable
+        assert lookup.work(PAPER) is None
+        assert len(openalex.sent) == 2, "its empty body was not a record"
 
 
 class TestOtherFailuresBackOff:
@@ -1026,8 +1046,11 @@ class TestTheKey:
         assert lookup.key_state == "keyless"
         assert lookup.notices == []
 
-    def test_a_blank_key_is_no_key(self, openalex):
-        openalex.key("   ")
+    def test_a_blank_key_is_no_key(self, openalex, monkeypatch):
+        """From the environment: python-dotenv already trims an unquoted
+        `.env` value, so a blank one written there never reaches the
+        lookup's own strip (mutation 44 of batch 288 survived that way)."""
+        monkeypatch.setenv("OPENALEX_API_KEY", " \t ")
         openalex.answer("10.1234/x", (200, {}, GPT3))
         lookup = ScholarLookup(enabled=True)
         lookup.work(PAPER)
