@@ -81,8 +81,9 @@ from contextvars import copy_context
 
 import config
 from core import interaction, pipeline_models, usage_view
+from core.client import output_ceiling
 from core.config_loader import effective_confidence, effective_source_scoring
-from core.loop import RunAgentLoop
+from core.loop import MAX_TOKENS_STOP, RunAgentLoop
 from core.reasoning import thin_evidence, wanted_sources
 from core.reasoning.base import Claim, PipelineRun, resolve_by_id
 from core.reasoning.confidence_scoring import (
@@ -504,7 +505,8 @@ def _translate(pass_id: str, stream, corpus=None, streamed=None):
                       if failed else None))
 
 
-def _check_not_truncated(pass_id: str, response, trace: list[str] | None):
+def _check_not_truncated(pass_id: str, response, trace: list[str] | None,
+                         json_answer: bool = False):
     """A pass that ended on a stop condition did NOT finish; say so.
 
     `_run_pass` used to return `response.text` and discard `stop_reason`,
@@ -530,11 +532,39 @@ def _check_not_truncated(pass_id: str, response, trace: list[str] | None):
         working from an empty string, and the only question is how many
         passes it takes to produce an incomprehensible error. Raise here,
         naming the pass and the stop reason.
+
+    ROADMAP_v3 §104 (OC1) added a stop with its own wording, `max_tokens`:
+    the provider's output ceiling ended the REPLY, which is a different
+    ceiling from the two this function used to name, and the one a person
+    raises is `max_tokens` in config.yaml. With no text it fails like the
+    others. With text, a prose pass is traced and continues, the rule
+    above; `json_answer` is a JSON pass, whose cut answer is judged by
+    `stream_until_json`, the loop it shares with §20's reviewer: used if
+    it still parses and passes its check, failed naming the ceiling if
+    not, and never sent the parse corrective.
     """
     stop = getattr(response, "stop_reason", None)
     if stop in (None, "complete"):
         return
     text = (getattr(response, "text", "") or "").strip()
+    if stop == MAX_TOKENS_STOP:
+        if not text:
+            raise ValueError(
+                f"{pass_id} ended on 'max_tokens' with no text: its reply "
+                f"reached {output_ceiling()}, which on some providers bounds "
+                f"thinking and text together, so a reply that spent it "
+                f"reasoning has nothing to show and every later pass would "
+                f"be working from nothing. Raise max_tokens in config.yaml, "
+                f"or lower the effort, before resuming.")
+        if json_answer:
+            return
+        message = (f"{pass_id}: TRUNCATED (max_tokens) -- its reply reached "
+                   f"{output_ceiling()} before it finished; continuing with "
+                   f"what it returned.")
+        logger.warning("%s", message)
+        if trace is not None:
+            trace.append(message)
+        return
     # #4: the figures turn a bare reason into a diagnosis. A user who
     # reads token_budget_exceeded as a context problem is repeating the
     # exact misreading item 9 recorded.
@@ -641,6 +671,15 @@ def _pass_kwargs(on_thread, resume_thread) -> dict:
     return kwargs
 
 
+#: ROADMAP_v3 §104 (OC6). What a resumed pass whose stored answer was cut is
+#: asked, once. Not the parse corrective: that tells a model its JSON is
+#: malformed, and this answer was not malformed but unfinished.
+CUT_ANSWER_ASK = (
+    "Your last answer was cut off by the output token limit before it "
+    "finished, so none of it can be used. Give your complete answer again, "
+    "from the beginning, in the form the task asks for.")
+
+
 def _resumed_attempt(pass_id: str, thread_id, model: str, provider_name: str,
                      temperature, authorization, effort, activity, corpus,
                      trace, on_thread, streamed=None):
@@ -648,7 +687,7 @@ def _resumed_attempt(pass_id: str, thread_id, model: str, provider_name: str,
     §98, RS4). Returns the response to carry on with, or None when the
     thread cannot be continued and the pass must start again.
 
-    THREE OUTCOMES, by what the thread's last row is (resume.thread_tail):
+    FOUR OUTCOMES, by what the thread's last row is (resume.thread_tail):
 
       an answer   the response the pass returned before the run died. It is
                   handed back AS the first attempt, with no model call, so
@@ -657,6 +696,12 @@ def _resumed_attempt(pass_id: str, thread_id, model: str, provider_name: str,
                   it exactly as it ran the first time. The run that
                   prompted §98 failed on an answer the parser now accepts
                   (RS7), so its Pass 3a resumes with no call at all.
+      a cut one   an answer the output ceiling ended (ROADMAP_v3 §104,
+                  OC6). Handed back, it would be sent the parse corrective
+                  OC1 rules out, so the pass is asked ONCE in the same
+                  thread, which keeps every tool result it gathered, for
+                  the whole answer at the ceiling now configured. A reply
+                  cut again fails as the first one did.
       a request   the run stopped before the model replied. The loop
                   resends it in the same thread, which keeps every tool
                   result the pass had gathered.
@@ -673,6 +718,18 @@ def _resumed_attempt(pass_id: str, thread_id, model: str, provider_name: str,
         response = ModelResponse(text=text, usage={})
         response.thread_id = thread_id
         return response
+    if kind == "cut":
+        if trace is not None:
+            trace.append(f"{pass_id}: resumed in its own thread; the answer "
+                         f"stored there was cut off at the output ceiling, "
+                         f"so the pass is asked once for the whole answer, "
+                         f"at {output_ceiling()}.")
+        return (yield from _translate(pass_id, RunAgentLoop.stream_deep_research_mode(
+            pass_input=None, model=model, pass_id=pass_id,
+            provider_name=provider_name, temperature=temperature,
+            authorization=authorization, effort=effort, activity=activity,
+            follow_up=CUT_ANSWER_ASK, **_pass_kwargs(on_thread, thread_id),
+        ), corpus=corpus, streamed=streamed))
     if kind == "pending":
         if trace is not None:
             trace.append(f"{pass_id}: resumed in its own thread, resending "
@@ -983,7 +1040,7 @@ def _run_pass_with_json_retry(
         # already exhausted its budget spends more of it to be told the same
         # thing, and reports a parse failure for something that never parsed
         # because it was never finished.
-        _check_not_truncated(pass_id, response, trace)
+        _check_not_truncated(pass_id, response, trace, json_answer=True)
 
         text = yield from stream_until_json(
             response,

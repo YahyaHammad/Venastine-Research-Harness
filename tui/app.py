@@ -85,6 +85,7 @@ from core.loop import (
     advertisement_facts,
     agent_turn,
     session_tiers,
+    stop_note,
     with_persona,
 )
 from core.memory import ConversationMemory
@@ -4588,7 +4589,10 @@ class VenastineApp(App):
                     (self._turn_output_tokens or 0) + reported)
             transcript.flush_stream()
             if event.stop_reason and event.stop_reason != "complete":
-                transcript.write_system(f"[stopped early: {event.stop_reason}]")
+                # ROADMAP_v3 §104 (OC7), the CLI's wording.
+                transcript.write_system(
+                    f"[stopped early: {event.stop_reason}"
+                    f"{stop_note(event.stop_reason)}]")
 
     def _snapshot(self, params) -> "str | None":
         """What the file holds right now, or None when there is nothing

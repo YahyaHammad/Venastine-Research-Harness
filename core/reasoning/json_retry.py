@@ -88,6 +88,42 @@ _TEXT_CORRECTIVE = (
     "written as the reply itself.")
 
 
+class CutOffAnswer(ValueError):
+    """ROADMAP_v3 §104 (OC1). A JSON answer the provider's output ceiling
+    ended before it finished, and that does not parse or does not pass its
+    check. A ValueError, so every caller that turns a failed recovery into a
+    failed pass or a failed review does exactly that with this one too; a
+    class of its own so a reader can tell "it was cut off" from "it could
+    not write JSON", which are two facts with two different remedies."""
+
+
+def _cut(response) -> bool:
+    """Whether the loop stopped `response` at the output ceiling."""
+    from core.loop import MAX_TOKENS_STOP
+
+    return getattr(response, "stop_reason", None) == MAX_TOKENS_STOP
+
+
+def _cut_off(label: str, error: ValueError) -> CutOffAnswer:
+    from core.client import output_ceiling
+
+    return CutOffAnswer(
+        f"{label}'s reply was cut off at {output_ceiling()} before it "
+        f"finished, and what it returned is not usable "
+        f"({str(error).splitlines()[0]}). It was not asked again: at the "
+        f"same ceiling it would be cut in the same place. Raise max_tokens "
+        f"in config.yaml first.")
+
+
+def _used_although_cut(label: str, trace: Optional[list]) -> None:
+    from core.client import output_ceiling
+
+    if trace is not None:
+        trace.append(
+            f"{label}: its reply was cut off at {output_ceiling()}, and what "
+            f"it returned still parses and passes its check; using it.")
+
+
 def parse_json_response(text: str) -> Any:
     """Callers are instructed (via the universal preamble, or an agent's
     own output-format section) to emit clean JSON, optionally in a code
@@ -222,14 +258,28 @@ def stream_until_json(
 
     `label`, `trace`, `max_retries`, `on_response` and `validate` are
     `retry_until_json`'s, which documents them.
+
+    ROADMAP_v3 §104 (OC1). An answer the output ceiling cut is never sent a
+    corrective: "your last response did not parse" is false about an answer
+    that was not allowed to finish, and asking again at the same ceiling
+    cuts it in the same place. It is used if it parses and passes
+    `validate` anyway, with a trace line saying so, and otherwise raises
+    `CutOffAnswer` naming the ceiling. That holds for the first answer and
+    for every corrective reply, here rather than in one caller, so §20's
+    reviewer keeps the rule the pipeline keeps (SR6).
     """
+    current = response
     raw_text = response.text
 
     for attempt in range(max_retries):
         try:
             _check(raw_text, validate)
+            if _cut(current):
+                _used_although_cut(label, trace)
             return raw_text
         except ValueError as e:
+            if _cut(current):
+                raise _cut_off(label, e) from e
             shape = isinstance(e, PayloadShapeError)
             if trace is not None:
                 # The parse wording is unchanged to the byte. A reader
@@ -252,10 +302,18 @@ def stream_until_json(
             retry_response = yield from turn(corrective)
             if on_response is not None:
                 on_response(retry_response)
+            current = retry_response
             raw_text = retry_response.text
 
     # Last attempt: validate one more time and either return or raise.
-    _check(raw_text, validate)
+    try:
+        _check(raw_text, validate)
+    except ValueError as e:
+        if _cut(current):
+            raise _cut_off(label, e) from e
+        raise
+    if _cut(current):
+        _used_although_cut(label, trace)
     return raw_text
 
 

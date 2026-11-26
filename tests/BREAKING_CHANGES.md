@@ -15,6 +15,19 @@ other name.
 
 ---
 
+## A reply the output ceiling cut (batch 289, ROADMAP_v3 §104)
+
+| Change | Test | Fix |
+|---|---|---|
+| **`stop_reason` has a fifth value, `max_tokens`** | `test_the_fifth_stop_reason_is_named_in_the_event_comment`, `TestTheLoopStopsOnTheCeiling` | A scripted `ModelResponse` whose `finish_reason` is `"length"` and that asks for no tool now ends the loop on `max_tokens` (OC1), before §95's reasoning-only ask (OC4). Every existing double leaves the field None, so it reads as a reply that finished |
+| **`stream_until_json` reads the response's `stop_reason`** | `TestAJsonAnswerThatWasCut` | A first answer or a corrective reply on `max_tokens` is never corrected: used if it parses and passes `validate`, `CutOffAnswer` if not. A test of the corrective sends a response whose stop is `complete`, which `make_model_response` defaults to |
+| **`_check_not_truncated` takes `json_answer`** | `test_a_cut_json_pass_is_left_to_the_json_loop` | Default False, so a positional caller is unchanged. `_run_pass_with_json_retry` passes True, and a JSON pass's cut text is left to `stream_until_json` with no `TRUNCATED` line |
+| **An Anthropic `tool_use` that is the last block of a `max_tokens` reply is refused** | `TestACutAnthropicCallIsRefused` | It gets §33 W4's error and `input={}` (OC5). A fake final message with no `stop_reason` attribute reads as not cut, so `test_client_streaming.py`'s doubles need nothing |
+| **Google candidates are read for `finish_reason`** | `TestEachBranchSaysItWasCut` | Through `getattr`, so a bare `SimpleNamespace` candidate is not cut; the root conftest's `google.genai` stub has no `FinishReason`, so the real enum is driven in `test_sdk_conformance.py` |
+| **`FakeStorage` reconstructs `finish_reason`** | `TestTheCutIsStored`, `TestAResumedCutPass` | It mirrors `storage._to_neutral`: present on an assistant row only when the row was written with it (OC6) |
+
+---
+
 ## A rule for each answer from OpenAlex, and its key (batch 288, ROADMAP_v3 §107)
 
 | Change | Test | Fix |

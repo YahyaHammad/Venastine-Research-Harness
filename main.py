@@ -69,6 +69,7 @@ from core.loop import (
     RunAgentLoop,
     advertisement_facts,
     agent_turn,
+    stop_note,
 )
 from core.reasoning.authorization import GRANT_PICKER
 from core.replay import reasoning_text, replay_entries, step_entries
@@ -1010,8 +1011,10 @@ def _chat_turn_steps(session: ChatSession, user_input: str, agent,
         # quietly incomplete is worse than one that admits it.
         if response.stop_reason == "cancelled" and not response.usage:
             figures += " (the stopped step is not counted)"
+        # ROADMAP_v3 §104 (OC7): a cut reply names the ceiling it reached
+        # before the turn's figures, which are a different ceiling's.
         print(f"[stopped early: {ansi.for_display(response.stop_reason)}"
-              f"{figures}]")
+              f"{stop_note(response.stop_reason)}{figures}]")
         trailer = True
     # After the answer rather than above it, since §86: above, it
     # would split a turn's printed steps from its last one.

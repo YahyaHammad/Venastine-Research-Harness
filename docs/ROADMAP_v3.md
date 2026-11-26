@@ -51,6 +51,7 @@ decision record is append-only, and a deviation is recorded as an owner decision
 - **§101. Flags a full-screen launch dropped: `--effort`, `--thread` and `--ref` under `--tui`** - **(BUILT in batch 277; LF5 in batch 278)** (`run_tui()` received the provider and model and nothing else, so `--tui --effort low` ran at the shipped `high` with `high` in the sidebar, the `--thread` a `/config` restart writes was ignored by the TUI it relaunched, and `--ref` attached nothing. All three reach the TUI now: the flag's effort outranks `tui.effort`, the thread opens at mount through `switch_to_thread`, the references attach through `/ref`'s writer and a restart does not attach them twice; and a census read from the parser gives every flag one answer under `--tui`. Batch 278 refuses `--tui` with a data command such as `--memories`, which ran while `--tui` went unused, and names the slash command; LF1-LF5)
 - **§102. A model call that never answers is reported before half an hour has passed** - **(BUILT in batch 284)** (a stalled OpenAI-compatible or Anthropic endpoint took fifteen requests a turn, because the SDKs' two retries sat inside each of the harness's three attempts and inside the lookups before them, all at the call's 600 s, so the first warning came an hour in and the failure after two and a half; google-genai had no timeout at all; and a stop pressed while a call was silent still sent every remaining attempt and ended the turn failed. The SDKs retry nothing now, the harness reads the two headers they read, every provider waits `model_call_read_timeout_s` (600) for each byte and a lookup 30 s, a stop is never retried past, and a waiting chat turn says `waiting 4m12s` in both shells; MW1-MW4)
 - **§103. A reader who scrolls up stays where they scrolled, and the transcript can be selected** - **(BUILT in batch 281)** (every write scrolled the transcript to the bottom, because `RichLog.auto_scroll` follows every write: a reader at row 5 was at the bottom again after five streamed rows, and the run and session viewers, which repaint whole, did the same on every new entry. A drag selected nothing, because `RichLog` implements none of the selection the pinned textual's screen supports. A transcript now follows only while its reader is at the bottom, follows again there or on any submit, and counts in its border what arrived below them; all four panes keep a scrolled-up reader's place through a repaint; and a drag selects the rows as drawn, copied with ctrl+c; SV1-SV4)
+- **§104. A reply the output ceiling cut is reported, not corrected** - **(OC1, OC4, OC5, OC6 and OC7 BUILT in batch 289; OC2 and OC3 stay proposals in `ROADMAP_v3_researcher_feedback.md`, after §106)** (a reply the provider's output ceiling ended reached the loop as `complete`, because only two branches read the signal and only for tool arguments, so a cut Pass 2 was asked for the same JSON at the same size twice more: three requests and a parse failure, measured, and a Pass 1 that spent the ceiling thinking was six. It is `max_tokens` now, from one field mapped in all four branches; a JSON answer it cut is used if it parses and otherwise fails naming the ceiling, an Anthropic call it cut does not run, and a resume asks once for the whole answer)
 - **§105. A claim that ran out of rounds keeps the tier it earned** - **(BUILT in batch 280)** (D2 overwrote the tier of every claim that ran out of revision rounds with UNVERIFIED, so a partly grounded claim scoring 0.45 (LOW) was published as one nothing supports beside a breakdown still saying 0.45. D2 keeps the tier 6b scored and records `loop_exhausted`; a flagged claim names its largest deduction; an exhausted claim publishes the revision 6b scored with what it was first stated as beside it; and every shell's report ends with a code-rendered "Where the evidence is thin" section, built after the review; XR1-XR4)
 - **§107. OpenAlex with a key and a backoff** - **(OA1, OA3, OA4 and OA5 BUILT in batch 288; OA2 stays a proposal in `ROADMAP_v3_researcher_feedback.md`)** (one cited DOI OpenAlex has no record of cost three requests and turned the scholarly lookup off for the rest of the run, because every failure was retried twice in the same instant and then believed; a rate limit met the same, a spent daily budget was tried twice more, and no key could be set. Each answer now has its rule: a 404 is no record, asked once; a pace waits its Retry-After; weather backs off from `scholar_retry_base_delay_s`; a 401, a 403 or a spent budget ends the lookups, the budget with one line naming 00:00 UTC; and `OPENALEX_API_KEY` goes in a header, to api.openalex.org only)
 - **§108. A research pass you can watch** - **(PW1-PW4, PW6 and PW7 BUILT in batch 282; PW5 in batch 283)** (a pass that streamed 40,000 characters of thinking and 3,000 of text announced 2,000 and its view, which reads the archive, showed its task alone until the call ended; a finished pass could not be opened from the TUI at all. Thinking is activity, every run's view streams the step in progress from a live record the loop writes, a running pass row says how long, what and how much, research rows open their pass, finished subagents stay in the agent panel, running rows spin, and the CLI says when a pass has waited a minute on the model. Batch 283: a run's and each pass's calls, tokens and time are stored on its record and shown in its trace, the panel's foot and `/usage --run`)
@@ -3757,6 +3758,134 @@ outweighs "no source", and a test now covers that case.
 - **The wiki's user guide** (a separate repository) may still describe D2's UNVERIFIED fallback.
 - **A "retry honesty" figure** (the owner's notes, outside this repository) can now be computed from
   `loop_exhausted`; it is not built.
+
+---
+
+## §104. A reply the output ceiling cut is reported, not corrected
+
+**Proposed 2026-11-20 in `ROADMAP_v3_researcher_feedback.md`; OC1 accepted by the owner and built in
+batch 289 (2026-11-26), with four decisions of the owner's the proposal did not have (OC4-OC7).
+OC2 and OC3, batching the JSON passes, stay proposals there, after §106.** The researcher's Pass 3a
+failed on "Unterminated string starting at: line 755 column 16 (char 36142)": one call grounding all
+63 factual claims, retried with the corrective message, which took a long time. The proposal read
+the code and found why the retry could not work. A reply cut off by the output ceiling --
+`max_tokens` in config.yaml, which on current Anthropic models bounds thinking and text together --
+reached the loop as a finished one, so the JSON pass asked for the same answer, at the same size,
+under the same ceiling. The proposal's §104 is this section; the feedback document now points here.
+
+### What the code did (main `f0373aa`, 0.3.30)
+
+Read first, then driven through the real OpenAI-compatible branch, loop and pass, with only the SDK
+replaced by a stand-in that streams the chunks a provider would:
+
+| the reply | requests | what happened |
+|---|---|---|
+| Pass 2's JSON, cut (`length`) on every attempt | 3 | two "JSON parse failed ... retrying with corrective message" lines, then `Response did not return valid JSON: Unterminated string ...` |
+| Pass 1, the whole ceiling spent reasoning | 6 | three attempts, each with §95's ask, then `Pass 1 returned no text after 3 attempt(s)` |
+| a chat turn, cut | 1 | `complete` |
+| an Anthropic tool call cut at `{"items": [1, 2, 3` | -- | it ran, with `{"items": [1, 2, 3]}` |
+| a resumed Pass 2 whose stored answer was cut | 1 | the parse corrective, "Your last response did not parse as valid JSON" |
+
+- **Two branches read the signal, and only for tool arguments.** The OpenAI-compatible branch kept
+  `finish_reason` and the ChatGPT branch mapped `incomplete_details` to it, both for §33 W4's
+  "cut off by the response token limit" refusal of a call whose arguments did not parse. Anthropic's
+  `stop_reason` and Google's `finish_reason` were never read, and `ModelResponse` had no field for
+  any of them.
+- **The loop called every reply with no tool call `complete`**, so `_check_not_truncated` returned
+  at once, and the proposal's premise needed one correction: that check lets a truncated pass WITH
+  text continue, so a stop reason alone would still have reached the parse corrective.
+- **The Anthropic SDK builds a tool call's input from partial JSON as it streams** (jiter's partial
+  mode), measured on the pinned 2.5.0: a string cut short is dropped, and an array cut short is kept
+  as if it were whole. A cut call reached dispatch as a dict.
+- **A resume re-checks a stored answer with no model call**, and a cut one does not parse, so it
+  was sent the corrective OC1 rules out.
+
+### Decisions (OC1, OC4, OC5, OC6, OC7)
+
+| # | Decision |
+|---|---|
+| **OC1** | **A reply the output ceiling ended is `max_tokens`, not `complete`, and a JSON answer it cut is used if it still parses and otherwise fails naming the ceiling, never sent the parse corrective** (owner: one field mapped from four spellings; fail now; in the shared loop). `ModelResponse.finish_reason` is `"length"` (`OUTPUT_CEILING`) when Anthropic says `max_tokens`, Google `MAX_TOKENS`, the OpenAI-compatible wire `length` or the Responses API an incomplete `max_output_tokens`, and None for any other ending; the loop gives a reply with no tool call that carries it `stop_reason = "max_tokens"`, named for the key a person raises. `stream_until_json`, which the passes share with §20's reviewer, judges a cut answer, first or corrective: used if it parses and passes its check, with a trace line, and otherwise `CutOffAnswer`, a ValueError, `Pass 2's reply was cut off at the 16,000-token output ceiling (max_tokens in config.yaml) before it finished, and what it returned is not usable (...). It was not asked again: at the same ceiling it would be cut in the same place. Raise max_tokens in config.yaml first.` A prose pass cut with text is traced as `TRUNCATED (max_tokens)` and continues (owner: the locked rule kept), and any pass cut with no text fails naming the ceiling. |
+| **OC4** | **The cut is read before §95's reasoning-only ask** (owner; new). A reply that spent the ceiling reasoning would spend the ask's step the same way, so it ends on `max_tokens` at once: a pass fails, and a chat turn ends with its stopped-early line. A reply that finished keeps §95's one ask. |
+| **OC5** | **An Anthropic tool call the ceiling cut is refused as §33 W4 refuses one** (owner; new). When a reply ends on `max_tokens` with a `tool_use` as its last block, that call gets W4's error and an empty input and is never dispatched; a call that finished before the cut keeps its input. The OpenAI-compatible and ChatGPT branches already refused a cut call, because a cut `arguments` string does not parse. |
+| **OC6** | **The stored turn records the cut, and a resume asks once in the same thread for the whole answer** (owner; new). The assistant row's content carries `finish_reason` only when the reply was cut, so every other row is written and reconstructs as before; `resume.thread_tail` reads it as `"cut"`, and the pass sends `CUT_ANSWER_ASK` ("Your last answer was cut off by the output token limit before it finished ...") through its own entry point, keeping the tool results it gathered, at the ceiling now configured. Cut again, it fails as the first one did. |
+| **OC7** | **Both shells' stopped-early line names the ceiling and its key** (owner; new): `[stopped early: max_tokens — the reply reached the 16,000-token output ceiling (max_tokens in config.yaml)]`, with the CLI's billed and ctx figures after it. `stop_note` is the one copy. |
+
+OC1 is the proposal's in substance. The mapping, the rule's place in the shared loop and the prose
+pass's treatment (OC1), and OC4-OC7 are the owner's choices (batch 289).
+
+### What §104 deliberately does not change
+
+- **Batching (OC2, OC3).** The JSON passes still take every claim in one call, so the researcher's
+  63-claim Pass 3a now fails at once naming the ceiling instead of after three calls. Raising
+  `max_tokens` is the remedy until §106 makes batching affordable.
+- **`max_tokens` itself**, at 16,000, and `max_json_retries`, at 2.
+- **The corrective for an answer that finished.** A complete reply that does not parse is corrected
+  as before.
+- **A cut reply with a tool call.** The turn takes its next step, the cut call answered with W4's
+  error, as it always was on the OpenAI-compatible wire.
+
+### Measured after (batch 289)
+
+The same stand-in on the branch:
+
+| the reply | requests | what happened |
+|---|---|---|
+| Pass 2's JSON, cut on every attempt | 1 | `CutOffAnswer`, naming the ceiling, with no parse-corrective line |
+| Pass 1, the whole ceiling spent reasoning | 1 | `Pass 1 ended on 'max_tokens' with no text: its reply reached the ... output ceiling` |
+| a chat turn, cut | 1 | `max_tokens` |
+| an Anthropic tool call cut at `{"items": [1, 2, 3` | -- | refused: input `{}`, W4's error |
+| a resumed Pass 2 whose stored answer was cut | 1 | `CUT_ANSWER_ASK` |
+
+### Built (batch 289)
+
+- **`core/client.py`**: `ModelResponse.finish_reason`, `OUTPUT_CEILING`, `output_ceiling()`,
+  `_cut_arguments` (W4's wording in one copy), `_google_cut`, and the field set in all four
+  branches; the Anthropic branch's refusal of a cut call.
+- **`core/loop.py`**: `MAX_TOKENS_STOP` in the no-call branch, above §95's ask; `stop_note`.
+- **`core/events.py`**: `max_tokens`, the fifth value of `stop_reason`.
+- **`core/reasoning/json_retry.py`**: `CutOffAnswer` and the cut rule in `stream_until_json`.
+- **`core/reasoning/orchestrator.py`**: `_check_not_truncated`'s `max_tokens` wording and its
+  `json_answer`; `CUT_ANSWER_ASK` and the `"cut"` case of `_resumed_attempt`.
+- **`core/reasoning/resume.py`**, **`core/memory.py`**, **`storage.py`**: the cut recorded on the
+  stored turn and read back; `tests/conftest.py`'s `FakeStorage` mirrors it.
+- **`main.py`** and **`tui/app.py`**: the stopped-early line.
+
+Tests: `tests/test_output_ceiling.py`, with additions to `tests/test_chatgpt_client.py` and
+`tests/test_sdk_conformance.py`:
+- each branch's own spelling through an SDK double, every other ending as not cut, and Google's last
+  chunk that says; the pinned SDKs asked for each spelling, Google's reader with the real enum;
+- the cut Anthropic call refused and logged, a call before it kept, a reply that ended on its calls
+  run whole;
+- the loop: a cut reply on `max_tokens` after one call, cut reasoning not asked again, uncut
+  reasoning still asked once, a cut reply with a call running on, and the spend cap read first;
+- the JSON loop: a cut answer failing with no corrective sent, kept as the cause, used and traced
+  when it parses, failed when it is the wrong shape, a cut corrective reply ending the retries, the
+  last attempt either way, an answer that finished corrected as before, and §20's reviewer;
+- the pass check's wording for a prose pass, an empty pass, a JSON pass, and the other stops;
+- the pipeline through the real loop: a cut Pass 2 failing the run after one call, the same from the
+  wire, and its uncut control corrected; a cut Pass 1 feeding Pass 2; one that spent the ceiling
+  thinking failing at once;
+- the cut stored, decoded only when written, read as `"cut"`, never sent to a provider; a resumed cut
+  pass asking once in its own thread, failing when cut again, and a finished answer still resuming
+  with no call;
+- both shells' line, and no ceiling on another stop.
+
+Against 0.3.30's code, 35 of the new tests fail, every one on an assertion; the 39 that pass there
+are the controls and the endings that are not cuts. The mutation result is in `DEVLOG.md`.
+
+### Gap register (§104)
+
+- **The JSON passes still answer for every claim in one call** (OC2, OC3), so a long Pass 3a is cut
+  where it always was; it now fails at once and says which setting to raise.
+- **Google's function calls are not checked.** A Google reply that ends on `MAX_TOKENS` with a call
+  in it runs the call: the wire hands calls over whole, and no cut one has been seen.
+- **A subagent cut by the ceiling** returns its text to its parent with nothing saying it was cut;
+  only the parent's own reply is read.
+- **Anthropic's `model_context_window_exceeded`** is not mapped: that reply was cut by the context
+  window, which raising `max_tokens` does not help, and it ends `complete` as before.
+- **Nothing has seen a live cut** through this code. The branches' spellings are the pinned SDKs'
+  own, and the cases above are offline.
+- **The wiki** (a separate repository) does not describe the stop.
 
 ---
 

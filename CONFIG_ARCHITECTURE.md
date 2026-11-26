@@ -220,6 +220,15 @@ enabled. There is no default cumulative budget for it to interact with any
 more (batch 27, #4): spend is uncapped unless settings.json
 max_token_budget says otherwise.
 
+A reply that reaches it is reported since ROADMAP_v3 §104 (batch 289), in
+every provider's spelling: a chat turn ends `[stopped early: max_tokens --
+the reply reached the 16,000-token output ceiling (max_tokens in
+config.yaml)]`, a research pass's JSON answer it cut is used only if it
+still parses and otherwise fails the pass naming this key, and a resume
+after raising it asks the pass once for the whole answer. It is the remedy
+for a JSON pass that answers for many claims in one call until §104's
+batching (OC2) is built.
+
 ## Loop control
 
 ### `max_iterations`

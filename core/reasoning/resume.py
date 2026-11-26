@@ -239,6 +239,11 @@ def thread_tail(thread_id) -> tuple:
       ("answer", text)   its last row is an answer -- an assistant turn
                          that asked for no tool. The pass returned it, and
                          it may be checked again with no model call.
+      ("cut", text)      that answer, recorded as one the output ceiling
+                         ended (ROADMAP_v3 §104, OC6). Checking it again
+                         would send the parse corrective for an answer that
+                         was unfinished rather than malformed, so the pass
+                         asks for it once more instead.
       ("pending", None)  its last row is anything else: a request, a tool
                          result, a call left unanswered. The run stopped
                          before the model replied, so the loop resends.
@@ -249,7 +254,10 @@ def thread_tail(thread_id) -> tuple:
         return ("missing", None)
     last = rows[-1]
     if last.get("role") == "assistant" and not last.get("tool_calls"):
-        return ("answer", last.get("text") or "")
+        from core.client import OUTPUT_CEILING
+        kind = ("cut" if last.get("finish_reason") == OUTPUT_CEILING
+                else "answer")
+        return (kind, last.get("text") or "")
     return ("pending", None)
 
 

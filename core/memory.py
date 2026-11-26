@@ -46,6 +46,7 @@ PERSISTENCE, AND WHY THERE'S NO NORMALIZATION STEP HERE:
 from typing import Optional
 from uuid import UUID
 
+from core.client import OUTPUT_CEILING
 from storage import (
     THREAD_KIND_CHAT,
     create_thread,
@@ -430,6 +431,16 @@ class ConversationMemory:
         thinking = getattr(response, "thinking", None)
         if thinking:
             entry["thinking"] = thinking
+        # ROADMAP_v3 §104 (OC6). A reply the output ceiling ended says so in
+        # its row, so a resume can tell an unfinished answer from a
+        # malformed one. Present ONLY on such a reply, so every other row
+        # is written, and reconstructs, exactly as before; on the entry too,
+        # so a live turn and a resumed one carry the same shape. Nothing
+        # sends it to a provider: translation reads text, calls and
+        # reasoning by name.
+        cut = getattr(response, "finish_reason", None) == OUTPUT_CEILING
+        if cut:
+            entry["finish_reason"] = OUTPUT_CEILING
         self._messages.append(entry)
         # Persist only the assistant-specific payload, not the whole
         # entry -- "role" is already carried by save_message's own
@@ -437,10 +448,13 @@ class ConversationMemory:
         # exactly the redundancy that caused the resume-shape bug. The
         # reasoning has its own column for the same reason: it is not
         # part of what the model said.
+        content = {"text": response.text, "tool_calls": tool_calls}
+        if cut:
+            content["finish_reason"] = OUTPUT_CEILING
         save_message(
             self.thread_id,
             role="assistant",
-            content={"text": response.text, "tool_calls": tool_calls},
+            content=content,
             thinking=thinking,
         )
 

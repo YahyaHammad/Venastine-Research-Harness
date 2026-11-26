@@ -53,12 +53,14 @@ from core import (
 )
 from core.cancel import is_cancelled
 from core.client import (
+    OUTPUT_CEILING,
     ModelResponse,
     accepts_images,
     api_initialization,
     call_model_stream,
     context_window_for,
     effort_for,
+    output_ceiling,
     reasoning_not_echoed,
 )
 from core.events import LoopEvent
@@ -680,6 +682,22 @@ def _already_said(notices, kind: str) -> bool:
     return kind in _ONCE_PER_RUN_NOTICES and any(
         n["kind"] == kind for n in notices)
 
+
+#: ROADMAP_v3 §104 (OC1). The stop reason of a reply the output ceiling ended
+#: with no tool call: named for the config key that sets the ceiling, which
+#: is what a person raises, and the fifth value core/events.py lists.
+MAX_TOKENS_STOP = "max_tokens"
+
+
+def stop_note(stop_reason) -> str:
+    """What both shells' `[stopped early: ...]` line adds to a stop reason
+    (ROADMAP_v3 §104, OC7). For `max_tokens`, the ceiling the reply reached
+    and the key that sets it: the bare reason reads like the turn's spend
+    cap, which is `token_budget_exceeded`, and the remedy is a different
+    setting. Nothing for any other reason."""
+    if stop_reason == MAX_TOKENS_STOP:
+        return f" — the reply reached {output_ceiling()}"
+    return ""
 
 # ROADMAP_v3 §95. A REASONING-ONLY reply: the step returned readable
 # reasoning and neither text nor a tool call. Measured on an
@@ -2282,6 +2300,20 @@ class RunAgentLoop:
                 return
 
             if not response.tool_calls:
+                # ROADMAP_v3 §104 (OC1, OC4). A reply the output ceiling
+                # ended did not finish, so it is not `complete`: a JSON
+                # pass reads this and fails naming the ceiling instead of
+                # sending a parse corrective for an answer it was never
+                # allowed to end. ABOVE §95's ask, because a reply that
+                # spent the ceiling on reasoning would spend the next step
+                # the same way, and the ask is a step.
+                if getattr(response, "finish_reason", None) == OUTPUT_CEILING:
+                    response.stop_reason = MAX_TOKENS_STOP
+                    yield LoopEvent(
+                        final_response=response,
+                        stop_reason=response.stop_reason,
+                    )
+                    return
                 # ROADMAP_v3 §95. Below D20 and the budget stop, so the
                 # reasoning-only step is persisted and paid for exactly
                 # like any other, and a turn already over budget stops
