@@ -330,6 +330,31 @@ class ToolCallRequest:
     parse_error: Optional[str] = None
 
 
+#: ROADMAP_v3 §104 (OC1). The one spelling of "the output ceiling ended this
+#: reply" on a ModelResponse: the OpenAI-compatible wire's own, which
+#: `_tool_arguments` was already reading (§33 W4).
+OUTPUT_CEILING = "length"
+
+
+def output_ceiling() -> str:
+    """The ceiling a cut reply reached, as every message about one names it
+    (ROADMAP_v3 §104, OC1 and OC7): the figure that was sent and the key
+    that sets it. Read when the message is written, so it is the figure the
+    call was made with."""
+    return (f"the {config.MAX_TOKENS:,}-token output ceiling "
+            f"(max_tokens in config.yaml)")
+
+
+def _cut_arguments(tool_name: str) -> str:
+    """§33 W4's refusal of a call the response token limit cut off, in one
+    copy. `_tool_arguments` gives it to an `arguments` string that does not
+    parse, and since ROADMAP_v3 §104 (OC5) the Anthropic branch gives it to
+    the call its reply was cut in."""
+    return (f"The arguments for {tool_name} were cut off by the response "
+            f"token limit, so the call could not be made. Reissue it with "
+            f"shorter arguments.")
+
+
 @dataclass
 class ModelResponse:
     text: str
@@ -392,6 +417,16 @@ class ModelResponse:
     # shown as a count. A cache count needs no entry here: it is put in
     # `usage` only when reported, so its absence already says so.
     usage_unreported: tuple = ()
+    # ROADMAP_v3 §104 (OC1). OUTPUT_CEILING when the provider said its
+    # output ceiling (`max_tokens` in config.yaml) ended this reply, None
+    # for any other ending. Unlike `stop_reason` this IS the provider's,
+    # so call_model_stream sets it, in all four branches and from four
+    # spellings: Anthropic's `max_tokens`, Google's `MAX_TOKENS`, the
+    # OpenAI-compatible `length` and the Responses API's incomplete
+    # `max_output_tokens`. One value rather than four, so no reader has to
+    # know which provider it is reading. The loop turns it into the
+    # `max_tokens` stop on a reply that asked for no tool.
+    finish_reason: Optional[str] = None
     # Batch 44 (§44). The turn's reasoning, as the PROVIDER'S OWN BLOCKS
     # rather than as the text §38 streams for display:
     #
@@ -450,12 +485,8 @@ def _tool_arguments(raw_args: str, tool_name: str,
     try:
         parsed = json.loads(raw_args)
     except json.JSONDecodeError as exc:
-        if finish_reason == "length":
-            return {}, (
-                f"The arguments for {tool_name} were cut off by the response "
-                f"token limit, so the call could not be made. Reissue it with "
-                f"shorter arguments."
-            )
+        if finish_reason == OUTPUT_CEILING:
+            return {}, _cut_arguments(tool_name)
         return {}, (
             f"The arguments for {tool_name} were not valid JSON ({exc.msg}), "
             f"so the call could not be made. Reissue it with valid JSON "
@@ -932,6 +963,14 @@ def _chatgpt_reasoning(model: Optional[str], msg: dict) -> list:
 #: provider or model mid-turn has exactly that. Measured accepted on
 #: gemini-3.1-flash-lite (batch 172); a real signature is always preferred.
 _GOOGLE_FOREIGN_SIGNATURE = b"skip_thought_signature_validator"
+
+
+def _google_cut(reason) -> bool:
+    """Whether a Google candidate's `finish_reason` is the output ceiling
+    (ROADMAP_v3 §104, OC1). The pinned SDK hands back its FinishReason enum,
+    a str whose value is the wire's spelling, so the bare string the stream
+    tests build reads the same as the real one."""
+    return getattr(reason, "value", reason) == "MAX_TOKENS"
 
 
 def _google_signature_block(call_id: str, signature: Optional[bytes]) -> dict:
@@ -2337,7 +2376,7 @@ def _chatgpt_stream(client, model: str, items: list, system_prompt: str,
                         usage[key] = reported
                 details = getattr(response, "incomplete_details", None)
                 if getattr(details, "reason", None) == "max_output_tokens":
-                    finish_reason = "length"
+                    finish_reason = OUTPUT_CEILING
             elif kind == "response.failed":
                 raise _chatgpt_stream_failure(
                     getattr(getattr(event, "response", None), "error", None))
@@ -2372,6 +2411,9 @@ def _chatgpt_stream(client, model: str, items: list, system_prompt: str,
         text="".join(text_parts), tool_calls=calls, usage=usage,
         usage_unreported=unreported,
         thinking=_thinking_record("CHATGPT", model, reasoning_items),
+        # ROADMAP_v3 §104 (OC1). Already mapped from `incomplete_details`
+        # above, where it was read for the tool arguments alone.
+        finish_reason=finish_reason,
     ))
 
 
@@ -2531,10 +2573,31 @@ def call_model_stream(
             text = "\n".join(
                 b.text for b in final_msg.content if b.type == "text"
             )
-            calls = [
-                ToolCallRequest(id=b.id, name=b.name, input=b.input)
-                for b in final_msg.content if b.type == "tool_use"
-            ]
+            # ROADMAP_v3 §104 (OC1, OC5). The SDK builds a tool call's
+            # input from PARTIAL JSON as it streams (jiter's partial mode),
+            # so a call the ceiling cut arrives as a dict and not as an
+            # error: a string cut short is dropped, and an array cut short
+            # is kept as if it were whole -- measured on the pinned SDK,
+            # `{"items": [1, 2, 3` becomes `{"items": [1, 2, 3]}`. Only the
+            # LAST block can be the one cut, and it is refused as W4
+            # refuses a cut string on the OpenAI-compatible wire: it is
+            # answered with the error and never runs.
+            cut = getattr(final_msg, "stop_reason", None) == "max_tokens"
+            last = final_msg.content[-1] if final_msg.content else None
+            calls = []
+            for b in final_msg.content:
+                if b.type != "tool_use":
+                    continue
+                if cut and b is last:
+                    parse_error = _cut_arguments(b.name)
+                    logger.warning("%s: %s (stop_reason='max_tokens')",
+                                   b.name, parse_error)
+                    calls.append(ToolCallRequest(
+                        id=b.id, name=b.name, input={},
+                        parse_error=parse_error))
+                else:
+                    calls.append(ToolCallRequest(
+                        id=b.id, name=b.name, input=b.input))
             # model_dump() rather than a hand-built dict: what goes back on
             # the wire has to be what came off it, field for field, or the
             # signature does not verify. redacted_thinking is included for
@@ -2588,6 +2651,7 @@ def call_model_stream(
             text=text, tool_calls=calls, usage=usage,
             usage_unreported=unreported,
             thinking=_thinking_record(provider_name, model, thinking_blocks),
+            finish_reason=OUTPUT_CEILING if cut else None,
         ))
         return
 
@@ -2619,6 +2683,7 @@ def call_model_stream(
         # and thoughts are generated and billed as output, so the rate and
         # `billed` read short by them on a thinking model until this batch.
         google_counts = dict.fromkeys(_GOOGLE_COUNTS)
+        google_finish = None
 
         for chunk in client.models.generate_content_stream(
             model=model,
@@ -2626,6 +2691,12 @@ def call_model_stream(
             config=genai_types.GenerateContentConfig(**genai_config_kwargs),
         ):
             candidate = chunk.candidates[0] if chunk.candidates else None
+            # ROADMAP_v3 §104 (OC1). The last chunk to carry one says how
+            # the reply ended; getattr for the bare namespaces the stream
+            # tests build candidates from.
+            ended = getattr(candidate, "finish_reason", None)
+            if ended is not None:
+                google_finish = ended
             content = candidate.content if candidate else None
             # `or []`: Content.parts is Optional on the pinned type, and a
             # chunk can carry a content with no parts at all.
@@ -2686,6 +2757,8 @@ def call_model_stream(
             text="".join(text_parts), tool_calls=calls, usage=usage,
             usage_unreported=unreported,
             thinking=_thinking_record(provider_name, model, signatures),
+            finish_reason=(OUTPUT_CEILING if _google_cut(google_finish)
+                           else None),
         ))
         return
 
@@ -2844,6 +2917,8 @@ def call_model_stream(
         text="".join(text_parts), tool_calls=calls, usage=usage,
         usage_unreported=unreported,
         thinking=_thinking_record(provider_name, model, reasoning_blocks),
+        finish_reason=(OUTPUT_CEILING if finish_reason == OUTPUT_CEILING
+                       else None),
     ))
 
 

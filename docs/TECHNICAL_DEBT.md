@@ -6642,7 +6642,7 @@ toast and the traceback in the log are what the re-raise buys, and batch 78
 put the logging there on purpose, so the change needs that weighed rather than
 assumed.
 
-## 122. A JSON pass cut off by the provider's output limit is corrected as malformed JSON (open, found batch 269)
+## 122. A JSON pass cut off by the provider's output limit is corrected as malformed JSON (closed, batch 289 -- ROADMAP_v3 §104)
 
 **Found reading the owner's failed Pass 3a for ROADMAP_v3 §98.** Its second
 answer was a 15,322-character array that ended mid-string, after 218,784
@@ -6662,6 +6662,21 @@ on each branch that reports one, so `_check_not_truncated` traces it, and a
 JSON pass's retry can say "your answer was cut off" rather than "your JSON
 did not parse". It needs each branch measured for what its SDK reports,
 which is why it is not part of §98.
+
+**CLOSED (batch 289), as ROADMAP_v3 §104, with the second half reshaped on
+the owner's choice.** Each branch's spelling was asked of its pinned SDK
+(Anthropic `max_tokens`, Google `MAX_TOKENS`, OpenAI-compatible `length`,
+Responses `max_output_tokens`) and mapped to `ModelResponse.finish_reason`,
+and the loop stops a reply with no tool call that carries it on
+`max_tokens`. A JSON pass's cut answer is not told it was cut and asked
+again: at the same ceiling that meets the same limit, so it is used only if
+it still parses and otherwise fails the pass naming `max_tokens` in
+config.yaml (OC1). Measured on main before the change, through the real
+OpenAI-compatible branch, loop and pass: a Pass 2 cut on every attempt was
+three requests and a parse failure; after, one request and the ceiling
+named. Whether the owner's provider sent `length` on the run that found
+this is still not measured: that run's record kept no finish reason. A cut
+turn's row records one now (OC6).
 
 ## 123. Every call in a long pass resends the pass's whole thread, reasoning included (open, found batch 270)
 

@@ -1490,3 +1490,46 @@ def test_an_empty_key_builds_a_REAL_client_for_a_local_server(monkeypatch):
             client._client_cache.clear()
     assert keyless.api_key == client.KEYLESS
     assert keyed.api_key == "sk-test-not-real", "a real key is untouched"
+
+
+# ---- ROADMAP_v3 §104 (OC1): four spellings of "the output ceiling" ---------
+#
+# Each provider branch maps its own value to `finish_reason == "length"`, and
+# a value an SDK renamed would leave a cut reply `complete` with nothing
+# failing (D22). So each spelling the branches compare against is asked of
+# the pinned package, and Google's reader is driven with the real enum.
+
+def test_anthropic_still_spells_the_ceiling_max_tokens():
+    import typing
+
+    with real_package("anthropic", "httpx"):
+        from anthropic.types import StopReason
+
+        assert "max_tokens" in typing.get_args(StopReason)
+
+
+def test_google_still_spells_it_max_tokens_and_the_reader_takes_the_enum():
+    with real_package("google", "httpx"):
+        from google.genai import types as genai_types
+
+        import core.client as client
+
+        assert client._google_cut(genai_types.FinishReason.MAX_TOKENS)
+        assert client._google_cut(
+            genai_types.Candidate(finish_reason="MAX_TOKENS").finish_reason)
+        assert not client._google_cut(genai_types.FinishReason.STOP)
+
+
+def test_openai_still_spells_it_length_and_max_output_tokens():
+    import typing
+
+    with real_package("openai", "httpx"):
+        from openai.types.chat.chat_completion_chunk import Choice
+        from openai.types.responses.response import IncompleteDetails
+
+        chunk = typing.get_args(typing.get_args(
+            Choice.model_fields["finish_reason"].annotation)[0])
+        incomplete = typing.get_args(typing.get_args(
+            IncompleteDetails.model_fields["reason"].annotation)[0])
+        assert "length" in chunk
+        assert "max_output_tokens" in incomplete

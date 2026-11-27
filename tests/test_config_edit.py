@@ -431,8 +431,10 @@ class TestWhatChangedIsReportedHonestly:
         _copy_config(tmp_path, monkeypatch)
         config_edit.forget_document()
         one = config_edit.propose("max_tokens", 18000)
+        # Line 51 since batch 289, whose two comment lines above the key
+        # say what a reply that reaches it does (ROADMAP_v3 §104).
         assert [(n, a, b) for n, a, b in one.lines] == [
-            (49, "max_tokens: 16000", "max_tokens: 18000")]
+            (51, "max_tokens: 16000", "max_tokens: 18000")]
 
 
 class TestTheTablesCanBeAskedAbout:

@@ -46,6 +46,8 @@ model_name: claude-sonnet-5
 # Per-call OUTPUT ceiling, sent as max_tokens / max_output_tokens /
 # max_completion_tokens. On current Anthropic models it bounds thinking
 # and response text together, so effort spends from the same budget.
+# A reply that reaches it ends on `max_tokens`, and a research pass whose
+# JSON answer it cut fails naming this key rather than being asked again.
 max_tokens: 16000
 
 # The default step ceiling: every chat turn, every research pass, and any

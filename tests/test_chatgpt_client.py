@@ -330,6 +330,24 @@ class TestTheStream:
         assert "cut off by the response token limit" in \
             final.tool_calls[0].parse_error
 
+    @pytest.mark.parametrize("reason,cut", [
+        ("max_output_tokens", "length"), ("content_filter", None)])
+    def test_a_reply_the_output_limit_ended_says_so(self, reason, cut):
+        """ROADMAP_v3 §104 (OC1): the signal the arguments above read, for
+        the reply itself, in the one spelling every branch uses."""
+        plan = Plan([
+            ev("response.output_text.delta", delta="half an answ"),
+            ev("response.incomplete", response=SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=5, output_tokens=16000),
+                incomplete_details=SimpleNamespace(reason=reason)))])
+        _, final = drain(plan)
+        assert final.text == "half an answ"
+        assert getattr(final, "finish_reason", None) == cut
+
+    def test_a_reply_that_completed_is_not_cut(self):
+        _, final = drain(Plan(answer()))
+        assert getattr(final, "finish_reason", None) is None
+
     def test_a_call_without_a_call_id_gets_one(self):
         call = Item(type="function_call", call_id=None, name="get_time",
                     arguments="{}")

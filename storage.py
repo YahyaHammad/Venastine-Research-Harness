@@ -747,6 +747,11 @@ def _to_neutral(msg: dict) -> dict:
         thinking = _decode_thinking(msg.get("thinking"))
         if thinking is not None:
             payload["thinking"] = thinking
+        # ROADMAP_v3 §104 (OC6), on §44's terms: present ONLY when the row
+        # was a reply the output ceiling ended, the one value it is
+        # written with, so every other row reconstructs as it always has.
+        if decoded.get("finish_reason") == "length":
+            payload["finish_reason"] = "length"
     elif role == "tool":
         # decoded is the plain result string add_tool_result persisted.
         payload = {"role": "tool", "tool_call_id": msg["tool_call_id"], "content": decoded}

@@ -33726,3 +33726,109 @@ returns a real `httpx.Response`:
 - Other 4xx answers are not remembered.
 - Nothing has seen a live 429.
 - The wiki does not describe the key or the new setting.
+
+## Batch 289 -- a reply the output ceiling cut off is reported as cut, and a JSON pass is no longer asked to finish it again (ROADMAP_v3 §104, OC1, OC4, OC5, OC6, OC7) (2026-11-26)
+
+**Asked.** "Lets take another roadmap item." The open ones were the researcher-feedback proposals
+§104, §106, §109, §111, §112, §114, §115 and §116, with OA2, AD3, WT4 and §60. Asked which, the
+owner chose §104's OC1, the one the document's sequencing marks "now", over §115's ME2, §106 and OA2.
+
+**Checked first.** Read, then measured on `main` (`f0373aa`, 0.3.30) through the real
+OpenAI-compatible branch, loop and pass, with only the SDK replaced by a stand-in that streams the
+chunks a provider would:
+- **Two branches read the provider's "the ceiling ended this reply", and only for tool
+  arguments.** The OpenAI-compatible branch kept `finish_reason`, and the ChatGPT branch mapped
+  `incomplete_details` to it, both for §33 W4's refusal of a call whose arguments did not parse.
+  Anthropic's `stop_reason` and Google's `finish_reason` were never read, and `ModelResponse` had
+  no field for any of them.
+- **A Pass 2 answer cut on every attempt was three requests**: two "JSON parse failed ... retrying
+  with corrective message" lines, then `Response did not return valid JSON: Unterminated string`.
+  Each corrective asked for the same answer at the same ceiling.
+- **A Pass 1 that spent the ceiling reasoning was six requests**: three attempts, each with §95's
+  ask. A chat turn cut at the ceiling was `complete`.
+- **The proposal's premise needed a correction.** It said `_check_not_truncated` "already handles a
+  non-`complete` stop"; it lets a truncated pass WITH text continue, so a `max_tokens` stop alone
+  would still have reached the parse corrective.
+- **The Anthropic SDK builds a tool call's input from partial JSON as it streams** (jiter's partial
+  mode), measured on the pinned 2.5.0: `{"path": "a.txt", "content": "half a fi` is
+  `{"path": "a.txt"}`, and `{"items": [1, 2, 3` is `{"items": [1, 2, 3]}`, an array cut short and
+  kept as if whole. Through the branch, a call cut there ran with `[1, 2, 3]`.
+- **A resume re-checks a stored answer with no model call**, so a resumed cut pass was sent the
+  parse corrective.
+- The pinned SDKs' spellings, read from their types: Anthropic `StopReason` has `max_tokens` (and
+  `model_context_window_exceeded`), google-genai's `FinishReason.MAX_TOKENS` is a str enum whose
+  value is `"MAX_TOKENS"`, openai's chunk `finish_reason` has `length`, and the Responses
+  `IncompleteDetails.reason` has `max_output_tokens`.
+
+**Settled with the owner.** Two rounds, the recommended option each time:
+- OC1: one field, `finish_reason == "length"`, mapped from the four spellings; a JSON answer it cut
+  is used if it still parses and validates and otherwise fails at once naming the ceiling, with no
+  parse corrective; the rule in `stream_until_json`, the loop the passes share with §20's
+  reviewer; a prose pass cut with text traced and used, the locked rule kept.
+- OC4 (new): the cut is read before §95's reasoning-only ask.
+- OC5 (new): an Anthropic tool call the ceiling cut is refused as W4 refuses one.
+- OC6 (new): the stored turn records the cut, and a resume asks once in the same thread for the
+  whole answer.
+- OC7 (new): both shells' stopped-early line names the ceiling and its key.
+
+**Built.**
+- `core/client.py`: `ModelResponse.finish_reason`, `OUTPUT_CEILING`, `output_ceiling()`,
+  `_cut_arguments` (W4's wording, one copy), `_google_cut`, the field in all four branches, and the
+  Anthropic branch's refusal of a cut last call.
+- `core/loop.py`: `MAX_TOKENS_STOP` in the no-call branch, above §95's ask; `stop_note`.
+- `core/events.py`: `max_tokens` as the fifth `stop_reason`.
+- `core/reasoning/json_retry.py`: `CutOffAnswer` and the cut rule in `stream_until_json`, for the
+  first answer and each corrective reply.
+- `core/reasoning/orchestrator.py`: `_check_not_truncated`'s `max_tokens` case and `json_answer`;
+  `CUT_ANSWER_ASK` and `_resumed_attempt`'s `"cut"` case.
+- `core/memory.py`, `storage.py`, `core/reasoning/resume.py`: the cut on the stored turn, only
+  when cut, and `thread_tail`'s `"cut"`.
+- `main.py`, `tui/app.py`: the stopped-early line. `config.yaml`'s comment on `max_tokens` and
+  `CONFIG_ARCHITECTURE.md` say what a reply that reaches it does.
+- TECHNICAL_DEBT 122, found in batch 269, is closed.
+
+**Changed in the tests.**
+- `tests/test_output_ceiling.py` (62); three in `tests/test_chatgpt_client.py`; three in
+  `tests/test_sdk_conformance.py` asking the pinned SDKs for each spelling and driving Google's
+  reader with the real enum, which the root conftest's `google.genai` stub does not have.
+- `tests/conftest.py`'s `FakeStorage` mirrors the stored cut.
+- `test_a_one_line_change_is_one_line` reads `max_tokens` at line 51, below the two new comment
+  lines: the first full run caught it.
+- `tests/BREAKING_CHANGES.md` has a row for each.
+
+**Verified.**
+- Full suite on Windows with `AGENT_WORKSPACE` unset, in a venv built from the pins, on the
+  batch's first commit `7648c32`, which adds `test_output_ceiling.py`: 3 failed, 10773 passed, 89
+  skipped (10865) in 13:30. Its one warning is the deliberately duplicated name in a hostile test
+  archive. The final commit fixes the one failure the batch caused and adds nothing else to the
+  suite.
+- The first full run, on `7648c32`, was 3 failed, 10773 passed, 89 skipped in 13:30, with the
+  machine loaded by other programs: the line-number pin above, and two `discrete_math` calls past
+  their 20 s limit (`test_an_ordinary_call_still_returns_its_result`,
+  `test_every_compute_tool_survives_the_boundary`), which passed alone in 39 s. The batch touches
+  no tool code.
+- 47 deliberate breaks, one per line of the new code that carries a decision -- each branch's
+  spelling and field, the cut Anthropic call, the loop's stop and its place above §95's ask, the
+  shared JSON loop's first, corrective and last attempts, the pass check, the stored mark written
+  and decoded, the resume, and both shells' line. All 47 were killed by failed assertions on the
+  first pass, none by an error. The control was 417 tests across ten files.
+- Against `f0373aa`'s production files, 35 of the new tests fail, every one on an assertion; the
+  39 that pass there are the controls and the endings that are not cuts. Two helpers were made to
+  fail by assertion rather than by IndexError and KeyError on the old code.
+- The same stand-in on the branch: the cut Pass 2 is one request and `CutOffAnswer` naming the
+  ceiling, the Pass 1 that spent it reasoning one request, the chat turn `max_tokens`, the cut
+  Anthropic call refused with input `{}`, and the resumed cut pass sends `CUT_ANSWER_ASK`.
+- ruff is clean. bandit 1.9.4 finds nothing outside the baseline, and
+  `scripts/bandit-count-check.py` reports that no count grew. gitleaks 8.30.1 with CI's config finds
+  nothing in an export of the tracked files, and pip-audit is clean on both requirements files. No
+  workflow or requirements file is in the diff.
+
+**Not done** (§104's gap register):
+- OC2 and OC3, batching the JSON passes, wait on §106; a long Pass 3a now fails at once naming the
+  setting to raise.
+- A Google reply that ends on `MAX_TOKENS` with a function call runs the call; no cut one has been
+  seen.
+- A subagent cut by the ceiling returns its text to its parent unmarked.
+- Anthropic's `model_context_window_exceeded` is not mapped.
+- Nothing has seen a live cut through this code.
+- The wiki does not describe the stop.

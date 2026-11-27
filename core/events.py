@@ -98,7 +98,13 @@ class LoopEvent:
     retract: Optional[dict] = None
     final_response: Optional[Any] = None          # ModelResponse on terminal event
     # "complete" | "max_steps_reached" | "token_budget_exceeded" |
-    # "cancelled"
+    # "cancelled" | "max_tokens"
+    #
+    # ROADMAP_v3 §104 (OC1) added the fifth, on §61's terms: no field. It is
+    # a reply the provider's OUTPUT ceiling ended before it finished, with
+    # no tool call -- `max_tokens` in config.yaml, which bounds one call,
+    # where `token_budget_exceeded` is the turn's spend cap. A JSON pass
+    # fails on it naming that ceiling; a prose pass traces it and continues.
     #
     # ROADMAP_v3 §61 (CN3) added the fourth, and added NO field: this
     # comment is the only place the set is written down, so a value

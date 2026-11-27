@@ -2009,6 +2009,9 @@ class FakeStorage:
                 thinking = row.get("thinking")
                 if isinstance(thinking, dict) and thinking.get("blocks"):
                     payload["thinking"] = thinking
+                # ROADMAP_v3 §104 (OC6), mirroring storage._to_neutral.
+                if content.get("finish_reason") == "length":
+                    payload["finish_reason"] = "length"
             elif role == "tool":
                 payload = {"role": "tool", "tool_call_id": row["tool_call_id"], "content": content}
                 # ROADMAP_v3 §81 (IM2), mirroring storage._decode_images
